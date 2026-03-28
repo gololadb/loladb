@@ -1,0 +1,37 @@
+# Compiled binaries
+loladb
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test data
+pagila-schema.sql
+pagila-data.sql
+
+# Database files
+*.lodb
+*.lodb.wal
+
+# Go build/test artifacts
+*.test
+*.out
+*.prof
+*.pprof
+coverage.html
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS
+.DS_Store
+
+# Temporary
+/tmp/
