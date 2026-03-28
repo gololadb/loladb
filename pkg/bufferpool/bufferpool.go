@@ -7,7 +7,10 @@ import (
 	"github.com/jespino/loladb/pkg/pageio"
 )
 
-const DefaultPoolSize = 256
+// DefaultPoolSize is the default number of frames in the buffer pool.
+// PostgreSQL uses shared_buffers = 128MB (32768 pages of 8KB).
+// We use 4096 frames (16MB with 4KB pages) as a reasonable default.
+const DefaultPoolSize = 4096
 
 // frame holds one cached page in the buffer pool.
 type frame struct {

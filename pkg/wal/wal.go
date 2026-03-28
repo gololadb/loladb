@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -23,10 +24,17 @@ type Record struct {
 const headerSize = 4 + 4 + 4 + 2 + 2 // LSN + XID + PageNum + Offset + Len = 16 bytes
 
 // WAL is an append-only write-ahead log backed by a file.
+//
+// Following PostgreSQL's approach, WAL records are buffered in memory
+// and only fsynced to disk when Sync() is called explicitly (typically
+// at transaction commit or checkpoint). This avoids an fsync syscall
+// per record, which is the main performance bottleneck.
 type WAL struct {
 	mu      sync.Mutex
 	file    *os.File
+	writer  *bufio.Writer
 	nextLSN uint32
+	dirty   bool // records written but not yet fsynced
 }
 
 // Open opens (or creates) a WAL file. If the file already contains
@@ -56,11 +64,14 @@ func Open(path string) (*WAL, error) {
 		return nil, fmt.Errorf("wal: seek to end: %w", err)
 	}
 
+	w.writer = bufio.NewWriterSize(f, 64*1024) // 64KB write buffer
 	return w, nil
 }
 
-// Append writes a WAL record and fsyncs the WAL file. It assigns
-// and returns the LSN for the new record.
+// Append writes a WAL record to the buffer. The record is NOT fsynced
+// to disk — call Sync() to ensure durability (typically at commit).
+// This follows PostgreSQL's approach where WAL writes are buffered
+// and fsynced only at commit boundaries.
 func (w *WAL) Append(xid, pageNum uint32, offset, length uint16, data []byte) (uint32, error) {
 	if int(length) != len(data) {
 		return 0, fmt.Errorf("wal: length %d does not match data size %d", length, len(data))
@@ -82,19 +93,46 @@ func (w *WAL) Append(xid, pageNum uint32, offset, length uint16, data []byte) (u
 	}
 
 	buf := serializeRecord(&rec)
-	if _, err := w.file.Write(buf); err != nil {
+	if _, err := w.writer.Write(buf); err != nil {
 		return 0, fmt.Errorf("wal: write record LSN %d: %w", lsn, err)
 	}
-	if err := w.file.Sync(); err != nil {
-		return 0, fmt.Errorf("wal: sync after LSN %d: %w", lsn, err)
-	}
+	w.dirty = true
 	return lsn, nil
 }
 
+// Sync flushes the WAL buffer to the OS and fsyncs the file to stable
+// storage. This is the durability guarantee — after Sync returns, all
+// previously appended records are on disk. Call this at transaction
+// commit or checkpoint.
+func (w *WAL) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if !w.dirty {
+		return nil
+	}
+	if err := w.writer.Flush(); err != nil {
+		return fmt.Errorf("wal: flush buffer: %w", err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("wal: fsync: %w", err)
+	}
+	w.dirty = false
+	return nil
+}
+
 // ReadAll returns every record currently in the WAL file, in order.
+// It flushes the buffer first to ensure all records are readable.
 func (w *WAL) ReadAll() ([]Record, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	// Flush buffer so all records are on disk for reading.
+	if w.dirty {
+		if err := w.writer.Flush(); err != nil {
+			return nil, err
+		}
+	}
 	return w.readAll()
 }
 
@@ -124,12 +162,16 @@ func (w *WAL) Truncate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Reset the buffer since we're truncating.
+	w.writer.Reset(w.file)
 	if err := w.file.Truncate(0); err != nil {
 		return fmt.Errorf("wal: truncate: %w", err)
 	}
 	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("wal: seek after truncate: %w", err)
 	}
+	w.writer.Reset(w.file)
+	w.dirty = false
 	return w.file.Sync()
 }
 
@@ -140,10 +182,13 @@ func (w *WAL) NextLSN() uint32 {
 	return w.nextLSN
 }
 
-// Close closes the WAL file.
+// Close flushes the buffer and closes the WAL file.
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.dirty {
+		w.writer.Flush()
+	}
 	return w.file.Close()
 }
 

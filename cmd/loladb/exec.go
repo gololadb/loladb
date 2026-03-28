@@ -10,7 +10,7 @@ import (
 )
 
 func runExec(path, sqlStr string) {
-	eng, err := engine.Open(path, 256)
+	eng, err := engine.Open(path, 0)
 	if err != nil {
 		fatal(fmt.Sprintf("Failed to open database: %v", err))
 	}

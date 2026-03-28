@@ -13,7 +13,7 @@ func runCreate(path string) {
 		fatal(fmt.Sprintf("File already exists: %s", path))
 	}
 
-	eng, err := engine.Open(path, 256)
+	eng, err := engine.Open(path, 0)
 	if err != nil {
 		fatal(fmt.Sprintf("Failed to create database: %v", err))
 	}

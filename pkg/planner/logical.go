@@ -198,5 +198,40 @@ type LogicalExplain struct {
 	Analyze bool
 }
 
-func (n *LogicalExplain) String() string        { return fmt.Sprintf("Explain(%s)", n.Child) }
+func (n *LogicalExplain) String() string         { return fmt.Sprintf("Explain(%s)", n.Child) }
 func (n *LogicalExplain) OutputColumns() []string { return []string{"plan"} }
+
+// LogicalNoOp represents a statement that is acknowledged but performs
+// no real work (e.g., SET, unsupported DDL we want to skip gracefully).
+type LogicalNoOp struct {
+	Message string // human-readable description of what was acknowledged
+}
+
+func (n *LogicalNoOp) String() string         { return fmt.Sprintf("NoOp(%s)", n.Message) }
+func (n *LogicalNoOp) OutputColumns() []string { return nil }
+
+// LogicalCreateSequence represents CREATE SEQUENCE.
+type LogicalCreateSequence struct {
+	Name string
+}
+
+func (n *LogicalCreateSequence) String() string         { return fmt.Sprintf("CreateSequence(%s)", n.Name) }
+func (n *LogicalCreateSequence) OutputColumns() []string { return nil }
+
+// LogicalCreateView represents CREATE VIEW.
+type LogicalCreateView struct {
+	Name       string
+	Definition string
+}
+
+func (n *LogicalCreateView) String() string         { return fmt.Sprintf("CreateView(%s)", n.Name) }
+func (n *LogicalCreateView) OutputColumns() []string { return nil }
+
+// LogicalAlterTable represents ALTER TABLE operations.
+type LogicalAlterTable struct {
+	Table    string
+	Commands []string // human-readable descriptions of each ALTER command
+}
+
+func (n *LogicalAlterTable) String() string         { return fmt.Sprintf("AlterTable(%s)", n.Table) }
+func (n *LogicalAlterTable) OutputColumns() []string { return nil }

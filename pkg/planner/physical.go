@@ -198,3 +198,41 @@ type PhysCreateIndex struct {
 func (n *PhysCreateIndex) String() string            { return fmt.Sprintf("CreateIndex %s", n.Index) }
 func (n *PhysCreateIndex) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysCreateIndex) Children() []PhysicalNode  { return nil }
+
+// PhysNoOp is a physical node that produces a message but does no real work.
+type PhysNoOp struct {
+	Message string
+}
+
+func (n *PhysNoOp) String() string            { return fmt.Sprintf("NoOp: %s", n.Message) }
+func (n *PhysNoOp) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysNoOp) Children() []PhysicalNode  { return nil }
+
+// PhysCreateSequence creates a sequence (currently stored as acknowledgement).
+type PhysCreateSequence struct {
+	Name string
+}
+
+func (n *PhysCreateSequence) String() string            { return fmt.Sprintf("CreateSequence %s", n.Name) }
+func (n *PhysCreateSequence) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreateSequence) Children() []PhysicalNode  { return nil }
+
+// PhysCreateView stores a view definition.
+type PhysCreateView struct {
+	Name       string
+	Definition string
+}
+
+func (n *PhysCreateView) String() string            { return fmt.Sprintf("CreateView %s", n.Name) }
+func (n *PhysCreateView) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreateView) Children() []PhysicalNode  { return nil }
+
+// PhysAlterTable represents ALTER TABLE operations.
+type PhysAlterTable struct {
+	Table    string
+	Commands []string
+}
+
+func (n *PhysAlterTable) String() string            { return fmt.Sprintf("AlterTable %s", n.Table) }
+func (n *PhysAlterTable) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysAlterTable) Children() []PhysicalNode  { return nil }

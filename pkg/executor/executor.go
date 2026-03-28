@@ -58,6 +58,14 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execCreateTable(n)
 	case *planner.PhysCreateIndex:
 		return ex.execCreateIndex(n)
+	case *planner.PhysNoOp:
+		return &Result{Message: n.Message}, nil
+	case *planner.PhysCreateSequence:
+		return &Result{Message: fmt.Sprintf("CREATE SEQUENCE %s", n.Name)}, nil
+	case *planner.PhysCreateView:
+		return &Result{Message: fmt.Sprintf("CREATE VIEW %s", n.Name)}, nil
+	case *planner.PhysAlterTable:
+		return &Result{Message: fmt.Sprintf("ALTER TABLE %s", n.Table)}, nil
 	default:
 		return nil, fmt.Errorf("executor: unsupported node %T", node)
 	}

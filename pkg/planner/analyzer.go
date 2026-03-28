@@ -37,6 +37,21 @@ func (a *Analyzer) Analyze(stmt tree.Statement) (LogicalNode, error) {
 			return nil, err
 		}
 		return &LogicalExplain{Child: child}, nil
+	case *tree.SetVar:
+		// SET statements configure client parameters; no-op for us.
+		return &LogicalNoOp{Message: fmt.Sprintf("SET %s", n.Name)}, nil
+	case *tree.AlterTable:
+		return a.analyzeAlterTable(n)
+	case *tree.CreateSequence:
+		seqName := string(n.Name.TableName)
+		return &LogicalCreateSequence{Name: seqName}, nil
+	case *tree.CreateView:
+		viewName := string(n.Name.TableName)
+		definition := n.AsSource.String()
+		return &LogicalCreateView{Name: viewName, Definition: definition}, nil
+	case *tree.Execute:
+		// PL/pgSQL EXECUTE; no-op.
+		return &LogicalNoOp{Message: "EXECUTE"}, nil
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported statement %T", stmt)
 	}
@@ -57,7 +72,9 @@ func (a *Analyzer) analyzeSelect(n *tree.Select) (LogicalNode, error) {
 			return nil, err
 		}
 	} else {
-		return nil, fmt.Errorf("analyzer: SELECT requires FROM")
+		// SELECT without FROM (e.g., SELECT pg_catalog.set_config(...))
+		// Return a no-op that produces an empty result.
+		return &LogicalNoOp{Message: "SELECT"}, nil
 	}
 
 	// WHERE → Filter
@@ -496,6 +513,20 @@ func (a *Analyzer) analyzeCreateIndex(n *tree.CreateIndex) (LogicalNode, error) 
 	}, nil
 }
 
+func (a *Analyzer) analyzeAlterTable(n *tree.AlterTable) (LogicalNode, error) {
+	tableName := n.Table.Parts[0] // Parts[0] is the object name
+	var commands []string
+	for _, cmd := range n.Cmds {
+		switch c := cmd.(type) {
+		case *tree.AlterTableAddConstraint:
+			commands = append(commands, fmt.Sprintf("ADD CONSTRAINT %s", c.ConstraintDef))
+		default:
+			commands = append(commands, fmt.Sprintf("%T", c))
+		}
+	}
+	return &LogicalAlterTable{Table: tableName, Commands: commands}, nil
+}
+
 // --- Helpers ---
 
 func extractTableName(expr tree.TableExpr) string {
@@ -518,15 +549,74 @@ func colNamesUnqualified(cols []catalog.Column) []string {
 }
 
 func mapSQLType(sqlType string) tuple.DatumType {
-	upper := strings.ToUpper(sqlType)
-	switch {
-	case upper == "INT4":
+	upper := strings.ToUpper(strings.TrimSpace(sqlType))
+
+	// Strip any array suffix (e.g., "TEXT[]", "INT[]").
+	if strings.HasSuffix(upper, "[]") {
+		return tuple.TypeText
+	}
+
+	// Strip parenthesized parameters for matching (e.g., "NUMERIC(10,2)" → "NUMERIC").
+	base := upper
+	if idx := strings.IndexByte(base, '('); idx >= 0 {
+		base = strings.TrimSpace(base[:idx])
+	}
+
+	switch base {
+	// Integer types
+	case "INT2", "SMALLINT":
 		return tuple.TypeInt32
-	case upper == "INT8", upper == "INT", upper == "BIGINT", upper == "INTEGER":
+	case "INT4":
+		return tuple.TypeInt32
+	case "INT8", "INT", "BIGINT", "INTEGER":
 		return tuple.TypeInt64
+	case "SERIAL":
+		return tuple.TypeInt64
+	case "BIGSERIAL":
+		return tuple.TypeInt64
+
+	// Floating point / numeric types
+	case "FLOAT4", "REAL":
+		return tuple.TypeFloat64
+	case "FLOAT8", "DOUBLE PRECISION", "DOUBLE":
+		return tuple.TypeFloat64
+	case "NUMERIC", "DECIMAL":
+		return tuple.TypeFloat64
+
+	// Boolean
+	case "BOOL", "BOOLEAN":
+		return tuple.TypeBool
+
+	// Text types
+	case "TEXT", "VARCHAR", "CHAR", "CHARACTER", "CHARACTER VARYING", "STRING", "BPCHAR", "NAME":
+		return tuple.TypeText
+
+	// Date/time types — store as text for now
+	case "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP WITH TIME ZONE":
+		return tuple.TypeText
+	case "DATE":
+		return tuple.TypeText
+	case "TIME", "TIMETZ", "TIME WITHOUT TIME ZONE", "TIME WITH TIME ZONE":
+		return tuple.TypeText
+	case "INTERVAL":
+		return tuple.TypeText
+
+	// Binary
+	case "BYTEA":
+		return tuple.TypeText
+
+	// Full-text search
+	case "TSVECTOR", "TSQUERY":
+		return tuple.TypeText
+	}
+
+	// Substring-based fallbacks for compound types.
+	switch {
 	case strings.Contains(upper, "INT4"):
 		return tuple.TypeInt32
 	case strings.Contains(upper, "INT"):
+		return tuple.TypeInt64
+	case strings.Contains(upper, "SERIAL"):
 		return tuple.TypeInt64
 	case strings.Contains(upper, "TEXT"), strings.Contains(upper, "VARCHAR"),
 		strings.Contains(upper, "CHAR"), strings.Contains(upper, "STRING"):
@@ -534,9 +624,17 @@ func mapSQLType(sqlType string) tuple.DatumType {
 	case strings.Contains(upper, "BOOL"):
 		return tuple.TypeBool
 	case strings.Contains(upper, "FLOAT"), strings.Contains(upper, "DOUBLE"),
-		strings.Contains(upper, "REAL"), strings.Contains(upper, "NUMERIC"):
+		strings.Contains(upper, "REAL"), strings.Contains(upper, "NUMERIC"),
+		strings.Contains(upper, "DECIMAL"):
 		return tuple.TypeFloat64
-	default:
+	case strings.Contains(upper, "TIMESTAMP"), strings.Contains(upper, "DATE"),
+		strings.Contains(upper, "TIME"):
+		return tuple.TypeText
+	case strings.Contains(upper, "BYTEA"):
 		return tuple.TypeText
 	}
+
+	// Any unrecognized type (custom domains like public.year, public.mpaa_rating, etc.)
+	// → default to TEXT.
+	return tuple.TypeText
 }

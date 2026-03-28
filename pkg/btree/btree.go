@@ -125,6 +125,10 @@ func (bt *BTree) Search(key int64) ([]Entry, error) {
 		}
 
 		sp := page.Special()
+		if len(sp) < specialSize {
+			bt.alloc.ReleasePage(pageNum)
+			return nil, fmt.Errorf("btree: page %d has invalid special area", pageNum)
+		}
 		level := getLevel(sp)
 		nkeys := getNumKeys(sp)
 
@@ -308,6 +312,10 @@ func (bt *BTree) insertRecursive(pageNum uint32, key int64, itemPage uint32, ite
 	}
 
 	sp := page.Special()
+	if len(sp) < specialSize {
+		bt.alloc.ReleasePage(pageNum)
+		return nil, fmt.Errorf("btree: page %d has invalid special area (len=%d, need=%d)", pageNum, len(sp), specialSize)
+	}
 	level := getLevel(sp)
 	nkeys := getNumKeys(sp)
 

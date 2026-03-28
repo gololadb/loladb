@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/jespino/loladb/pkg/bufferpool"
@@ -18,17 +19,22 @@ import (
 // Engine ties together the buffer pool, WAL, superblock, and freelist
 // into a single storage layer. All page modifications go through the
 // engine so that the WAL-before-data protocol is enforced.
+// CheckpointInterval is the number of WAL records between automatic
+// checkpoints. This prevents the WAL from growing unboundedly.
+const CheckpointInterval = 1000
+
 type Engine struct {
-	dataPath  string
-	walPath   string
-	IO        *pageio.PageIO
-	Pool      *bufferpool.BufferPool
-	WAL       *wal.WAL
-	Super     *superblock.Superblock
-	FreeList  *freelist.FreeList
-	TxMgr     *mvcc.TxManager
-	pageLocks pageLockMap
-	allocMu   sync.Mutex
+	dataPath      string
+	walPath       string
+	IO            *pageio.PageIO
+	Pool          *bufferpool.BufferPool
+	WAL           *wal.WAL
+	Super         *superblock.Superblock
+	FreeList      *freelist.FreeList
+	TxMgr         *mvcc.TxManager
+	pageLocks     pageLockMap
+	allocMu       sync.Mutex
+	walSinceChkpt uint32 // WAL records since last checkpoint
 }
 
 // pageLockMap provides per-page mutexes so concurrent modifications
@@ -248,11 +254,20 @@ func (e *Engine) WriteTupleToPage(xid, pageNum uint32, pageBuf []byte, tupleData
 	newBytes := page.Bytes()
 	copy(pageBuf, newBytes)
 
-	// WAL record: log the entire page content that changed.
-	// For simplicity, we log from the start of the page to the end of
-	// the used area (header + line pointers + tuple data). Since both
-	// lower and upper moved, the safest approach is to log the whole page.
-	lsn, err := e.WAL.Append(xid, pageNum, 0, uint16(pageio.PageSize), newBytes)
+	// WAL: log the two dirty regions of the page.
+	// Region 1: header + line pointers [0..lower)
+	// Region 2: tuple data [upper..special or pageEnd)
+	lower := binary.LittleEndian.Uint16(newBytes[2:4])
+	upper := binary.LittleEndian.Uint16(newBytes[4:6])
+
+	// Log header + line pointers.
+	if _, err := e.WAL.Append(xid, pageNum, 0, lower, newBytes[:lower]); err != nil {
+		return 0, fmt.Errorf("engine: WAL append header: %w", err)
+	}
+
+	// Log tuple data region.
+	tupleLen := uint16(pageio.PageSize) - upper
+	lsn, err := e.WAL.Append(xid, pageNum, upper, tupleLen, newBytes[upper:])
 	if err != nil {
 		return 0, fmt.Errorf("engine: WAL append: %w", err)
 	}
@@ -263,6 +278,7 @@ func (e *Engine) WriteTupleToPage(xid, pageNum uint32, pageBuf []byte, tupleData
 	copy(pageBuf, page.Bytes())
 
 	e.Pool.MarkDirty(pageNum)
+	e.maybeCheckpoint(2) // two WAL records written
 	return slot, nil
 }
 
@@ -278,13 +294,30 @@ func (e *Engine) WriteRawToPage(xid, pageNum uint32, pageBuf []byte, offset uint
 	}
 	copy(pageBuf[offset:], data)
 	e.Pool.MarkDirty(pageNum)
+	e.maybeCheckpoint(1)
 	return nil
+}
+
+// maybeCheckpoint triggers an automatic checkpoint if enough WAL
+// records have accumulated since the last one.
+func (e *Engine) maybeCheckpoint(records uint32) {
+	e.walSinceChkpt += records
+	if e.walSinceChkpt >= CheckpointInterval {
+		e.Checkpoint()
+		e.walSinceChkpt = 0
+	}
 }
 
 // Checkpoint flushes all dirty pages, fsyncs the data file, updates
 // the superblock's checkpoint LSN, and truncates the WAL.
 func (e *Engine) Checkpoint() error {
-	// 1. Flush all dirty pages to disk.
+	// 1. Sync WAL to disk first (WAL-before-data protocol: WAL must
+	//    be durable before we flush data pages).
+	if err := e.WAL.Sync(); err != nil {
+		return fmt.Errorf("engine: sync WAL: %w", err)
+	}
+
+	// 2. Flush all dirty pages to disk.
 	if err := e.Pool.FlushAll(); err != nil {
 		return fmt.Errorf("engine: flush pool: %w", err)
 	}
@@ -316,16 +349,25 @@ func (e *Engine) Checkpoint() error {
 		return fmt.Errorf("engine: truncate WAL: %w", err)
 	}
 
+	e.walSinceChkpt = 0
 	return nil
 }
 
-// Close performs a checkpoint and closes all files.
+// Close performs a checkpoint, closes all files, and removes the WAL
+// file (since all data has been flushed to the data file).
 func (e *Engine) Close() error {
 	if err := e.Checkpoint(); err != nil {
 		e.closeAll()
 		return err
 	}
-	return e.closeAll()
+	walPath := e.walPath
+	if err := e.closeAll(); err != nil {
+		return err
+	}
+	// Remove the WAL file after clean shutdown — all data is in the
+	// data file and the WAL is empty.
+	os.Remove(walPath)
+	return nil
 }
 
 // SeqScan traverses all tuples in a heap page chain starting at

@@ -41,6 +41,14 @@ func (o *Optimizer) Optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysCreateIndex{Index: n.Index, Table: n.Table, Column: n.Column}, nil
 	case *LogicalExplain:
 		return o.Optimize(n.Child)
+	case *LogicalNoOp:
+		return &PhysNoOp{Message: n.Message}, nil
+	case *LogicalCreateSequence:
+		return &PhysCreateSequence{Name: n.Name}, nil
+	case *LogicalCreateView:
+		return &PhysCreateView{Name: n.Name, Definition: n.Definition}, nil
+	case *LogicalAlterTable:
+		return &PhysAlterTable{Table: n.Table, Commands: n.Commands}, nil
 	default:
 		child, err := o.Optimize(node)
 		return child, err

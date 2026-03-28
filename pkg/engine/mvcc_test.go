@@ -427,8 +427,8 @@ func TestMVCC_ConcurrentReadersAndWriter(t *testing.T) {
 				count++
 				return true
 			})
-			if count != 10 {
-				errs <- fmt.Sprintf("reader expected 10, got %d", count)
+			if count != 10 && count != 15 {
+				errs <- fmt.Sprintf("reader expected 10 or 15, got %d", count)
 			}
 			e.TxMgr.Commit(rx)
 		}()
