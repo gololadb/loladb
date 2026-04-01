@@ -181,6 +181,16 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 		return &LogicalCreateView{Name: u.ViewName, Definition: u.ViewDef, Columns: u.ViewColumns}, nil
 	case UtilAlterTable:
 		return &LogicalAlterTable{Table: u.TableName, Commands: u.AlterCmds}, nil
+	case UtilCreatePolicy:
+		return &LogicalCreatePolicy{
+			Name: u.PolicyName, Table: u.PolicyTable, Cmd: u.PolicyCmd,
+			Permissive: u.PolicyPermissive, Roles: u.PolicyRoles,
+			Using: u.PolicyUsing, Check: u.PolicyCheck,
+		}, nil
+	case UtilEnableRLS:
+		return &LogicalEnableRLS{Table: u.TableName}, nil
+	case UtilDisableRLS:
+		return &LogicalDisableRLS{Table: u.TableName}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

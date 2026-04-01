@@ -44,9 +44,9 @@ func main() {
 		runCLI(args[0])
 	case "exec":
 		if len(args) < 2 {
-			fatal("Usage: loladb exec <path> \"<sql>\"")
+			fatal("Usage: loladb exec <path> \"<sql>\" [--role=<user>]")
 		}
-		runExec(args[0], args[1])
+		runExec(args[0], args[1], args[2:]...)
 	case "tui":
 		if len(args) < 1 {
 			fatal("Usage: loladb tui <path>")

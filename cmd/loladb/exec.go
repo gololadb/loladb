@@ -3,13 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/jespino/loladb/pkg/catalog"
 	"github.com/jespino/loladb/pkg/engine"
 	"github.com/jespino/loladb/pkg/sql"
 )
 
-func runExec(path, sqlStr string) {
+func runExec(path, sqlStr string, opts ...string) {
 	eng, err := engine.Open(path, 0)
 	if err != nil {
 		fatal(fmt.Sprintf("Failed to open database: %v", err))
@@ -22,6 +23,15 @@ func runExec(path, sqlStr string) {
 	}
 
 	ex := sql.NewExecutor(cat)
+
+	// Apply --role if provided.
+	for _, opt := range opts {
+		if strings.HasPrefix(opt, "--role=") {
+			role := strings.TrimPrefix(opt, "--role=")
+			ex.SetRole(role)
+		}
+	}
+
 	r, err := ex.Exec(sqlStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)

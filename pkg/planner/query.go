@@ -195,6 +195,15 @@ type UtilityStmt struct {
 	ViewColumns []ColDef
 	AlterCmds   []string
 	Message     string
+
+	// RLS policy fields
+	PolicyName       string
+	PolicyTable      string
+	PolicyCmd        string // ALL, SELECT, INSERT, UPDATE, DELETE
+	PolicyPermissive bool
+	PolicyRoles      []string
+	PolicyUsing      string
+	PolicyCheck      string
 }
 
 type UtilityType int
@@ -205,6 +214,9 @@ const (
 	UtilCreateSequence
 	UtilCreateView
 	UtilAlterTable
+	UtilCreatePolicy
+	UtilEnableRLS
+	UtilDisableRLS
 	UtilNoOp
 )
 

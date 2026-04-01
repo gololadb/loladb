@@ -24,11 +24,12 @@ type Result struct {
 // Executor parses SQL and runs it through the full pipeline:
 // SQL → Parser → Analyzer (Query tree) → Rewriter → Planner (Logical) → Optimizer (Physical) → Executor → Result
 type Executor struct {
-	Cat       *catalog.Catalog
-	analyzer  *planner.Analyzer
-	rewriter  *rewriter.Rewriter
-	optimizer *planner.Optimizer
-	exec      *executor.Executor
+	Cat         *catalog.Catalog
+	CurrentUser string // session-level current user for RLS policies
+	analyzer    *planner.Analyzer
+	rewriter    *rewriter.Rewriter
+	optimizer   *planner.Optimizer
+	exec        *executor.Executor
 }
 
 // NewExecutor creates a SQL executor backed by the given catalog.
@@ -43,6 +44,12 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 	}
 }
 
+// SetRole sets the session-level current user for RLS policy evaluation.
+func (ex *Executor) SetRole(role string) {
+	ex.CurrentUser = role
+	ex.rewriter.CurrentUser = role
+}
+
 // Exec parses and executes one or more SQL statements through the
 // full pipeline: parse → analyze → plan → optimize → execute.
 func (ex *Executor) Exec(sql string) (*Result, error) {
@@ -55,6 +62,17 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	}
 
 	stmt := stmts[0].Stmt
+
+	// Handle SET ROLE to change the session user for RLS.
+	if setVar, ok := stmt.(*parser.VariableSetStmt); ok {
+		if strings.EqualFold(setVar.Name, "role") && len(setVar.Args) > 0 {
+			role := extractSetValue(setVar.Args[0])
+			if role != "" {
+				ex.SetRole(role)
+				return &Result{Message: fmt.Sprintf("SET ROLE %s", role)}, nil
+			}
+		}
+	}
 
 	// Check for EXPLAIN.
 	isExplain := false
@@ -186,6 +204,24 @@ func stripQualifier(name string) string {
 		}
 	}
 	return name
+}
+
+// extractSetValue extracts a string value from a SET statement argument.
+func extractSetValue(expr parser.Expr) string {
+	switch e := expr.(type) {
+	case *parser.A_Const:
+		if e.Val.Type == parser.ValStr {
+			return e.Val.Str
+		}
+		return fmt.Sprintf("%v", e.Val.Ival)
+	case *parser.ColumnRef:
+		if len(e.Fields) > 0 {
+			if s, ok := e.Fields[0].(*parser.String); ok {
+				return s.Str
+			}
+		}
+	}
+	return ""
 }
 
 // extractViewDef extracts the SELECT portion from a CREATE VIEW statement.

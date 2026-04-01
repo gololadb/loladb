@@ -49,6 +49,16 @@ func (o *Optimizer) Optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysCreateView{Name: n.Name, Definition: n.Definition, Columns: n.Columns}, nil
 	case *LogicalAlterTable:
 		return &PhysAlterTable{Table: n.Table, Commands: n.Commands}, nil
+	case *LogicalCreatePolicy:
+		return &PhysCreatePolicy{
+			Name: n.Name, Table: n.Table, Cmd: n.Cmd,
+			Permissive: n.Permissive, Roles: n.Roles,
+			Using: n.Using, Check: n.Check,
+		}, nil
+	case *LogicalEnableRLS:
+		return &PhysEnableRLS{Table: n.Table}, nil
+	case *LogicalDisableRLS:
+		return &PhysDisableRLS{Table: n.Table}, nil
 	default:
 		child, err := o.Optimize(node)
 		return child, err

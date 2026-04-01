@@ -66,6 +66,12 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execCreateView(n)
 	case *planner.PhysAlterTable:
 		return &Result{Message: fmt.Sprintf("ALTER TABLE %s", n.Table)}, nil
+	case *planner.PhysCreatePolicy:
+		return ex.execCreatePolicy(n)
+	case *planner.PhysEnableRLS:
+		return ex.execEnableRLS(n)
+	case *planner.PhysDisableRLS:
+		return ex.execDisableRLS(n)
 	default:
 		return nil, fmt.Errorf("executor: unsupported node %T", node)
 	}
@@ -685,4 +691,49 @@ func (ex *Executor) execCreateView(n *planner.PhysCreateView) (*Result, error) {
 	}
 
 	return &Result{Message: fmt.Sprintf("CREATE VIEW %s", n.Name)}, nil
+}
+
+func (ex *Executor) execCreatePolicy(n *planner.PhysCreatePolicy) (*Result, error) {
+	rel, err := ex.Cat.FindRelation(n.Table)
+	if err != nil || rel == nil {
+		return nil, fmt.Errorf("executor: table %q not found for policy", n.Table)
+	}
+
+	policy := &catalog.RLSPolicy{
+		Name:       n.Name,
+		RelOID:     rel.OID,
+		Cmd:        catalog.PolicyCmdFromString(n.Cmd),
+		Permissive: n.Permissive,
+		Roles:      n.Roles,
+		UsingExpr:  n.Using,
+		CheckExpr:  n.Check,
+	}
+
+	if err := ex.Cat.CreatePolicy(policy); err != nil {
+		return nil, err
+	}
+
+	return &Result{Message: fmt.Sprintf("CREATE POLICY %s", n.Name)}, nil
+}
+
+func (ex *Executor) execEnableRLS(n *planner.PhysEnableRLS) (*Result, error) {
+	rel, err := ex.Cat.FindRelation(n.Table)
+	if err != nil || rel == nil {
+		return nil, fmt.Errorf("executor: table %q not found", n.Table)
+	}
+	if err := ex.Cat.EnableRLS(rel.OID); err != nil {
+		return nil, err
+	}
+	return &Result{Message: fmt.Sprintf("ALTER TABLE %s", n.Table)}, nil
+}
+
+func (ex *Executor) execDisableRLS(n *planner.PhysDisableRLS) (*Result, error) {
+	rel, err := ex.Cat.FindRelation(n.Table)
+	if err != nil || rel == nil {
+		return nil, fmt.Errorf("executor: table %q not found", n.Table)
+	}
+	if err := ex.Cat.DisableRLS(rel.OID); err != nil {
+		return nil, err
+	}
+	return &Result{Message: fmt.Sprintf("ALTER TABLE %s", n.Table)}, nil
 }

@@ -62,15 +62,16 @@ func (a *engineAllocator) MarkDirty(pn uint32)                     { a.eng.Pool.
 // Catalog provides DDL operations backed by pg_class and pg_attribute
 // system tables that live in normal heap pages.
 type Catalog struct {
-	Eng   *engine.Engine
-	alloc *engineAllocator // shared btree page allocator
-	Rules *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
+	Eng      *engine.Engine
+	alloc    *engineAllocator // shared btree page allocator
+	Rules    *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
+	Policies *policyStore     // in-memory RLS policy storage (pg_policy)
 }
 
 // New wraps an engine with catalog operations. If the database is
 // freshly created (PgClassPage == 0), it bootstraps the system tables.
 func New(eng *engine.Engine) (*Catalog, error) {
-	c := &Catalog{Eng: eng, alloc: &engineAllocator{eng: eng}, Rules: newRuleStore()}
+	c := &Catalog{Eng: eng, alloc: &engineAllocator{eng: eng}, Rules: newRuleStore(), Policies: newPolicyStore()}
 
 	if eng.Super.PgClassPage == 0 {
 		if err := c.bootstrap(); err != nil {
@@ -82,6 +83,13 @@ func New(eng *engine.Engine) (*Catalog, error) {
 	if eng.Super.PgRewritePage != 0 {
 		if err := c.loadRules(); err != nil {
 			return nil, fmt.Errorf("catalog: load rules: %w", err)
+		}
+	}
+
+	// Load persisted RLS policies into the in-memory store.
+	if eng.Super.PgPolicyPage != 0 {
+		if err := c.loadPolicies(); err != nil {
+			return nil, fmt.Errorf("catalog: load policies: %w", err)
 		}
 	}
 
@@ -103,9 +111,13 @@ func (c *Catalog) bootstrap() error {
 	if err != nil {
 		return err
 	}
+	pgPolicyPage, err := c.Eng.AllocPage()
+	if err != nil {
+		return err
+	}
 
 	// Init the heap pages.
-	for _, pg := range []uint32{pgClassPage, pgAttrPage, pgRewritePage} {
+	for _, pg := range []uint32{pgClassPage, pgAttrPage, pgRewritePage, pgPolicyPage} {
 		buf, err := c.Eng.Pool.FetchPage(pg)
 		if err != nil {
 			return err
@@ -119,6 +131,7 @@ func (c *Catalog) bootstrap() error {
 	c.Eng.Super.PgClassPage = pgClassPage
 	c.Eng.Super.PgAttrPage = pgAttrPage
 	c.Eng.Super.PgRewritePage = pgRewritePage
+	c.Eng.Super.PgPolicyPage = pgPolicyPage
 
 	return nil
 }
@@ -293,6 +306,156 @@ func (c *Catalog) loadRules() error {
 		c.Rules.AddRule(rule)
 		return true
 	})
+}
+
+// CreatePolicy persists an RLS policy to pg_policy and registers it
+// in the in-memory store.
+// Tuple format: (relOID int32, name text, cmd int32, permissive int32,
+//
+//	roles text, usingExpr text, checkExpr text)
+func (c *Catalog) CreatePolicy(policy *RLSPolicy) error {
+	if err := c.persistPolicy(policy); err != nil {
+		return err
+	}
+	c.Policies.AddPolicy(policy)
+	return nil
+}
+
+func (c *Catalog) persistPolicy(policy *RLSPolicy) error {
+	xid := c.Eng.TxMgr.Begin()
+
+	permissive := int32(0)
+	if policy.Permissive {
+		permissive = 1
+	}
+
+	rolesStr := ""
+	if len(policy.Roles) > 0 {
+		for i, r := range policy.Roles {
+			if i > 0 {
+				rolesStr += ","
+			}
+			rolesStr += r
+		}
+	}
+
+	_, err := c.Eng.Insert(xid, c.Eng.Super.PgPolicyPage, []tuple.Datum{
+		tuple.DInt32(policy.RelOID),
+		tuple.DText(policy.Name),
+		tuple.DInt32(int32(policy.Cmd)),
+		tuple.DInt32(permissive),
+		tuple.DText(rolesStr),
+		tuple.DText(policy.UsingExpr),
+		tuple.DText(policy.CheckExpr),
+	})
+	if err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return fmt.Errorf("catalog: persist policy: %w", err)
+	}
+	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
+
+func (c *Catalog) loadPolicies() error {
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	defer c.Eng.TxMgr.Commit(xid)
+
+	return c.Eng.SeqScan(c.Eng.Super.PgPolicyPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) < 7 {
+			return true
+		}
+
+		name := tup.Columns[1].Text
+
+		// Handle RLS enabled flag sentinel rows.
+		if name == "_RLS_ENABLED" {
+			relOID := tup.Columns[0].I32
+			if tup.Columns[2].I32 != 0 {
+				c.Policies.EnableRLS(relOID)
+			}
+			return true
+		}
+
+		var roles []string
+		rolesStr := tup.Columns[4].Text
+		if rolesStr != "" {
+			for _, r := range splitComma(rolesStr) {
+				if r != "" {
+					roles = append(roles, r)
+				}
+			}
+		}
+
+		policy := &RLSPolicy{
+			RelOID:     tup.Columns[0].I32,
+			Name:       name,
+			Cmd:        PolicyCmd(tup.Columns[2].I32),
+			Permissive: tup.Columns[3].I32 != 0,
+			Roles:      roles,
+			UsingExpr:  tup.Columns[5].Text,
+			CheckExpr:  tup.Columns[6].Text,
+		}
+		c.Policies.AddPolicy(policy)
+		return true
+	})
+}
+
+func splitComma(s string) []string {
+	var result []string
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			result = append(result, s[start:i])
+			start = i + 1
+		}
+	}
+	return result
+}
+
+// EnableRLS enables row-level security on a relation and persists the flag.
+func (c *Catalog) EnableRLS(relOID int32) error {
+	c.Policies.EnableRLS(relOID)
+	return c.persistRLSFlag(relOID, true)
+}
+
+// DisableRLS disables row-level security on a relation and persists the flag.
+func (c *Catalog) DisableRLS(relOID int32) error {
+	c.Policies.DisableRLS(relOID)
+	return c.persistRLSFlag(relOID, false)
+}
+
+func (c *Catalog) persistRLSFlag(relOID int32, enabled bool) error {
+	xid := c.Eng.TxMgr.Begin()
+	val := int32(0)
+	if enabled {
+		val = 1
+	}
+	_, err := c.Eng.Insert(xid, c.Eng.Super.PgPolicyPage, []tuple.Datum{
+		tuple.DInt32(relOID),
+		tuple.DText("_RLS_ENABLED"),
+		tuple.DInt32(val), // cmd field reused as enabled flag
+		tuple.DInt32(0),
+		tuple.DText(""),
+		tuple.DText(""),
+		tuple.DText(""),
+	})
+	if err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
+
+// IsRLSEnabled returns true if RLS is enabled for the relation.
+func (c *Catalog) IsRLSEnabled(relOID int32) bool {
+	return c.Policies.IsRLSEnabled(relOID)
+}
+
+// GetPoliciesForCmd returns applicable policies for a relation, command, and role.
+func (c *Catalog) GetPoliciesForCmd(relOID int32, cmd PolicyCmd, role string) (permissive, restrictive []*RLSPolicy) {
+	return c.Policies.GetPoliciesForCmd(relOID, cmd, role)
 }
 
 // FindRelation searches pg_class for a relation by name. Returns nil

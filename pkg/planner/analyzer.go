@@ -64,6 +64,8 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		}), nil
 	case *parser.ViewStmt:
 		return a.transformViewStmt(n)
+	case *parser.CreatePolicyStmt:
+		return a.transformCreatePolicyStmt(n)
 	case *parser.ExecuteStmt:
 		return a.makeUtilityQuery(UtilNoOp, &UtilityStmt{
 			Type: UtilNoOp, Message: "EXECUTE",
@@ -371,6 +373,21 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 		return a.transformExpr(e.Arg)
 	case *parser.NullTest:
 		return a.transformNullTest(e)
+	case *parser.SQLValueFunction:
+		// Represent current_user / session_user etc. as a ColumnVar with
+		// a sentinel name so the rewriter can substitute the actual value.
+		switch e.Op {
+		case parser.SVFOP_CURRENT_USER, parser.SVFOP_CURRENT_ROLE, parser.SVFOP_USER, parser.SVFOP_SESSION_USER:
+			return &ColumnVar{
+				RTIndex: 0,
+				ColNum:  0,
+				ColName: "current_user",
+				Table:   "",
+				VarType: tuple.TypeText,
+			}, nil
+		default:
+			return nil, fmt.Errorf("analyzer: unsupported SQL value function (op %d)", e.Op)
+		}
 	case *parser.ParamRef:
 		return nil, fmt.Errorf("analyzer: parameter references ($%d) not supported", e.Number)
 	default:
@@ -729,6 +746,21 @@ func (a *Analyzer) transformExplainStmt(n *parser.ExplainStmt) (*Query, error) {
 
 func (a *Analyzer) transformAlterTableStmt(n *parser.AlterTableStmt) (*Query, error) {
 	tableName := n.Relation.Relname
+
+	// Check for RLS enable/disable commands.
+	for _, cmd := range n.Cmds {
+		switch cmd.Subtype {
+		case parser.AT_EnableRowSecurity:
+			return a.makeUtilityQuery(UtilEnableRLS, &UtilityStmt{
+				Type: UtilEnableRLS, TableName: tableName,
+			}), nil
+		case parser.AT_DisableRowSecurity:
+			return a.makeUtilityQuery(UtilDisableRLS, &UtilityStmt{
+				Type: UtilDisableRLS, TableName: tableName,
+			}), nil
+		}
+	}
+
 	var commands []string
 	for _, cmd := range n.Cmds {
 		switch cmd.Subtype {
@@ -904,4 +936,130 @@ func mapSQLType(sqlType string) tuple.DatumType {
 	}
 
 	return tuple.TypeText
+}
+
+func (a *Analyzer) transformCreatePolicyStmt(n *parser.CreatePolicyStmt) (*Query, error) {
+	tableName := ""
+	if len(n.Table) > 0 {
+		tableName = n.Table[len(n.Table)-1]
+	}
+
+	cmdName := "ALL"
+	if n.CmdName != "" {
+		cmdName = strings.ToUpper(n.CmdName)
+	}
+
+	var roles []string
+	for _, r := range n.Roles {
+		roles = append(roles, r)
+	}
+
+	usingExpr := ""
+	if n.Qual != nil {
+		usingExpr = exprToSQL(n.Qual)
+	}
+
+	checkExpr := ""
+	if n.WithCheck != nil {
+		checkExpr = exprToSQL(n.WithCheck)
+	}
+
+	return a.makeUtilityQuery(UtilCreatePolicy, &UtilityStmt{
+		Type:             UtilCreatePolicy,
+		PolicyName:       n.PolicyName,
+		PolicyTable:      tableName,
+		PolicyCmd:        cmdName,
+		PolicyPermissive: n.Permissive,
+		PolicyRoles:      roles,
+		PolicyUsing:      usingExpr,
+		PolicyCheck:      checkExpr,
+	}), nil
+}
+
+// exprToSQL reconstructs a SQL expression string from a parse tree node.
+func exprToSQL(expr parser.Expr) string {
+	switch e := expr.(type) {
+	case *parser.A_Const:
+		switch e.Val.Type {
+		case parser.ValInt:
+			return strconv.FormatInt(e.Val.Ival, 10)
+		case parser.ValStr:
+			if e.Val.Str == "t" {
+				return "true"
+			}
+			if e.Val.Str == "f" {
+				return "false"
+			}
+			return "'" + e.Val.Str + "'"
+		case parser.ValFloat:
+			return e.Val.Str
+		case parser.ValNull:
+			return "NULL"
+		default:
+			return e.Val.Str
+		}
+	case *parser.ColumnRef:
+		var parts []string
+		for _, f := range e.Fields {
+			if s, ok := f.(*parser.String); ok {
+				parts = append(parts, s.Str)
+			} else if _, ok := f.(*parser.A_Star); ok {
+				parts = append(parts, "*")
+			}
+		}
+		return strings.Join(parts, ".")
+	case *parser.A_Expr:
+		opName := ""
+		if len(e.Name) > 0 {
+			opName = e.Name[len(e.Name)-1]
+		}
+		if e.Lexpr == nil {
+			return opName + exprToSQL(e.Rexpr)
+		}
+		return exprToSQL(e.Lexpr) + " " + opName + " " + exprToSQL(e.Rexpr)
+	case *parser.BoolExpr:
+		switch e.Op {
+		case parser.AND_EXPR:
+			parts := make([]string, len(e.Args))
+			for i, arg := range e.Args {
+				parts[i] = exprToSQL(arg)
+			}
+			return "(" + strings.Join(parts, " AND ") + ")"
+		case parser.OR_EXPR:
+			parts := make([]string, len(e.Args))
+			for i, arg := range e.Args {
+				parts[i] = exprToSQL(arg)
+			}
+			return "(" + strings.Join(parts, " OR ") + ")"
+		case parser.NOT_EXPR:
+			return "NOT " + exprToSQL(e.Args[0])
+		}
+	case *parser.TypeCast:
+		return exprToSQL(e.Arg)
+	case *parser.NullTest:
+		if e.NullTestType == parser.IS_NULL {
+			return exprToSQL(e.Arg) + " IS NULL"
+		}
+		return exprToSQL(e.Arg) + " IS NOT NULL"
+	case *parser.SQLValueFunction:
+		switch e.Op {
+		case parser.SVFOP_CURRENT_USER:
+			return "current_user"
+		case parser.SVFOP_CURRENT_ROLE:
+			return "current_role"
+		case parser.SVFOP_SESSION_USER:
+			return "session_user"
+		case parser.SVFOP_CURRENT_CATALOG:
+			return "current_catalog"
+		case parser.SVFOP_CURRENT_SCHEMA:
+			return "current_schema"
+		case parser.SVFOP_CURRENT_DATE:
+			return "current_date"
+		case parser.SVFOP_CURRENT_TIMESTAMP:
+			return "current_timestamp"
+		default:
+			return "current_user"
+		}
+	}
+	return fmt.Sprintf("%v", expr)
 }

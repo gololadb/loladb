@@ -20,6 +20,7 @@ import (
 
 	"github.com/jespino/loladb/pkg/catalog"
 	"github.com/jespino/loladb/pkg/planner"
+	"github.com/jespino/loladb/pkg/tuple"
 )
 
 // colMapping maps a view output column to the underlying table column.
@@ -35,6 +36,9 @@ type colMapping struct {
 type Rewriter struct {
 	Cat      *catalog.Catalog
 	Analyzer *planner.Analyzer
+
+	// CurrentUser is the session-level role used for RLS policy evaluation.
+	CurrentUser string
 
 	// maxDepth prevents infinite recursion from circular view definitions.
 	maxDepth int
@@ -87,7 +91,7 @@ func (rw *Rewriter) rewriteQuery(query *planner.Query, depth int) ([]*planner.Qu
 // This mirrors PostgreSQL's fireRIRrules() (RIR = Retrieve-Instead-Retrieve)
 // in rewriteHandler.c.
 func (rw *Rewriter) rewriteSelect(query *planner.Query, depth int) ([]*planner.Query, error) {
-	// Walk the range table looking for views to expand.
+	// Step 1: Walk the range table looking for views to expand.
 	for i, rte := range query.RangeTable {
 		if !rw.Cat.IsView(rte.RelOID) {
 			continue
@@ -123,6 +127,11 @@ func (rw *Rewriter) rewriteSelect(query *planner.Query, depth int) ([]*planner.Q
 		// Merge the view's range table into the outer query and
 		// adjust references. This is the core of view expansion.
 		rw.expandViewInQuery(query, i, rte, viewQuery)
+	}
+
+	// Step 2: Apply RLS policies to all range table entries.
+	if err := rw.applyRLSPolicies(query); err != nil {
+		return nil, err
 	}
 
 	return []*planner.Query{query}, nil
@@ -201,7 +210,7 @@ func (rw *Rewriter) rewriteDML(query *planner.Query, event catalog.RuleEvent, de
 }
 
 // rewriteSelectInDML expands views referenced in the FROM clause of
-// DML statements (e.g., DELETE FROM view WHERE ...).
+// DML statements (e.g., DELETE FROM view WHERE ...) and applies RLS.
 func (rw *Rewriter) rewriteSelectInDML(query *planner.Query, depth int) ([]*planner.Query, error) {
 	// Check if the result relation itself is a view.
 	if query.ResultRelation > 0 && query.ResultRelation <= len(query.RangeTable) {
@@ -212,6 +221,12 @@ func (rw *Rewriter) rewriteSelectInDML(query *planner.Query, depth int) ([]*plan
 				query.CommandType, rte.RelName)
 		}
 	}
+
+	// Apply RLS policies to the DML query.
+	if err := rw.applyRLSPolicies(query); err != nil {
+		return nil, err
+	}
+
 	return []*planner.Query{query}, nil
 }
 
@@ -478,4 +493,255 @@ func (rw *Rewriter) parseAndAnalyze(sql string) (*planner.Query, error) {
 		return nil, fmt.Errorf("empty statement")
 	}
 	return rw.Analyzer.Analyze(stmts[0].Stmt)
+}
+
+// --- Row-Level Security ---
+// Mirrors PostgreSQL's get_row_security_policies() in
+// src/backend/rewrite/rowsecurity.c.
+
+// applyRLSPolicies checks if any range table entries have RLS enabled
+// and injects policy quals into the query. This is called after view
+// expansion so that policies on the underlying tables are applied.
+func (rw *Rewriter) applyRLSPolicies(query *planner.Query) error {
+	if query.JoinTree == nil {
+		return nil
+	}
+
+	cmd := cmdToPolicy(query.CommandType)
+
+	for _, rte := range query.RangeTable {
+		if !rw.Cat.IsRLSEnabled(rte.RelOID) {
+			continue
+		}
+
+		permissive, restrictive := rw.Cat.GetPoliciesForCmd(rte.RelOID, cmd, rw.CurrentUser)
+
+		// If RLS is enabled but no policies exist, default-deny:
+		// inject a FALSE qual so no rows are returned.
+		if len(permissive) == 0 && len(restrictive) == 0 {
+			query.JoinTree.Quals = rw.injectDefaultDeny(query.JoinTree.Quals)
+			continue
+		}
+
+		// Build the combined USING qual.
+		// Permissive policies are OR'd together.
+		var permQual planner.AnalyzedExpr
+		for _, p := range permissive {
+			if p.UsingExpr == "" {
+				continue
+			}
+			policyQual, err := rw.parsePolicyExpr(p.UsingExpr, rte)
+			if err != nil {
+				return fmt.Errorf("rewriter: policy %q USING: %w", p.Name, err)
+			}
+			if permQual == nil {
+				permQual = policyQual
+			} else {
+				permQual = &planner.BoolExprNode{
+					Op:   planner.BoolOr,
+					Args: []planner.AnalyzedExpr{permQual, policyQual},
+				}
+			}
+		}
+
+		// Restrictive policies are AND'd together.
+		var restQual planner.AnalyzedExpr
+		for _, p := range restrictive {
+			if p.UsingExpr == "" {
+				continue
+			}
+			policyQual, err := rw.parsePolicyExpr(p.UsingExpr, rte)
+			if err != nil {
+				return fmt.Errorf("rewriter: policy %q USING: %w", p.Name, err)
+			}
+			if restQual == nil {
+				restQual = policyQual
+			} else {
+				restQual = &planner.BoolExprNode{
+					Op:   planner.BoolAnd,
+					Args: []planner.AnalyzedExpr{restQual, policyQual},
+				}
+			}
+		}
+
+		// Combine: (permissive_combined) AND (restrictive_combined)
+		var combined planner.AnalyzedExpr
+		if permQual != nil && restQual != nil {
+			combined = &planner.BoolExprNode{
+				Op:   planner.BoolAnd,
+				Args: []planner.AnalyzedExpr{permQual, restQual},
+			}
+		} else if permQual != nil {
+			combined = permQual
+		} else if restQual != nil {
+			combined = restQual
+		}
+
+		if combined == nil {
+			continue
+		}
+
+		// Inject the combined qual into the query's join tree.
+		if query.JoinTree.Quals != nil {
+			query.JoinTree.Quals = &planner.BoolExprNode{
+				Op:   planner.BoolAnd,
+				Args: []planner.AnalyzedExpr{query.JoinTree.Quals, combined},
+			}
+		} else {
+			query.JoinTree.Quals = combined
+		}
+	}
+
+	return nil
+}
+
+// injectDefaultDeny adds a FALSE constant to deny all rows when RLS
+// is enabled but no policies match.
+func (rw *Rewriter) injectDefaultDeny(existing planner.AnalyzedExpr) planner.AnalyzedExpr {
+	deny := &planner.Const{
+		Value:     tuple.DBool(false),
+		ConstType: tuple.TypeBool,
+	}
+	if existing != nil {
+		return &planner.BoolExprNode{
+			Op:   planner.BoolAnd,
+			Args: []planner.AnalyzedExpr{existing, deny},
+		}
+	}
+	return deny
+}
+
+// parsePolicyExpr parses a policy expression SQL string and resolves
+// it against the given range table entry. The expression can reference
+// columns of the table and the special value current_user.
+func (rw *Rewriter) parsePolicyExpr(exprSQL string, rte *planner.RangeTblEntry) (planner.AnalyzedExpr, error) {
+	// Wrap the expression in a SELECT WHERE to make it parseable.
+	wrappedSQL := fmt.Sprintf("SELECT 1 FROM %s WHERE %s", rte.RelName, exprSQL)
+
+	stmts, err := parser.Parse(strings.NewReader(wrappedSQL), nil)
+	if err != nil {
+		return nil, fmt.Errorf("parse policy expr: %w", err)
+	}
+	if len(stmts) == 0 {
+		return nil, fmt.Errorf("empty policy expression")
+	}
+
+	// Analyze the wrapped query to resolve column references.
+	policyQuery, err := rw.Analyzer.Analyze(stmts[0].Stmt)
+	if err != nil {
+		return nil, fmt.Errorf("analyze policy expr: %w", err)
+	}
+
+	if policyQuery.JoinTree == nil || policyQuery.JoinTree.Quals == nil {
+		return nil, fmt.Errorf("policy expression produced no qualification")
+	}
+
+	qual := policyQuery.JoinTree.Quals
+
+	// Rewrite column references in the policy qual to point to the
+	// outer query's RTE instead of the policy's internal RTE.
+	qual = rw.remapPolicyVars(qual, rte)
+
+	// Replace current_user references with the actual current user value.
+	qual = rw.resolveCurrentUser(qual)
+
+	return qual, nil
+}
+
+// remapPolicyVars rewrites ColumnVar nodes in a policy expression to
+// reference the outer query's range table entry.
+func (rw *Rewriter) remapPolicyVars(expr planner.AnalyzedExpr, rte *planner.RangeTblEntry) planner.AnalyzedExpr {
+	if expr == nil {
+		return nil
+	}
+	switch e := expr.(type) {
+	case *planner.ColumnVar:
+		// Find the matching column in the outer RTE.
+		for i, col := range rte.Columns {
+			if strings.EqualFold(col.Name, e.ColName) {
+				return &planner.ColumnVar{
+					RTIndex:  rte.RTIndex,
+					ColNum:   col.ColNum,
+					ColName:  col.Name,
+					Table:    rte.Alias,
+					VarType:  col.Type,
+					AttIndex: i,
+				}
+			}
+		}
+		return e
+	case *planner.OpExpr:
+		return &planner.OpExpr{
+			Op:        e.Op,
+			Left:      rw.remapPolicyVars(e.Left, rte),
+			Right:     rw.remapPolicyVars(e.Right, rte),
+			ResultTyp: e.ResultTyp,
+		}
+	case *planner.BoolExprNode:
+		newArgs := make([]planner.AnalyzedExpr, len(e.Args))
+		for i, arg := range e.Args {
+			newArgs[i] = rw.remapPolicyVars(arg, rte)
+		}
+		return &planner.BoolExprNode{Op: e.Op, Args: newArgs}
+	case *planner.NullTestExpr:
+		return &planner.NullTestExpr{
+			Arg:   rw.remapPolicyVars(e.Arg, rte),
+			IsNot: e.IsNot,
+		}
+	default:
+		return expr
+	}
+}
+
+// resolveCurrentUser replaces ColumnVar nodes named "current_user"
+// with a string constant of the actual current user.
+func (rw *Rewriter) resolveCurrentUser(expr planner.AnalyzedExpr) planner.AnalyzedExpr {
+	if expr == nil {
+		return nil
+	}
+	switch e := expr.(type) {
+	case *planner.ColumnVar:
+		if strings.EqualFold(e.ColName, "current_user") {
+			return &planner.Const{
+				Value:     tuple.DText(rw.CurrentUser),
+				ConstType: tuple.TypeText,
+			}
+		}
+		return e
+	case *planner.OpExpr:
+		return &planner.OpExpr{
+			Op:        e.Op,
+			Left:      rw.resolveCurrentUser(e.Left),
+			Right:     rw.resolveCurrentUser(e.Right),
+			ResultTyp: e.ResultTyp,
+		}
+	case *planner.BoolExprNode:
+		newArgs := make([]planner.AnalyzedExpr, len(e.Args))
+		for i, arg := range e.Args {
+			newArgs[i] = rw.resolveCurrentUser(arg)
+		}
+		return &planner.BoolExprNode{Op: e.Op, Args: newArgs}
+	case *planner.NullTestExpr:
+		return &planner.NullTestExpr{
+			Arg:   rw.resolveCurrentUser(e.Arg),
+			IsNot: e.IsNot,
+		}
+	default:
+		return expr
+	}
+}
+
+func cmdToPolicy(cmd planner.CmdType) catalog.PolicyCmd {
+	switch cmd {
+	case planner.CmdSelect:
+		return catalog.PolicyCmdSelect
+	case planner.CmdInsert:
+		return catalog.PolicyCmdInsert
+	case planner.CmdUpdate:
+		return catalog.PolicyCmdUpdate
+	case planner.CmdDelete:
+		return catalog.PolicyCmdDelete
+	default:
+		return catalog.PolicyCmdAll
+	}
 }

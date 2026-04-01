@@ -236,3 +236,33 @@ type LogicalAlterTable struct {
 
 func (n *LogicalAlterTable) String() string         { return fmt.Sprintf("AlterTable(%s)", n.Table) }
 func (n *LogicalAlterTable) OutputColumns() []string { return nil }
+
+// LogicalCreatePolicy represents CREATE POLICY.
+type LogicalCreatePolicy struct {
+	Name       string
+	Table      string
+	Cmd        string
+	Permissive bool
+	Roles      []string
+	Using      string
+	Check      string
+}
+
+func (n *LogicalCreatePolicy) String() string         { return fmt.Sprintf("CreatePolicy(%s)", n.Name) }
+func (n *LogicalCreatePolicy) OutputColumns() []string { return nil }
+
+// LogicalEnableRLS represents ALTER TABLE ... ENABLE ROW LEVEL SECURITY.
+type LogicalEnableRLS struct {
+	Table string
+}
+
+func (n *LogicalEnableRLS) String() string         { return fmt.Sprintf("EnableRLS(%s)", n.Table) }
+func (n *LogicalEnableRLS) OutputColumns() []string { return nil }
+
+// LogicalDisableRLS represents ALTER TABLE ... DISABLE ROW LEVEL SECURITY.
+type LogicalDisableRLS struct {
+	Table string
+}
+
+func (n *LogicalDisableRLS) String() string         { return fmt.Sprintf("DisableRLS(%s)", n.Table) }
+func (n *LogicalDisableRLS) OutputColumns() []string { return nil }

@@ -237,3 +237,36 @@ type PhysAlterTable struct {
 func (n *PhysAlterTable) String() string            { return fmt.Sprintf("AlterTable %s", n.Table) }
 func (n *PhysAlterTable) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysAlterTable) Children() []PhysicalNode  { return nil }
+
+// PhysCreatePolicy represents CREATE POLICY.
+type PhysCreatePolicy struct {
+	Name       string
+	Table      string
+	Cmd        string
+	Permissive bool
+	Roles      []string
+	Using      string
+	Check      string
+}
+
+func (n *PhysCreatePolicy) String() string            { return fmt.Sprintf("CreatePolicy %s ON %s", n.Name, n.Table) }
+func (n *PhysCreatePolicy) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreatePolicy) Children() []PhysicalNode  { return nil }
+
+// PhysEnableRLS represents ALTER TABLE ... ENABLE ROW LEVEL SECURITY.
+type PhysEnableRLS struct {
+	Table string
+}
+
+func (n *PhysEnableRLS) String() string            { return fmt.Sprintf("EnableRLS %s", n.Table) }
+func (n *PhysEnableRLS) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysEnableRLS) Children() []PhysicalNode  { return nil }
+
+// PhysDisableRLS represents ALTER TABLE ... DISABLE ROW LEVEL SECURITY.
+type PhysDisableRLS struct {
+	Table string
+}
+
+func (n *PhysDisableRLS) String() string            { return fmt.Sprintf("DisableRLS %s", n.Table) }
+func (n *PhysDisableRLS) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDisableRLS) Children() []PhysicalNode  { return nil }
