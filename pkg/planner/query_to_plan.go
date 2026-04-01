@@ -174,7 +174,7 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 	case UtilCreateTable:
 		return &LogicalCreateTable{Table: u.TableName, Columns: u.Columns}, nil
 	case UtilCreateIndex:
-		return &LogicalCreateIndex{Index: u.IndexName, Table: u.IndexTable, Column: u.IndexColumn}, nil
+		return &LogicalCreateIndex{Index: u.IndexName, Table: u.IndexTable, Column: u.IndexColumn, Method: u.IndexMethod}, nil
 	case UtilCreateSequence:
 		return &LogicalCreateSequence{Name: u.SeqName}, nil
 	case UtilCreateView:

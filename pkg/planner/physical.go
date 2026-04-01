@@ -193,6 +193,7 @@ type PhysCreateIndex struct {
 	Index  string
 	Table  string
 	Column string
+	Method string
 }
 
 func (n *PhysCreateIndex) String() string            { return fmt.Sprintf("CreateIndex %s", n.Index) }

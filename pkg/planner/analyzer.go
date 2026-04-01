@@ -728,9 +728,14 @@ func (a *Analyzer) transformIndexStmt(n *parser.IndexStmt) (*Query, error) {
 	if len(n.IndexParams) > 0 {
 		colName = n.IndexParams[0].Name
 	}
+	method := n.AccessMethod
+	if method == "" {
+		method = "btree" // default, same as PostgreSQL
+	}
 	return a.makeUtilityQuery(UtilCreateIndex, &UtilityStmt{
 		Type: UtilCreateIndex, IndexName: n.Idxname,
 		IndexTable: n.Relation.Relname, IndexColumn: colName,
+		IndexMethod: method,
 	}), nil
 }
 

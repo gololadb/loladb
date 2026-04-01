@@ -21,7 +21,7 @@ func TestCreateIndex(t *testing.T) {
 		{Name: "name", Type: tuple.TypeText},
 	})
 
-	oid, err := cat.CreateIndex("idx_users_id", "users", "id")
+	oid, err := cat.CreateIndex("idx_users_id", "users", "id", "btree")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,9 +33,9 @@ func TestCreateIndex(t *testing.T) {
 func TestCreateIndex_DuplicateName(t *testing.T) {
 	cat := newTestCatalog(t)
 	cat.CreateTable("users", []ColumnDef{{Name: "id", Type: tuple.TypeInt32}})
-	cat.CreateIndex("idx_users_id", "users", "id")
+	cat.CreateIndex("idx_users_id", "users", "id", "btree")
 
-	_, err := cat.CreateIndex("idx_users_id", "users", "id")
+	_, err := cat.CreateIndex("idx_users_id", "users", "id", "btree")
 	if err == nil {
 		t.Fatal("expected error for duplicate index name")
 	}
@@ -43,7 +43,7 @@ func TestCreateIndex_DuplicateName(t *testing.T) {
 
 func TestCreateIndex_TableNotFound(t *testing.T) {
 	cat := newTestCatalog(t)
-	_, err := cat.CreateIndex("idx_x", "nonexistent", "id")
+	_, err := cat.CreateIndex("idx_x", "nonexistent", "id", "btree")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -53,7 +53,7 @@ func TestCreateIndex_ColumnNotFound(t *testing.T) {
 	cat := newTestCatalog(t)
 	cat.CreateTable("users", []ColumnDef{{Name: "id", Type: tuple.TypeInt32}})
 
-	_, err := cat.CreateIndex("idx_x", "users", "nonexistent")
+	_, err := cat.CreateIndex("idx_x", "users", "nonexistent", "btree")
 	if err == nil {
 		t.Fatal("expected error for nonexistent column")
 	}
@@ -62,7 +62,7 @@ func TestCreateIndex_ColumnNotFound(t *testing.T) {
 func TestIndexScan_Empty(t *testing.T) {
 	cat := newTestCatalog(t)
 	cat.CreateTable("users", []ColumnDef{{Name: "id", Type: tuple.TypeInt32}})
-	cat.CreateIndex("idx_users_id", "users", "id")
+	cat.CreateIndex("idx_users_id", "users", "id", "btree")
 
 	tuples, _, err := cat.IndexScan("idx_users_id", 42)
 	if err != nil {
@@ -85,7 +85,7 @@ func TestCreateIndex_PopulatesExistingData(t *testing.T) {
 	cat.InsertInto("users", []tuple.Datum{tuple.DInt32(20), tuple.DText("Bob")})
 	cat.InsertInto("users", []tuple.Datum{tuple.DInt32(30), tuple.DText("Charlie")})
 
-	cat.CreateIndex("idx_users_id", "users", "id")
+	cat.CreateIndex("idx_users_id", "users", "id", "btree")
 
 	// Index should find pre-existing data.
 	tuples, _, err := cat.IndexScan("idx_users_id", 20)
@@ -106,7 +106,7 @@ func TestInsertInto_AutoUpdatesIndex(t *testing.T) {
 		{Name: "id", Type: tuple.TypeInt32},
 		{Name: "name", Type: tuple.TypeText},
 	})
-	cat.CreateIndex("idx_users_id", "users", "id")
+	cat.CreateIndex("idx_users_id", "users", "id", "btree")
 
 	// Insert AFTER creating the index.
 	cat.InsertInto("users", []tuple.Datum{tuple.DInt32(42), tuple.DText("Alice")})
@@ -139,7 +139,7 @@ func TestInsertInto_AutoUpdatesIndex(t *testing.T) {
 func TestIndexScan_NotFound(t *testing.T) {
 	cat := newTestCatalog(t)
 	cat.CreateTable("users", []ColumnDef{{Name: "id", Type: tuple.TypeInt32}})
-	cat.CreateIndex("idx_users_id", "users", "id")
+	cat.CreateIndex("idx_users_id", "users", "id", "btree")
 	cat.InsertInto("users", []tuple.Datum{tuple.DInt32(1)})
 
 	tuples, _, err := cat.IndexScan("idx_users_id", 999)
@@ -165,7 +165,7 @@ func TestIndex_ManyRows(t *testing.T) {
 		{Name: "id", Type: tuple.TypeInt32},
 		{Name: "val", Type: tuple.TypeText},
 	})
-	cat.CreateIndex("idx_items_id", "items", "id")
+	cat.CreateIndex("idx_items_id", "items", "id", "btree")
 
 	n := 500
 	for i := 0; i < n; i++ {
@@ -202,7 +202,7 @@ func TestIndex_SeqScanVsIndexScan(t *testing.T) {
 		{Name: "id", Type: tuple.TypeInt32},
 		{Name: "name", Type: tuple.TypeText},
 	})
-	cat.CreateIndex("idx_users_id", "users", "id")
+	cat.CreateIndex("idx_users_id", "users", "id", "btree")
 
 	cat.InsertInto("users", []tuple.Datum{tuple.DInt32(1), tuple.DText("Alice")})
 	cat.InsertInto("users", []tuple.Datum{tuple.DInt32(2), tuple.DText("Bob")})
@@ -231,7 +231,7 @@ func TestIndex_DuplicateKeys(t *testing.T) {
 		{Name: "code", Type: tuple.TypeInt32},
 		{Name: "msg", Type: tuple.TypeText},
 	})
-	cat.CreateIndex("idx_events_code", "events", "code")
+	cat.CreateIndex("idx_events_code", "events", "code", "btree")
 
 	cat.InsertInto("events", []tuple.Datum{tuple.DInt32(100), tuple.DText("a")})
 	cat.InsertInto("events", []tuple.Datum{tuple.DInt32(100), tuple.DText("b")})
@@ -252,7 +252,7 @@ func TestIndex_Int64Key(t *testing.T) {
 		{Name: "id", Type: tuple.TypeInt64},
 		{Name: "val", Type: tuple.TypeText},
 	})
-	cat.CreateIndex("idx_big_id", "big", "id")
+	cat.CreateIndex("idx_big_id", "big", "id", "btree")
 
 	cat.InsertInto("big", []tuple.Datum{tuple.DInt64(9999999999), tuple.DText("large")})
 
@@ -278,7 +278,7 @@ func TestIndex_PersistAcrossRestart(t *testing.T) {
 		{Name: "id", Type: tuple.TypeInt32},
 		{Name: "name", Type: tuple.TypeText},
 	})
-	cat.CreateIndex("idx_users_id", "users", "id")
+	cat.CreateIndex("idx_users_id", "users", "id", "btree")
 	cat.InsertInto("users", []tuple.Datum{tuple.DInt32(42), tuple.DText("Alice")})
 	eng.Close()
 
@@ -304,8 +304,8 @@ func TestIndex_MultipleIndexesOnTable(t *testing.T) {
 		{Name: "a", Type: tuple.TypeInt32},
 		{Name: "b", Type: tuple.TypeInt32},
 	})
-	cat.CreateIndex("idx_a", "data", "a")
-	cat.CreateIndex("idx_b", "data", "b")
+	cat.CreateIndex("idx_a", "data", "a", "btree")
+	cat.CreateIndex("idx_b", "data", "b", "btree")
 
 	cat.InsertInto("data", []tuple.Datum{tuple.DInt32(1), tuple.DInt32(10)})
 	cat.InsertInto("data", []tuple.Datum{tuple.DInt32(2), tuple.DInt32(20)})

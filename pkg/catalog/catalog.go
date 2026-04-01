@@ -3,8 +3,14 @@ package catalog
 import (
 	"fmt"
 
-	"github.com/jespino/loladb/pkg/btree"
 	"github.com/jespino/loladb/pkg/engine"
+	"github.com/jespino/loladb/pkg/index"
+	"github.com/jespino/loladb/pkg/index/brin"
+	"github.com/jespino/loladb/pkg/index/btree"
+	"github.com/jespino/loladb/pkg/index/gin"
+	"github.com/jespino/loladb/pkg/index/gist"
+	"github.com/jespino/loladb/pkg/index/hash"
+	"github.com/jespino/loladb/pkg/index/spgist"
 	"github.com/jespino/loladb/pkg/mvcc"
 	"github.com/jespino/loladb/pkg/slottedpage"
 	"github.com/jespino/loladb/pkg/toast"
@@ -47,9 +53,10 @@ type IndexInfo struct {
 	Relation           // embedded: OID, Name, Kind, Pages, HeadPage (=root page)
 	TableOID int32     // OID of the indexed table
 	ColNum   int32     // 1-based column number being indexed
+	Method   string    // access method: btree, hash, gin, gist, spgist, brin
 }
 
-// engineAllocator adapts the engine to the btree.PageAllocator interface.
+// engineAllocator adapts the engine to the index.PageAllocator interface.
 type engineAllocator struct {
 	eng *engine.Engine
 }
@@ -63,7 +70,8 @@ func (a *engineAllocator) MarkDirty(pn uint32)                     { a.eng.Pool.
 // system tables that live in normal heap pages.
 type Catalog struct {
 	Eng      *engine.Engine
-	alloc    *engineAllocator // shared btree page allocator
+	alloc    *engineAllocator // shared page allocator
+	IdxAMs   map[string]index.IndexAM // AM registry: method name → IndexAM
 	Rules    *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
 	Policies *policyStore     // in-memory RLS policy storage (pg_policy)
 }
@@ -71,7 +79,16 @@ type Catalog struct {
 // New wraps an engine with catalog operations. If the database is
 // freshly created (PgClassPage == 0), it bootstraps the system tables.
 func New(eng *engine.Engine) (*Catalog, error) {
-	c := &Catalog{Eng: eng, alloc: &engineAllocator{eng: eng}, Rules: newRuleStore(), Policies: newPolicyStore()}
+	alloc := &engineAllocator{eng: eng}
+	ams := map[string]index.IndexAM{
+		"btree":  btree.NewAM(alloc),
+		"hash":   hash.NewAM(alloc),
+		"brin":   brin.NewAM(alloc),
+		"gin":    gin.NewAM(alloc),
+		"gist":   gist.NewAM(alloc),
+		"spgist": spgist.NewAM(alloc),
+	}
+	c := &Catalog{Eng: eng, alloc: alloc, IdxAMs: ams, Rules: newRuleStore(), Policies: newPolicyStore()}
 
 	if eng.Super.PgClassPage == 0 {
 		if err := c.bootstrap(); err != nil {
@@ -94,6 +111,17 @@ func New(eng *engine.Engine) (*Catalog, error) {
 	}
 
 	return c, nil
+}
+
+// getAM returns the IndexAM for the given method name. Falls back to btree.
+func (c *Catalog) getAM(method string) index.IndexAM {
+	if method == "" {
+		method = "btree"
+	}
+	if am, ok := c.IdxAMs[method]; ok {
+		return am
+	}
+	return c.IdxAMs["btree"]
 }
 
 // bootstrap allocates heap pages for pg_class, pg_attribute, and
@@ -605,17 +633,13 @@ func (c *Catalog) InsertInto(tableName string, values []tuple.Datum) (slottedpag
 		if int(colIdx) >= len(values) {
 			continue
 		}
-		key, ok := datumToInt64(values[colIdx])
-		if !ok {
-			continue // non-indexable type
-		}
-		bt := btree.New(uint32(idx.HeadPage), c.alloc)
-		if err := bt.Insert(key, id.Page, id.Slot); err != nil {
+		am := c.getAM(idx.Method)
+		newRoot, err := am.Insert(uint32(idx.HeadPage), values[colIdx], id)
+		if err != nil {
 			return id, nil // non-fatal
 		}
-		// The root page may have changed due to splits.
-		if bt.RootPage() != uint32(idx.HeadPage) {
-			c.updateIndexRootPage(idx.OID, bt.RootPage())
+		if newRoot != uint32(idx.HeadPage) {
+			c.updateIndexRootPage(idx.OID, newRoot)
 		}
 	}
 
@@ -669,7 +693,12 @@ func (c *Catalog) Delete(tableName string, id slottedpage.ItemID) error {
 // CreateIndex creates a B+Tree index on the given column of the named
 // table. It registers the index in pg_class and populates it with
 // existing data.
-func (c *Catalog) CreateIndex(indexName, tableName, colName string) (int32, error) {
+func (c *Catalog) CreateIndex(indexName, tableName, colName, method string) (int32, error) {
+	if method == "" {
+		method = "btree"
+	}
+	am := c.getAM(method)
+
 	// Check for duplicate index name.
 	existing, err := c.FindRelation(indexName)
 	if err != nil {
@@ -704,26 +733,16 @@ func (c *Catalog) CreateIndex(indexName, tableName, colName string) (int32, erro
 		return 0, fmt.Errorf("catalog: column %q not found in table %q", colName, tableName)
 	}
 
-	// Allocate root page for the B+Tree.
-	rootPage, err := c.Eng.AllocPage()
+	// Allocate and initialize root page via the index AM.
+	rootPage, err := am.InitRootPage()
 	if err != nil {
 		return 0, err
 	}
-
-	// Init as leaf page.
-	buf, err := c.Eng.Pool.FetchPage(rootPage)
-	if err != nil {
-		return 0, err
-	}
-	leaf := btree.InitLeafPage(rootPage)
-	copy(buf, leaf.Bytes())
-	c.Eng.Pool.MarkDirty(rootPage)
-	c.Eng.Pool.ReleasePage(rootPage)
 
 	oid := int32(c.Eng.Super.AllocOID())
 
 	// Insert into pg_class with extra columns for index metadata.
-	// Columns: oid, relname, relkind, relpages, relheadpage, indrelid, indkey
+	// Columns: oid, relname, relkind, relpages, relheadpage, indrelid, indkey, indmethod
 	xid := c.Eng.TxMgr.Begin()
 	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, []tuple.Datum{
 		tuple.DInt32(oid),
@@ -733,6 +752,7 @@ func (c *Catalog) CreateIndex(indexName, tableName, colName string) (int32, erro
 		tuple.DInt32(int32(rootPage)),
 		tuple.DInt32(table.OID), // indrelid
 		tuple.DInt32(colNum),    // indkey
+		tuple.DText(method),     // indmethod
 	})
 	if err != nil {
 		c.Eng.TxMgr.Abort(xid)
@@ -740,31 +760,26 @@ func (c *Catalog) CreateIndex(indexName, tableName, colName string) (int32, erro
 	}
 	c.Eng.TxMgr.Commit(xid)
 
-	// Populate the index with existing rows.
-	bt := btree.New(rootPage, c.alloc)
+	// Populate the index with existing rows via Build.
 	colIdx := colNum - 1
-
 	scanXid := c.Eng.TxMgr.Begin()
 	snap := c.Eng.TxMgr.Snapshot(scanXid)
-	err = c.Eng.SeqScan(uint32(table.HeadPage), snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		if int(colIdx) >= len(tup.Columns) {
-			return true
-		}
-		key, ok := datumToInt64(tup.Columns[colIdx])
-		if !ok {
-			return true
-		}
-		bt.Insert(key, id.Page, id.Slot)
-		return true
+
+	newRoot, err := am.Build(rootPage, func(yield func(key tuple.Datum, tid slottedpage.ItemID) bool) {
+		c.Eng.SeqScan(uint32(table.HeadPage), snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+			if int(colIdx) >= len(tup.Columns) {
+				return true
+			}
+			return yield(tup.Columns[colIdx], id)
+		})
 	})
 	c.Eng.TxMgr.Commit(scanXid)
 	if err != nil {
 		return 0, err
 	}
 
-	// Update root page if it changed during population.
-	if bt.RootPage() != rootPage {
-		c.updateIndexRootPage(oid, bt.RootPage())
+	if newRoot != rootPage {
+		c.updateIndexRootPage(oid, newRoot)
 	}
 
 	return oid, nil
@@ -781,49 +796,18 @@ func (c *Catalog) IndexScan(indexName string, key int64) ([]*tuple.Tuple, []slot
 		return nil, nil, fmt.Errorf("catalog: index %q not found", indexName)
 	}
 
-	bt := btree.New(uint32(idx.HeadPage), c.alloc)
-	entries, err := bt.Search(key)
-	if err != nil {
-		return nil, nil, fmt.Errorf("catalog: index search: %w", err)
-	}
+	am := c.getAM(idx.Method)
+	scan := am.BeginScan(uint32(idx.HeadPage))
+	defer scan.End()
+	scan.Rescan([]index.ScanKey{
+		{AttrNum: 1, Strategy: index.StrategyEqual, Value: tuple.DInt64(key)},
+	})
 
 	xid := c.Eng.TxMgr.Begin()
 	snap := c.Eng.TxMgr.Snapshot(xid)
 	defer c.Eng.TxMgr.Commit(xid)
 
-	var tuples []*tuple.Tuple
-	var ids []slottedpage.ItemID
-	for _, e := range entries {
-		pageBuf, err := c.Eng.Pool.FetchPage(e.PageNum)
-		if err != nil {
-			continue
-		}
-		sp, err := slottedpage.FromBytes(pageBuf)
-		if err != nil {
-			c.Eng.Pool.ReleasePage(e.PageNum)
-			continue
-		}
-		raw, err := sp.GetTuple(e.SlotNum)
-		c.Eng.Pool.ReleasePage(e.PageNum)
-		if err != nil {
-			continue
-		}
-		tup, err := tuple.Decode(raw)
-		if err != nil {
-			continue
-		}
-		if !snap.IsVisible(tup.Xmin, tup.Xmax) {
-			continue
-		}
-		// Detoast any toast pointers.
-		detoasted, derr := toast.DetoastValues(c.alloc, tup.Columns)
-		if derr == nil {
-			tup.Columns = detoasted
-		}
-		tuples = append(tuples, tup)
-		ids = append(ids, slottedpage.ItemID{Page: e.PageNum, Slot: e.SlotNum})
-	}
-	return tuples, ids, nil
+	return c.fetchHeapTuples(scan, snap)
 }
 
 // ListIndexesForTable returns all indexes for the given table OID.
@@ -840,6 +824,10 @@ func (c *Catalog) getIndexesForTable(tableOID int32) ([]IndexInfo, error) {
 	var indexes []IndexInfo
 	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
 		if len(tup.Columns) >= 7 && tup.Columns[2].I32 == RelKindIndex && tup.Columns[5].I32 == tableOID {
+			method := "btree"
+			if len(tup.Columns) >= 8 && tup.Columns[7].Type == tuple.TypeText {
+				method = tup.Columns[7].Text
+			}
 			indexes = append(indexes, IndexInfo{
 				Relation: Relation{
 					OID:      tup.Columns[0].I32,
@@ -850,6 +838,7 @@ func (c *Catalog) getIndexesForTable(tableOID int32) ([]IndexInfo, error) {
 				},
 				TableOID: tup.Columns[5].I32,
 				ColNum:   tup.Columns[6].I32,
+				Method:   method,
 			})
 		}
 		return true
@@ -866,6 +855,10 @@ func (c *Catalog) findIndex(name string) (*IndexInfo, error) {
 	var found *IndexInfo
 	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
 		if len(tup.Columns) >= 7 && tup.Columns[1].Text == name && tup.Columns[2].I32 == RelKindIndex {
+			method := "btree"
+			if len(tup.Columns) >= 8 && tup.Columns[7].Type == tuple.TypeText {
+				method = tup.Columns[7].Text
+			}
 			found = &IndexInfo{
 				Relation: Relation{
 					OID:      tup.Columns[0].I32,
@@ -876,6 +869,7 @@ func (c *Catalog) findIndex(name string) (*IndexInfo, error) {
 				},
 				TableOID: tup.Columns[5].I32,
 				ColNum:   tup.Columns[6].I32,
+				Method:   method,
 			}
 			return false
 		}
@@ -911,8 +905,8 @@ func (c *Catalog) updateIndexRootPage(indexOID int32, newRoot uint32) {
 	// Delete old entry.
 	c.Eng.Delete(xid, targetID)
 
-	// Insert updated entry.
-	c.Eng.Insert(xid, c.Eng.Super.PgClassPage, []tuple.Datum{
+	// Insert updated entry, preserving all columns including method.
+	newCols := []tuple.Datum{
 		tuple.DInt32(targetTup.Columns[0].I32),
 		tuple.DText(targetTup.Columns[1].Text),
 		tuple.DInt32(targetTup.Columns[2].I32),
@@ -920,7 +914,11 @@ func (c *Catalog) updateIndexRootPage(indexOID int32, newRoot uint32) {
 		tuple.DInt32(int32(newRoot)),
 		tuple.DInt32(targetTup.Columns[5].I32),
 		tuple.DInt32(targetTup.Columns[6].I32),
-	})
+	}
+	if len(targetTup.Columns) >= 8 {
+		newCols = append(newCols, targetTup.Columns[7])
+	}
+	c.Eng.Insert(xid, c.Eng.Super.PgClassPage, newCols)
 	c.Eng.TxMgr.Commit(xid)
 }
 
@@ -984,14 +982,13 @@ func (c *Catalog) Update(tableName string, id slottedpage.ItemID, newValues []tu
 		if int(colIdx) >= len(newValues) {
 			continue
 		}
-		key, ok := datumToInt64(newValues[colIdx])
-		if !ok {
+		am := c.getAM(idx.Method)
+		newRoot, err := am.Insert(uint32(idx.HeadPage), newValues[colIdx], newID)
+		if err != nil {
 			continue
 		}
-		bt := btree.New(uint32(idx.HeadPage), c.alloc)
-		bt.Insert(key, newID.Page, newID.Slot)
-		if bt.RootPage() != uint32(idx.HeadPage) {
-			c.updateIndexRootPage(idx.OID, bt.RootPage())
+		if newRoot != uint32(idx.HeadPage) {
+			c.updateIndexRootPage(idx.OID, newRoot)
 		}
 	}
 
@@ -1000,39 +997,30 @@ func (c *Catalog) Update(tableName string, id slottedpage.ItemID, newValues []tu
 
 // RangeScan performs an index range scan for keys in [lo, hi] and
 // returns the matching heap tuples with MVCC visibility applied.
-func (c *Catalog) RangeScan(indexName string, lo, hi int64) ([]*tuple.Tuple, []slottedpage.ItemID, error) {
-	idx, err := c.findIndex(indexName)
-	if err != nil {
-		return nil, nil, err
-	}
-	if idx == nil {
-		return nil, nil, fmt.Errorf("catalog: index %q not found", indexName)
-	}
-
-	bt := btree.New(uint32(idx.HeadPage), c.alloc)
-	entries, err := bt.RangeScan(lo, hi)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	xid := c.Eng.TxMgr.Begin()
-	snap := c.Eng.TxMgr.Snapshot(xid)
-	defer c.Eng.TxMgr.Commit(xid)
-
+// fetchHeapTuples drains an index scan, fetching and filtering heap
+// tuples through MVCC visibility. Shared by IndexScan and RangeScan.
+func (c *Catalog) fetchHeapTuples(scan index.IndexScan, snap *mvcc.Snapshot) ([]*tuple.Tuple, []slottedpage.ItemID, error) {
 	var tuples []*tuple.Tuple
 	var ids []slottedpage.ItemID
-	for _, e := range entries {
-		pageBuf, err := c.Eng.Pool.FetchPage(e.PageNum)
+	for {
+		tid, ok, err := scan.Next(index.ForwardScan)
+		if err != nil {
+			return tuples, ids, err
+		}
+		if !ok {
+			break
+		}
+		pageBuf, err := c.Eng.Pool.FetchPage(tid.Page)
 		if err != nil {
 			continue
 		}
 		sp, err := slottedpage.FromBytes(pageBuf)
 		if err != nil {
-			c.Eng.Pool.ReleasePage(e.PageNum)
+			c.Eng.Pool.ReleasePage(tid.Page)
 			continue
 		}
-		raw, err := sp.GetTuple(e.SlotNum)
-		c.Eng.Pool.ReleasePage(e.PageNum)
+		raw, err := sp.GetTuple(tid.Slot)
+		c.Eng.Pool.ReleasePage(tid.Page)
 		if err != nil {
 			continue
 		}
@@ -1048,9 +1036,33 @@ func (c *Catalog) RangeScan(indexName string, lo, hi int64) ([]*tuple.Tuple, []s
 			tup.Columns = detoasted
 		}
 		tuples = append(tuples, tup)
-		ids = append(ids, slottedpage.ItemID{Page: e.PageNum, Slot: e.SlotNum})
+		ids = append(ids, tid)
 	}
 	return tuples, ids, nil
+}
+
+func (c *Catalog) RangeScan(indexName string, lo, hi int64) ([]*tuple.Tuple, []slottedpage.ItemID, error) {
+	idx, err := c.findIndex(indexName)
+	if err != nil {
+		return nil, nil, err
+	}
+	if idx == nil {
+		return nil, nil, fmt.Errorf("catalog: index %q not found", indexName)
+	}
+
+	am := c.getAM(idx.Method)
+	scan := am.BeginScan(uint32(idx.HeadPage))
+	defer scan.End()
+	scan.Rescan([]index.ScanKey{
+		{AttrNum: 1, Strategy: index.StrategyGreaterEqual, Value: tuple.DInt64(lo)},
+		{AttrNum: 1, Strategy: index.StrategyLessEqual, Value: tuple.DInt64(hi)},
+	})
+
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	defer c.Eng.TxMgr.Commit(xid)
+
+	return c.fetchHeapTuples(scan, snap)
 }
 
 // TableStats holds basic statistics about a table.
@@ -1218,14 +1230,4 @@ func typeCompatible(got, want tuple.DatumType) bool {
 	return false
 }
 
-// datumToInt64 converts a Datum to an int64 key for B+Tree indexing.
-func datumToInt64(d tuple.Datum) (int64, bool) {
-	switch d.Type {
-	case tuple.TypeInt32:
-		return int64(d.I32), true
-	case tuple.TypeInt64:
-		return d.I64, true
-	default:
-		return 0, false
-	}
-}
+

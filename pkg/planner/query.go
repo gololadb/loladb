@@ -189,6 +189,7 @@ type UtilityStmt struct {
 	IndexName   string
 	IndexTable  string
 	IndexColumn string
+	IndexMethod string // btree, hash, gin, gist, spgist, brin
 	SeqName     string
 	ViewName    string
 	ViewDef     string

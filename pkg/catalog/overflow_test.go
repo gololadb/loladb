@@ -100,7 +100,7 @@ func TestOverflow_WithIndex(t *testing.T) {
 		{Name: "id", Type: tuple.TypeInt32},
 		{Name: "val", Type: tuple.TypeText},
 	})
-	cat.CreateIndex("idx_indexed_id", "indexed", "id")
+	cat.CreateIndex("idx_indexed_id", "indexed", "id", "btree")
 
 	n := 1000
 	for i := 0; i < n; i++ {

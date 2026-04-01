@@ -97,7 +97,7 @@ func TestRangeScan_Basic(t *testing.T) {
 		{Name: "id", Type: tuple.TypeInt32},
 		{Name: "val", Type: tuple.TypeText},
 	})
-	cat.CreateIndex("idx_data_id", "data", "id")
+	cat.CreateIndex("idx_data_id", "data", "id", "btree")
 
 	for i := 0; i < 100; i++ {
 		cat.InsertInto("data", []tuple.Datum{tuple.DInt32(int32(i)), tuple.DText("v")})
@@ -121,7 +121,7 @@ func TestRangeScan_Basic(t *testing.T) {
 func TestRangeScan_Empty(t *testing.T) {
 	cat := newTestCatalog(t)
 	cat.CreateTable("data", []ColumnDef{{Name: "id", Type: tuple.TypeInt32}})
-	cat.CreateIndex("idx", "data", "id")
+	cat.CreateIndex("idx", "data", "id", "btree")
 
 	for i := 0; i < 10; i++ {
 		cat.InsertInto("data", []tuple.Datum{tuple.DInt32(int32(i))})
@@ -136,7 +136,7 @@ func TestRangeScan_Empty(t *testing.T) {
 func TestRangeScan_SingleValue(t *testing.T) {
 	cat := newTestCatalog(t)
 	cat.CreateTable("data", []ColumnDef{{Name: "id", Type: tuple.TypeInt32}})
-	cat.CreateIndex("idx", "data", "id")
+	cat.CreateIndex("idx", "data", "id", "btree")
 
 	for i := 0; i < 50; i++ {
 		cat.InsertInto("data", []tuple.Datum{tuple.DInt32(int32(i))})

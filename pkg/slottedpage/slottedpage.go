@@ -9,9 +9,14 @@ import (
 
 // Page type constants.
 const (
-	PageTypeHeap     = 1
-	PageTypeBTreeInt = 2
+	PageTypeHeap      = 1
+	PageTypeBTreeInt  = 2
 	PageTypeBTreeLeaf = 3
+	PageTypeHash      = 4
+	PageTypeBRIN      = 5
+	PageTypeGIN       = 6
+	PageTypeGiST      = 7
+	PageTypeSPGiST    = 8
 )
 
 // Page flag constants.

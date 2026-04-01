@@ -38,7 +38,7 @@ func (o *Optimizer) Optimize(node LogicalNode) (PhysicalNode, error) {
 	case *LogicalCreateTable:
 		return &PhysCreateTable{Table: n.Table, Columns: n.Columns}, nil
 	case *LogicalCreateIndex:
-		return &PhysCreateIndex{Index: n.Index, Table: n.Table, Column: n.Column}, nil
+		return &PhysCreateIndex{Index: n.Index, Table: n.Table, Column: n.Column, Method: n.Method}, nil
 	case *LogicalExplain:
 		return o.Optimize(n.Child)
 	case *LogicalNoOp:

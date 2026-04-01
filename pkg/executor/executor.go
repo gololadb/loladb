@@ -556,7 +556,7 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 }
 
 func (ex *Executor) execCreateIndex(n *planner.PhysCreateIndex) (*Result, error) {
-	_, err := ex.Cat.CreateIndex(n.Index, n.Table, n.Column)
+	_, err := ex.Cat.CreateIndex(n.Index, n.Table, n.Column, n.Method)
 	if err != nil {
 		return nil, err
 	}
