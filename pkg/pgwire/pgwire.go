@@ -54,6 +54,14 @@ const (
 	msgClose     byte = 'C'
 	msgFlush     byte = 'H'
 	msgTerminate byte = 'X'
+	msgPassword  byte = 'p' // PasswordMessage (cleartext or MD5)
+)
+
+// Authentication request codes — mirrors AUTH_REQ_* in libpq.
+const (
+	authReqOk              int32 = 0
+	authReqCleartextPasswd int32 = 3
+	authReqMD5             int32 = 5
 )
 
 // Backend (server → client) message types.
@@ -107,16 +115,34 @@ type QueryExecutor interface {
 	Execute(sql string) (*QueryResult, error)
 }
 
+// SessionExecutor extends QueryExecutor with per-connection session setup.
+// If the executor implements this, pgwire calls SetUser during startup.
+type SessionExecutor interface {
+	QueryExecutor
+	SetUser(user string)
+	// NewSession returns a session-scoped executor for a single connection.
+	// If not implemented, the server shares one executor across connections.
+	NewSession() QueryExecutor
+}
+
+// Authenticator validates user credentials during connection startup.
+// If nil on the Server, all connections are accepted without authentication.
+type Authenticator interface {
+	// Authenticate checks the password for a user. Returns nil on success.
+	Authenticate(user, password string) error
+}
+
 // -----------------------------------------------------------------------
 // Server
 // -----------------------------------------------------------------------
 
 // Server listens for PostgreSQL wire protocol connections.
 type Server struct {
-	Addr      string
-	Executor  QueryExecutor
-	TLSConfig *tls.Config // if non-nil, SSL is offered to clients
-	listener  net.Listener
+	Addr          string
+	Executor      QueryExecutor
+	TLSConfig     *tls.Config    // if non-nil, SSL is offered to clients
+	Authenticator Authenticator  // if non-nil, password auth is required
+	listener      net.Listener
 }
 
 // ListenAndServe starts listening and serving connections.
@@ -156,22 +182,30 @@ func (s *Server) Close() error {
 
 // conn wraps a net.Conn with buffered read/write helpers.
 type conn struct {
-	nc          net.Conn
-	executor    QueryExecutor
-	tlsConfig   *tls.Config
-	params      map[string]string // startup parameters from client
-	preparedSQL string            // last Parse'd statement
-	portalSQL   string            // last Bind'd portal
+	nc            net.Conn
+	executor      QueryExecutor
+	tlsConfig     *tls.Config
+	authenticator Authenticator
+	params        map[string]string // startup parameters from client
+	preparedSQL   string            // last Parse'd statement
+	portalSQL     string            // last Bind'd portal
 }
 
 func (s *Server) handleConn(nc net.Conn) {
 	defer nc.Close()
 
+	// Create a per-connection executor if supported.
+	exec := s.Executor
+	if se, ok := s.Executor.(SessionExecutor); ok {
+		exec = se.NewSession()
+	}
+
 	c := &conn{
-		nc:        nc,
-		executor:  s.Executor,
-		tlsConfig: s.TLSConfig,
-		params:    make(map[string]string),
+		nc:            nc,
+		executor:      exec,
+		tlsConfig:     s.TLSConfig,
+		authenticator: s.Authenticator,
+		params:        make(map[string]string),
 	}
 
 	if err := c.startup(); err != nil {
@@ -252,6 +286,21 @@ func (c *conn) startup() error {
 		}
 
 		break // startup complete
+	}
+
+	// Set the session user if the executor supports it.
+	if user, ok := c.params["user"]; ok {
+		if se, ok := c.executor.(SessionExecutor); ok {
+			se.SetUser(user)
+		}
+	}
+
+	// Authenticate if an authenticator is configured.
+	if c.authenticator != nil {
+		if err := c.authenticate(); err != nil {
+			c.sendError("FATAL", "28P01", err.Error())
+			return err
+		}
 	}
 
 	// Send AuthenticationOk.
@@ -425,6 +474,37 @@ func (c *conn) handleExecute(payload []byte) {
 // -----------------------------------------------------------------------
 // Backend message senders
 // -----------------------------------------------------------------------
+
+// authenticate performs cleartext password authentication.
+// Sends AuthenticationCleartextPassword, reads the PasswordMessage,
+// and validates via the Authenticator.
+func (c *conn) authenticate() error {
+	// Send AuthenticationCleartextPassword request.
+	buf := newMsgBuf(msgAuthentication)
+	buf.writeInt32(authReqCleartextPasswd)
+	c.send(buf)
+
+	// Read PasswordMessage ('p').
+	header := make([]byte, 5)
+	if _, err := io.ReadFull(c.nc, header); err != nil {
+		return fmt.Errorf("read password message: %w", err)
+	}
+	if header[0] != msgPassword {
+		return fmt.Errorf("expected PasswordMessage, got %c", header[0])
+	}
+	msgLen := int(binary.BigEndian.Uint32(header[1:])) - 4
+	if msgLen < 1 || msgLen > 1024 {
+		return fmt.Errorf("invalid password message length: %d", msgLen)
+	}
+	payload := make([]byte, msgLen)
+	if _, err := io.ReadFull(c.nc, payload); err != nil {
+		return fmt.Errorf("read password: %w", err)
+	}
+	password := cstring(payload)
+
+	user := c.params["user"]
+	return c.authenticator.Authenticate(user, password)
+}
 
 func (c *conn) sendAuthOk() {
 	// 'R' + int32(8) + int32(0=AUTH_REQ_OK)

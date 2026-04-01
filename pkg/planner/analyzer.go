@@ -70,6 +70,16 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		return a.makeUtilityQuery(UtilNoOp, &UtilityStmt{
 			Type: UtilNoOp, Message: "EXECUTE",
 		}), nil
+	case *parser.CreateRoleStmt:
+		return a.transformCreateRoleStmt(n)
+	case *parser.AlterRoleStmt:
+		return a.transformAlterRoleStmt(n)
+	case *parser.DropRoleStmt:
+		return a.transformDropRoleStmt(n)
+	case *parser.GrantRoleStmt:
+		return a.transformGrantRoleStmt(n)
+	case *parser.GrantStmt:
+		return a.transformGrantStmt(n)
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported statement %T", stmt)
 	}
@@ -1068,3 +1078,179 @@ func exprToSQL(expr parser.Expr) string {
 	}
 	return fmt.Sprintf("%v", expr)
 }
+
+// -----------------------------------------------------------------------
+// Role / Grant statement transformers
+// -----------------------------------------------------------------------
+
+func defElemString(arg parser.Node) string {
+	switch v := arg.(type) {
+	case *parser.A_Const:
+		return v.Val.Str
+	case *parser.String:
+		return v.Str
+	}
+	return ""
+}
+
+func (a *Analyzer) transformCreateRoleStmt(n *parser.CreateRoleStmt) (*Query, error) {
+	opts := make(map[string]interface{})
+
+	// CREATE USER implies LOGIN by default; CREATE ROLE does not.
+	if n.StmtType == "USER" {
+		opts["login"] = true
+	}
+
+	for _, opt := range n.Options {
+		switch opt.Defname {
+		case "superuser":
+			opts["superuser"] = true
+		case "nosuperuser":
+			opts["superuser"] = false
+		case "createdb":
+			opts["createdb"] = true
+		case "nocreatedb":
+			opts["createdb"] = false
+		case "createrole":
+			opts["createrole"] = true
+		case "nocreaterole":
+			opts["createrole"] = false
+		case "inherit":
+			opts["inherit"] = true
+		case "noinherit":
+			opts["inherit"] = false
+		case "login":
+			opts["login"] = true
+		case "nologin":
+			opts["login"] = false
+		case "bypassrls":
+			opts["bypassrls"] = true
+		case "nobypassrls":
+			opts["bypassrls"] = false
+		case "password":
+			opts["password"] = defElemString(opt.Arg)
+		case "connlimit":
+			if c, ok := opt.Arg.(*parser.A_Const); ok {
+				opts["connlimit"] = int32(c.Val.Ival)
+			}
+		}
+	}
+
+	return a.makeUtilityQuery(UtilCreateRole, &UtilityStmt{
+		Type:         UtilCreateRole,
+		RoleName:     n.RoleName,
+		RoleOptions:  opts,
+		RoleStmtType: n.StmtType,
+	}), nil
+}
+
+func (a *Analyzer) transformAlterRoleStmt(n *parser.AlterRoleStmt) (*Query, error) {
+	opts := make(map[string]interface{})
+
+	for _, opt := range n.Options {
+		switch opt.Defname {
+		case "superuser":
+			opts["superuser"] = true
+		case "nosuperuser":
+			opts["superuser"] = false
+		case "createdb":
+			opts["createdb"] = true
+		case "nocreatedb":
+			opts["createdb"] = false
+		case "createrole":
+			opts["createrole"] = true
+		case "nocreaterole":
+			opts["createrole"] = false
+		case "inherit":
+			opts["inherit"] = true
+		case "noinherit":
+			opts["inherit"] = false
+		case "login":
+			opts["login"] = true
+		case "nologin":
+			opts["login"] = false
+		case "bypassrls":
+			opts["bypassrls"] = true
+		case "nobypassrls":
+			opts["bypassrls"] = false
+		case "password":
+			opts["password"] = defElemString(opt.Arg)
+		case "connlimit":
+			if c, ok := opt.Arg.(*parser.A_Const); ok {
+				opts["connlimit"] = int32(c.Val.Ival)
+			}
+		}
+	}
+
+	return a.makeUtilityQuery(UtilAlterRole, &UtilityStmt{
+		Type:        UtilAlterRole,
+		RoleName:    n.RoleName,
+		RoleOptions: opts,
+	}), nil
+}
+
+func (a *Analyzer) transformDropRoleStmt(n *parser.DropRoleStmt) (*Query, error) {
+	return a.makeUtilityQuery(UtilDropRole, &UtilityStmt{
+		Type:          UtilDropRole,
+		DropRoles:     n.Roles,
+		DropMissingOk: n.MissingOk,
+	}), nil
+}
+
+func (a *Analyzer) transformGrantRoleStmt(n *parser.GrantRoleStmt) (*Query, error) {
+	if n.IsGrant {
+		return a.makeUtilityQuery(UtilGrantRole, &UtilityStmt{
+			Type:         UtilGrantRole,
+			GrantedRoles: n.GrantedRoles,
+			Grantees:     n.Grantees,
+			AdminOption:  n.AdminOption,
+		}), nil
+	}
+	return a.makeUtilityQuery(UtilRevokeRole, &UtilityStmt{
+		Type:         UtilRevokeRole,
+		GrantedRoles: n.GrantedRoles,
+		Grantees:     n.Grantees,
+	}), nil
+}
+
+func (a *Analyzer) transformGrantStmt(n *parser.GrantStmt) (*Query, error) {
+	var objects []string
+	for _, obj := range n.Objects {
+		if len(obj) > 0 {
+			objects = append(objects, obj[len(obj)-1])
+		}
+	}
+
+	targetType := "TABLE"
+	switch n.TargetType {
+	case parser.OBJECT_TABLE:
+		targetType = "TABLE"
+	case parser.OBJECT_SEQUENCE:
+		targetType = "SEQUENCE"
+	case parser.OBJECT_SCHEMA:
+		targetType = "SCHEMA"
+	case parser.OBJECT_FUNCTION:
+		targetType = "FUNCTION"
+	}
+
+	if n.IsGrant {
+		return a.makeUtilityQuery(UtilGrantPrivilege, &UtilityStmt{
+			Type:        UtilGrantPrivilege,
+			Privileges:  n.Privileges,
+			PrivCols:    n.PrivCols,
+			TargetType:  targetType,
+			Objects:     objects,
+			Grantees:    n.Grantees,
+			GrantOption: n.GrantOption,
+		}), nil
+	}
+	return a.makeUtilityQuery(UtilRevokePrivilege, &UtilityStmt{
+		Type:       UtilRevokePrivilege,
+		Privileges: n.Privileges,
+		PrivCols:   n.PrivCols,
+		TargetType: targetType,
+		Objects:    objects,
+		Grantees:   n.Grantees,
+	}), nil
+}
+

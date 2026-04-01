@@ -37,6 +37,7 @@ type Relation struct {
 	Kind     int32
 	Pages    int32
 	HeadPage int32
+	OwnerOID int32 // OID of the owning role (0 = no owner)
 }
 
 // Column holds metadata about a column (a row from pg_attribute).
@@ -74,6 +75,7 @@ type Catalog struct {
 	IdxAMs   map[string]index.IndexAM // AM registry: method name → IndexAM
 	Rules    *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
 	Policies *policyStore     // in-memory RLS policy storage (pg_policy)
+	ACLs     *aclStore        // in-memory object ACL cache
 }
 
 // New wraps an engine with catalog operations. If the database is
@@ -88,11 +90,32 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		"gist":   gist.NewAM(alloc),
 		"spgist": spgist.NewAM(alloc),
 	}
-	c := &Catalog{Eng: eng, alloc: alloc, IdxAMs: ams, Rules: newRuleStore(), Policies: newPolicyStore()}
+	c := &Catalog{Eng: eng, alloc: alloc, IdxAMs: ams, Rules: newRuleStore(), Policies: newPolicyStore(), ACLs: newACLStore()}
 
 	if eng.Super.PgClassPage == 0 {
 		if err := c.bootstrap(); err != nil {
 			return nil, fmt.Errorf("catalog: bootstrap: %w", err)
+		}
+	}
+
+	// Bootstrap auth tables if they don't exist yet (upgrade path).
+	if eng.Super.PgAuthIDPage == 0 {
+		if err := c.bootstrapAuth(); err != nil {
+			return nil, fmt.Errorf("catalog: bootstrap auth: %w", err)
+		}
+	}
+
+	// Bootstrap ACL page if it doesn't exist yet (upgrade path).
+	if eng.Super.PgACLPage == 0 {
+		if err := c.bootstrapACL(); err != nil {
+			return nil, fmt.Errorf("catalog: bootstrap acl: %w", err)
+		}
+	}
+
+	// Load persisted ACLs into the in-memory store.
+	if eng.Super.PgACLPage != 0 {
+		if err := c.loadACLs(); err != nil {
+			return nil, fmt.Errorf("catalog: load acls: %w", err)
 		}
 	}
 
@@ -167,7 +190,13 @@ func (c *Catalog) bootstrap() error {
 // CreateTable creates a new table with the given name and columns.
 // It allocates a heap page for the table, inserts metadata into
 // pg_class and pg_attribute, and returns the OID.
+// ownerOID is the OID of the role that owns this table (0 = no owner).
 func (c *Catalog) CreateTable(name string, cols []ColumnDef) (int32, error) {
+	return c.CreateTableOwned(name, cols, 0)
+}
+
+// CreateTableOwned creates a new table with an explicit owner.
+func (c *Catalog) CreateTableOwned(name string, cols []ColumnDef, ownerOID int32) (int32, error) {
 	// Check for duplicate name.
 	existing, err := c.FindRelation(name)
 	if err != nil {
@@ -199,12 +228,14 @@ func (c *Catalog) CreateTable(name string, cols []ColumnDef) (int32, error) {
 	xid := c.Eng.TxMgr.Begin()
 
 	// Insert into pg_class.
+	// Columns: oid, relname, relkind, relpages, relheadpage, relowner
 	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, []tuple.Datum{
 		tuple.DInt32(oid),
 		tuple.DText(name),
 		tuple.DInt32(RelKindTable),
 		tuple.DInt32(1), // relpages
 		tuple.DInt32(int32(headPage)),
+		tuple.DInt32(ownerOID),
 	})
 	if err != nil {
 		c.Eng.TxMgr.Abort(xid)
@@ -247,12 +278,14 @@ func (c *Catalog) CreateView(name string, cols []ColumnDef, definition string) (
 	xid := c.Eng.TxMgr.Begin()
 
 	// Insert into pg_class with RelKindView and HeadPage=0 (no storage).
+	// Columns: oid, relname, relkind, relpages, relheadpage, relowner
 	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, []tuple.Datum{
 		tuple.DInt32(oid),
 		tuple.DText(name),
 		tuple.DInt32(RelKindView),
 		tuple.DInt32(0), // relpages (views have no storage)
 		tuple.DInt32(0), // headpage (views have no storage)
+		tuple.DInt32(0), // owner (views don't track owner yet)
 	})
 	if err != nil {
 		c.Eng.TxMgr.Abort(xid)
@@ -488,6 +521,25 @@ func (c *Catalog) GetPoliciesForCmd(relOID int32, cmd PolicyCmd, role string) (p
 
 // FindRelation searches pg_class for a relation by name. Returns nil
 // if not found.
+// tupleToRelation extracts a Relation from a pg_class tuple.
+// pg_class format: (oid, relname, relkind, relpages, relheadpage, relowner, [index cols...])
+func tupleToRelation(tup *tuple.Tuple) *Relation {
+	if len(tup.Columns) < 5 {
+		return nil
+	}
+	r := &Relation{
+		OID:      tup.Columns[0].I32,
+		Name:     tup.Columns[1].Text,
+		Kind:     tup.Columns[2].I32,
+		Pages:    tup.Columns[3].I32,
+		HeadPage: tup.Columns[4].I32,
+	}
+	if len(tup.Columns) >= 6 {
+		r.OwnerOID = tup.Columns[5].I32
+	}
+	return r
+}
+
 func (c *Catalog) FindRelation(name string) (*Relation, error) {
 	xid := c.Eng.TxMgr.Begin()
 	snap := c.Eng.TxMgr.Snapshot(xid)
@@ -499,14 +551,9 @@ func (c *Catalog) FindRelation(name string) (*Relation, error) {
 func (c *Catalog) findRelationWithSnapshot(name string, snap *mvcc.Snapshot) (*Relation, error) {
 	var found *Relation
 	err := c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		if len(tup.Columns) >= 5 && tup.Columns[1].Text == name {
-			found = &Relation{
-				OID:      tup.Columns[0].I32,
-				Name:     tup.Columns[1].Text,
-				Kind:     tup.Columns[2].I32,
-				Pages:    tup.Columns[3].I32,
-				HeadPage: tup.Columns[4].I32,
-			}
+		r := tupleToRelation(tup)
+		if r != nil && r.Name == name {
+			found = r
 			return false
 		}
 		return true
@@ -559,14 +606,9 @@ func (c *Catalog) ListTables() ([]Relation, error) {
 
 	var tables []Relation
 	err := c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		if len(tup.Columns) >= 5 && tup.Columns[2].I32 == RelKindTable {
-			tables = append(tables, Relation{
-				OID:      tup.Columns[0].I32,
-				Name:     tup.Columns[1].Text,
-				Kind:     tup.Columns[2].I32,
-				Pages:    tup.Columns[3].I32,
-				HeadPage: tup.Columns[4].I32,
-			})
+		r := tupleToRelation(tup)
+		if r != nil && r.Kind == RelKindTable {
+			tables = append(tables, *r)
 		}
 		return true
 	})
@@ -742,7 +784,7 @@ func (c *Catalog) CreateIndex(indexName, tableName, colName, method string) (int
 	oid := int32(c.Eng.Super.AllocOID())
 
 	// Insert into pg_class with extra columns for index metadata.
-	// Columns: oid, relname, relkind, relpages, relheadpage, indrelid, indkey, indmethod
+	// Columns: oid, relname, relkind, relpages, relheadpage, relowner, indrelid, indkey, indmethod
 	xid := c.Eng.TxMgr.Begin()
 	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, []tuple.Datum{
 		tuple.DInt32(oid),
@@ -750,6 +792,7 @@ func (c *Catalog) CreateIndex(indexName, tableName, colName, method string) (int
 		tuple.DInt32(RelKindIndex),
 		tuple.DInt32(1),
 		tuple.DInt32(int32(rootPage)),
+		tuple.DInt32(0),         // relowner
 		tuple.DInt32(table.OID), // indrelid
 		tuple.DInt32(colNum),    // indkey
 		tuple.DText(method),     // indmethod
@@ -815,6 +858,25 @@ func (c *Catalog) ListIndexesForTable(tableOID int32) ([]IndexInfo, error) {
 	return c.getIndexesForTable(tableOID)
 }
 
+// tupleToIndexInfo extracts an IndexInfo from a pg_class tuple for an index.
+// Index pg_class format: (oid, relname, relkind, relpages, relheadpage, relowner, indrelid, indkey, indmethod)
+func tupleToIndexInfo(tup *tuple.Tuple) *IndexInfo {
+	r := tupleToRelation(tup)
+	if r == nil || r.Kind != RelKindIndex || len(tup.Columns) < 8 {
+		return nil
+	}
+	method := "btree"
+	if len(tup.Columns) >= 9 && tup.Columns[8].Type == tuple.TypeText {
+		method = tup.Columns[8].Text
+	}
+	return &IndexInfo{
+		Relation: *r,
+		TableOID: tup.Columns[6].I32,
+		ColNum:   tup.Columns[7].I32,
+		Method:   method,
+	}
+}
+
 // getIndexesForTable returns all indexes for the given table OID.
 func (c *Catalog) getIndexesForTable(tableOID int32) ([]IndexInfo, error) {
 	xid := c.Eng.TxMgr.Begin()
@@ -823,23 +885,9 @@ func (c *Catalog) getIndexesForTable(tableOID int32) ([]IndexInfo, error) {
 
 	var indexes []IndexInfo
 	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		if len(tup.Columns) >= 7 && tup.Columns[2].I32 == RelKindIndex && tup.Columns[5].I32 == tableOID {
-			method := "btree"
-			if len(tup.Columns) >= 8 && tup.Columns[7].Type == tuple.TypeText {
-				method = tup.Columns[7].Text
-			}
-			indexes = append(indexes, IndexInfo{
-				Relation: Relation{
-					OID:      tup.Columns[0].I32,
-					Name:     tup.Columns[1].Text,
-					Kind:     tup.Columns[2].I32,
-					Pages:    tup.Columns[3].I32,
-					HeadPage: tup.Columns[4].I32,
-				},
-				TableOID: tup.Columns[5].I32,
-				ColNum:   tup.Columns[6].I32,
-				Method:   method,
-			})
+		idx := tupleToIndexInfo(tup)
+		if idx != nil && idx.TableOID == tableOID {
+			indexes = append(indexes, *idx)
 		}
 		return true
 	})
@@ -854,23 +902,9 @@ func (c *Catalog) findIndex(name string) (*IndexInfo, error) {
 
 	var found *IndexInfo
 	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		if len(tup.Columns) >= 7 && tup.Columns[1].Text == name && tup.Columns[2].I32 == RelKindIndex {
-			method := "btree"
-			if len(tup.Columns) >= 8 && tup.Columns[7].Type == tuple.TypeText {
-				method = tup.Columns[7].Text
-			}
-			found = &IndexInfo{
-				Relation: Relation{
-					OID:      tup.Columns[0].I32,
-					Name:     tup.Columns[1].Text,
-					Kind:     tup.Columns[2].I32,
-					Pages:    tup.Columns[3].I32,
-					HeadPage: tup.Columns[4].I32,
-				},
-				TableOID: tup.Columns[5].I32,
-				ColNum:   tup.Columns[6].I32,
-				Method:   method,
-			}
+		idx := tupleToIndexInfo(tup)
+		if idx != nil && idx.Name == name {
+			found = idx
 			return false
 		}
 		return true
@@ -905,18 +939,18 @@ func (c *Catalog) updateIndexRootPage(indexOID int32, newRoot uint32) {
 	// Delete old entry.
 	c.Eng.Delete(xid, targetID)
 
-	// Insert updated entry, preserving all columns including method.
+	// Insert updated entry, preserving all columns including owner and method.
+	// Format: oid, relname, relkind, relpages, relheadpage, relowner, indrelid, indkey, [indmethod]
 	newCols := []tuple.Datum{
 		tuple.DInt32(targetTup.Columns[0].I32),
 		tuple.DText(targetTup.Columns[1].Text),
 		tuple.DInt32(targetTup.Columns[2].I32),
 		tuple.DInt32(targetTup.Columns[3].I32),
 		tuple.DInt32(int32(newRoot)),
-		tuple.DInt32(targetTup.Columns[5].I32),
-		tuple.DInt32(targetTup.Columns[6].I32),
 	}
-	if len(targetTup.Columns) >= 8 {
-		newCols = append(newCols, targetTup.Columns[7])
+	// Preserve remaining columns (relowner, indrelid, indkey, indmethod).
+	for i := 5; i < len(targetTup.Columns); i++ {
+		newCols = append(newCols, targetTup.Columns[i])
 	}
 	c.Eng.Insert(xid, c.Eng.Super.PgClassPage, newCols)
 	c.Eng.TxMgr.Commit(xid)

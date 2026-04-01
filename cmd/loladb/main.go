@@ -12,7 +12,7 @@ Usage:
   loladb info <path>              Display database metadata
   loladb cli <path>               Open an interactive SQL shell
   loladb exec <path> "<sql>"      Execute a SQL statement
-  loladb serve <path> [addr] [--tls-cert FILE --tls-key FILE] [--no-tls]
+  loladb serve <path> [addr] [--tls-cert FILE --tls-key FILE] [--no-tls] [--no-auth]
                                   Start PostgreSQL wire protocol server (default: :5432)
   loladb tui <path>               Open a terminal UI shell
   loladb <path> < file.sql        Import SQL from stdin
@@ -51,7 +51,7 @@ func main() {
 		runExec(args[0], args[1], args[2:]...)
 	case "serve":
 		if len(args) < 1 {
-			fatal("Usage: loladb serve <path> [addr] [--tls-cert FILE --tls-key FILE] [--no-tls]")
+			fatal("Usage: loladb serve <path> [addr] [--tls-cert FILE --tls-key FILE] [--no-tls] [--no-auth]")
 		}
 		runServe(args)
 	case "tui":

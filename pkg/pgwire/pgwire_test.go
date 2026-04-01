@@ -668,6 +668,203 @@ func TestTLSUpgrade(t *testing.T) {
 	}
 }
 
+// mockAuthenticator implements Authenticator for testing.
+type mockAuthenticator struct {
+	users map[string]string // user → password
+}
+
+func (a *mockAuthenticator) Authenticate(user, password string) error {
+	expected, ok := a.users[user]
+	if !ok {
+		return fmt.Errorf("password authentication failed for user %q", user)
+	}
+	if expected != "" && expected != password {
+		return fmt.Errorf("password authentication failed for user %q", user)
+	}
+	return nil
+}
+
+func startAuthTestServer(t *testing.T, exec QueryExecutor, auth Authenticator) (*Server, string) {
+	t.Helper()
+	srv := &Server{
+		Addr:          "127.0.0.1:0",
+		Executor:      exec,
+		Authenticator: auth,
+	}
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv.listener = ln
+	srv.Addr = ln.Addr().String()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+
+	return srv, srv.Addr
+}
+
+// writePassword sends a PasswordMessage.
+func writePassword(conn net.Conn, password string) error {
+	buf := newMsgBuf(msgPassword)
+	buf.writeCString(password)
+	_, err := conn.Write(buf.finish())
+	return err
+}
+
+func TestAuthSuccess(t *testing.T) {
+	auth := &mockAuthenticator{users: map[string]string{"alice": "secret"}}
+	exec := &mockExecutor{results: map[string]*QueryResult{}}
+	srv, addr := startAuthTestServer(t, exec, auth)
+	defer srv.Close()
+
+	conn := dial(t, addr)
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	if err := writeStartup(conn, map[string]string{"user": "alice"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Server should send AuthenticationCleartextPassword ('R' with code 3).
+	typ, data, err := readMessage(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != 'R' {
+		t.Fatalf("expected Authentication message, got %c", typ)
+	}
+	code := int32(binary.BigEndian.Uint32(data[:4]))
+	if code != authReqCleartextPasswd {
+		t.Fatalf("expected cleartext password request (3), got %d", code)
+	}
+
+	// Send password.
+	if err := writePassword(conn, "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should get AuthOk then ReadyForQuery.
+	msgs, err := consumeUntilReady(conn)
+	if err != nil {
+		t.Fatalf("after auth: %v", err)
+	}
+
+	gotAuth := false
+	for _, m := range msgs {
+		if m.typ == 'R' {
+			authCode := int32(binary.BigEndian.Uint32(m.data[:4]))
+			if authCode == 0 {
+				gotAuth = true
+			}
+		}
+	}
+	if !gotAuth {
+		t.Fatal("missing AuthenticationOk after correct password")
+	}
+}
+
+func TestAuthFailure(t *testing.T) {
+	auth := &mockAuthenticator{users: map[string]string{"alice": "secret"}}
+	exec := &mockExecutor{results: map[string]*QueryResult{}}
+	srv, addr := startAuthTestServer(t, exec, auth)
+	defer srv.Close()
+
+	conn := dial(t, addr)
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	if err := writeStartup(conn, map[string]string{"user": "alice"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read auth request.
+	readMessage(conn)
+
+	// Send wrong password.
+	if err := writePassword(conn, "wrong"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should get ErrorResponse.
+	typ, _, err := readMessage(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != 'E' {
+		t.Fatalf("expected ErrorResponse after wrong password, got %c", typ)
+	}
+}
+
+func TestAuthUnknownUser(t *testing.T) {
+	auth := &mockAuthenticator{users: map[string]string{"alice": "secret"}}
+	exec := &mockExecutor{results: map[string]*QueryResult{}}
+	srv, addr := startAuthTestServer(t, exec, auth)
+	defer srv.Close()
+
+	conn := dial(t, addr)
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	if err := writeStartup(conn, map[string]string{"user": "unknown"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read auth request.
+	readMessage(conn)
+
+	// Send any password.
+	if err := writePassword(conn, "anything"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should get ErrorResponse.
+	typ, _, err := readMessage(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != 'E' {
+		t.Fatalf("expected ErrorResponse for unknown user, got %c", typ)
+	}
+}
+
+func TestNoAuthWhenAuthenticatorNil(t *testing.T) {
+	// Without an authenticator, connections should succeed without password.
+	exec := &mockExecutor{results: map[string]*QueryResult{}}
+	srv, addr := startTestServer(t, exec) // no authenticator
+	defer srv.Close()
+
+	conn := dial(t, addr)
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	if err := writeStartup(conn, map[string]string{"user": "anyone"}); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := consumeUntilReady(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotReady := false
+	for _, m := range msgs {
+		if m.typ == 'Z' {
+			gotReady = true
+		}
+	}
+	if !gotReady {
+		t.Fatal("should connect without auth when authenticator is nil")
+	}
+}
+
 func TestTLSDeclinedWithoutConfig(t *testing.T) {
 	// Server without TLS config should respond 'N'.
 	exec := &mockExecutor{results: map[string]*QueryResult{}}

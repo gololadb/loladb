@@ -205,6 +205,25 @@ type UtilityStmt struct {
 	PolicyRoles      []string
 	PolicyUsing      string
 	PolicyCheck      string
+
+	// Role management fields
+	RoleName       string
+	RoleOptions    map[string]interface{} // CREATE ROLE options
+	RoleStmtType   string                // "ROLE", "USER", "GROUP"
+	DropRoles      []string
+	DropMissingOk  bool
+
+	// GRANT/REVOKE role membership
+	GrantedRoles   []string
+	Grantees       []string
+	AdminOption    bool
+
+	// GRANT/REVOKE object privileges
+	Privileges     []string
+	PrivCols       [][]string // per-privilege column lists (nil = table-wide)
+	TargetType     string     // "TABLE", etc.
+	Objects        []string   // object names
+	GrantOption    bool
 }
 
 type UtilityType int
@@ -218,6 +237,13 @@ const (
 	UtilCreatePolicy
 	UtilEnableRLS
 	UtilDisableRLS
+	UtilCreateRole
+	UtilAlterRole
+	UtilDropRole
+	UtilGrantRole
+	UtilRevokeRole
+	UtilGrantPrivilege
+	UtilRevokePrivilege
 	UtilNoOp
 )
 

@@ -35,23 +35,29 @@ const (
 //	 32      4    TotalPages     — total pages allocated in the data file
 //	 36      4    PgRewritePage  — first heap page of pg_rewrite (rule storage)
 //	 40      4    PgPolicyPage   — first heap page of pg_policy (RLS policies)
+//	 44      4    PgAuthIDPage   — first heap page of pg_authid (roles)
+//	 48      4    PgAuthMembersPage — first heap page of pg_auth_members (role membership)
+//	 52      4    PgACLPage      — first heap page of pg_acl (object privileges)
 //
-// The rest of the page (bytes 44..4095) is reserved and zero-filled.
+// The rest of the page (bytes 56..4095) is reserved and zero-filled.
 type Superblock struct {
-	Magic         uint32
-	Version       uint32
-	NextOID       uint32
-	NextXID       uint32
-	CheckpointLSN uint32
-	PgClassPage   uint32
-	PgAttrPage    uint32
-	FreeListPage  uint32
-	TotalPages    uint32
-	PgRewritePage uint32
-	PgPolicyPage  uint32
+	Magic             uint32
+	Version           uint32
+	NextOID           uint32
+	NextXID           uint32
+	CheckpointLSN     uint32
+	PgClassPage       uint32
+	PgAttrPage        uint32
+	FreeListPage      uint32
+	TotalPages        uint32
+	PgRewritePage     uint32
+	PgPolicyPage      uint32
+	PgAuthIDPage      uint32
+	PgAuthMembersPage uint32
+	PgACLPage         uint32
 }
 
-const serializedSize = 11 * 4 // 44 bytes
+const serializedSize = 14 * 4 // 56 bytes
 
 // New returns a Superblock initialised with default values for a
 // fresh database.
@@ -83,6 +89,9 @@ func (sb *Superblock) Serialize() []byte {
 	binary.LittleEndian.PutUint32(buf[32:36], sb.TotalPages)
 	binary.LittleEndian.PutUint32(buf[36:40], sb.PgRewritePage)
 	binary.LittleEndian.PutUint32(buf[40:44], sb.PgPolicyPage)
+	binary.LittleEndian.PutUint32(buf[44:48], sb.PgAuthIDPage)
+	binary.LittleEndian.PutUint32(buf[48:52], sb.PgAuthMembersPage)
+	binary.LittleEndian.PutUint32(buf[52:56], sb.PgACLPage)
 	return buf
 }
 
@@ -102,8 +111,11 @@ func Deserialize(buf []byte) (*Superblock, error) {
 		PgAttrPage:    binary.LittleEndian.Uint32(buf[24:28]),
 		FreeListPage:  binary.LittleEndian.Uint32(buf[28:32]),
 		TotalPages:    binary.LittleEndian.Uint32(buf[32:36]),
-		PgRewritePage: binary.LittleEndian.Uint32(buf[36:40]),
-		PgPolicyPage:  binary.LittleEndian.Uint32(buf[40:44]),
+		PgRewritePage:     binary.LittleEndian.Uint32(buf[36:40]),
+		PgPolicyPage:      binary.LittleEndian.Uint32(buf[40:44]),
+		PgAuthIDPage:      binary.LittleEndian.Uint32(buf[44:48]),
+		PgAuthMembersPage: binary.LittleEndian.Uint32(buf[48:52]),
+		PgACLPage:         binary.LittleEndian.Uint32(buf[52:56]),
 	}
 
 	if sb.Magic != Magic {

@@ -267,3 +267,76 @@ type LogicalDisableRLS struct {
 
 func (n *LogicalDisableRLS) String() string         { return fmt.Sprintf("DisableRLS(%s)", n.Table) }
 func (n *LogicalDisableRLS) OutputColumns() []string { return nil }
+
+// LogicalCreateRole represents CREATE ROLE / CREATE USER.
+type LogicalCreateRole struct {
+	RoleName string
+	Options  map[string]interface{}
+	StmtType string
+}
+
+func (n *LogicalCreateRole) String() string         { return fmt.Sprintf("CreateRole(%s)", n.RoleName) }
+func (n *LogicalCreateRole) OutputColumns() []string { return nil }
+
+// LogicalAlterRole represents ALTER ROLE / ALTER USER.
+type LogicalAlterRole struct {
+	RoleName string
+	Options  map[string]interface{}
+}
+
+func (n *LogicalAlterRole) String() string         { return fmt.Sprintf("AlterRole(%s)", n.RoleName) }
+func (n *LogicalAlterRole) OutputColumns() []string { return nil }
+
+// LogicalDropRole represents DROP ROLE / DROP USER.
+type LogicalDropRole struct {
+	Roles     []string
+	MissingOk bool
+}
+
+func (n *LogicalDropRole) String() string         { return fmt.Sprintf("DropRole(%v)", n.Roles) }
+func (n *LogicalDropRole) OutputColumns() []string { return nil }
+
+// LogicalGrantRole represents GRANT role TO role.
+type LogicalGrantRole struct {
+	GrantedRoles []string
+	Grantees     []string
+	AdminOption  bool
+}
+
+func (n *LogicalGrantRole) String() string         { return fmt.Sprintf("GrantRole(%v TO %v)", n.GrantedRoles, n.Grantees) }
+func (n *LogicalGrantRole) OutputColumns() []string { return nil }
+
+// LogicalRevokeRole represents REVOKE role FROM role.
+type LogicalRevokeRole struct {
+	RevokedRoles []string
+	Grantees     []string
+}
+
+func (n *LogicalRevokeRole) String() string         { return fmt.Sprintf("RevokeRole(%v FROM %v)", n.RevokedRoles, n.Grantees) }
+func (n *LogicalRevokeRole) OutputColumns() []string { return nil }
+
+// LogicalGrantPrivilege represents GRANT privileges ON object TO role.
+type LogicalGrantPrivilege struct {
+	Privileges  []string
+	PrivCols    [][]string
+	TargetType  string
+	Objects     []string
+	Grantees    []string
+	GrantOption bool
+}
+
+func (n *LogicalGrantPrivilege) String() string         { return fmt.Sprintf("Grant(%v ON %v TO %v)", n.Privileges, n.Objects, n.Grantees) }
+func (n *LogicalGrantPrivilege) OutputColumns() []string { return nil }
+
+// LogicalRevokePrivilege represents REVOKE privileges ON object FROM role.
+type LogicalRevokePrivilege struct {
+	Privileges []string
+	PrivCols   [][]string
+	TargetType string
+	Objects    []string
+	Grantees   []string
+}
+
+func (n *LogicalRevokePrivilege) String() string         { return fmt.Sprintf("Revoke(%v ON %v FROM %v)", n.Privileges, n.Objects, n.Grantees) }
+func (n *LogicalRevokePrivilege) OutputColumns() []string { return nil }
+

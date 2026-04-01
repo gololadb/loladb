@@ -16,6 +16,32 @@ type Optimizer struct {
 
 // Optimize converts a logical plan into a physical plan.
 func (o *Optimizer) Optimize(node LogicalNode) (PhysicalNode, error) {
+	phys, err := o.optimize(node)
+	if err != nil {
+		return nil, err
+	}
+	markTerminalScans(phys)
+	return phys, nil
+}
+
+// markTerminalScans marks SeqScan nodes that are not wrapped by a
+// Project node. These scans output all table columns directly, so the
+// executor must check column-level privileges for every column.
+func markTerminalScans(node PhysicalNode) {
+	switch n := node.(type) {
+	case *PhysProject:
+		// Project handles column checks itself; its child scan is not terminal.
+		return
+	case *PhysSeqScan:
+		n.IsTerminal = true
+		return
+	}
+	for _, child := range node.Children() {
+		markTerminalScans(child)
+	}
+}
+
+func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 	switch n := node.(type) {
 	case *LogicalScan:
 		return o.optimizeScan(n, nil)
@@ -40,7 +66,7 @@ func (o *Optimizer) Optimize(node LogicalNode) (PhysicalNode, error) {
 	case *LogicalCreateIndex:
 		return &PhysCreateIndex{Index: n.Index, Table: n.Table, Column: n.Column, Method: n.Method}, nil
 	case *LogicalExplain:
-		return o.Optimize(n.Child)
+		return o.optimize(n.Child)
 	case *LogicalNoOp:
 		return &PhysNoOp{Message: n.Message}, nil
 	case *LogicalCreateSequence:
@@ -59,8 +85,22 @@ func (o *Optimizer) Optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysEnableRLS{Table: n.Table}, nil
 	case *LogicalDisableRLS:
 		return &PhysDisableRLS{Table: n.Table}, nil
+	case *LogicalCreateRole:
+		return &PhysCreateRole{RoleName: n.RoleName, Options: n.Options, StmtType: n.StmtType}, nil
+	case *LogicalAlterRole:
+		return &PhysAlterRole{RoleName: n.RoleName, Options: n.Options}, nil
+	case *LogicalDropRole:
+		return &PhysDropRole{Roles: n.Roles, MissingOk: n.MissingOk}, nil
+	case *LogicalGrantRole:
+		return &PhysGrantRole{GrantedRoles: n.GrantedRoles, Grantees: n.Grantees, AdminOption: n.AdminOption}, nil
+	case *LogicalRevokeRole:
+		return &PhysRevokeRole{RevokedRoles: n.RevokedRoles, Grantees: n.Grantees}, nil
+	case *LogicalGrantPrivilege:
+		return &PhysGrantPrivilege{Privileges: n.Privileges, PrivCols: n.PrivCols, TargetType: n.TargetType, Objects: n.Objects, Grantees: n.Grantees, GrantOption: n.GrantOption}, nil
+	case *LogicalRevokePrivilege:
+		return &PhysRevokePrivilege{Privileges: n.Privileges, PrivCols: n.PrivCols, TargetType: n.TargetType, Objects: n.Objects, Grantees: n.Grantees}, nil
 	default:
-		child, err := o.Optimize(node)
+		child, err := o.optimize(node)
 		return child, err
 	}
 }
@@ -153,7 +193,7 @@ func (o *Optimizer) optimizeFilter(n *LogicalFilter) (PhysicalNode, error) {
 		return o.optimizeScan(scan, n.Predicate)
 	}
 
-	child, err := o.Optimize(n.Child)
+	child, err := o.optimize(n.Child)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +210,7 @@ func (o *Optimizer) optimizeFilter(n *LogicalFilter) (PhysicalNode, error) {
 }
 
 func (o *Optimizer) optimizeProject(n *LogicalProject) (PhysicalNode, error) {
-	child, err := o.Optimize(n.Child)
+	child, err := o.optimize(n.Child)
 	if err != nil {
 		return nil, err
 	}
@@ -185,11 +225,11 @@ func (o *Optimizer) optimizeProject(n *LogicalProject) (PhysicalNode, error) {
 }
 
 func (o *Optimizer) optimizeJoin(n *LogicalJoin) (PhysicalNode, error) {
-	left, err := o.Optimize(n.Left)
+	left, err := o.optimize(n.Left)
 	if err != nil {
 		return nil, err
 	}
-	right, err := o.Optimize(n.Right)
+	right, err := o.optimize(n.Right)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +285,7 @@ func (o *Optimizer) optimizeJoin(n *LogicalJoin) (PhysicalNode, error) {
 }
 
 func (o *Optimizer) optimizeLimit(n *LogicalLimit) (PhysicalNode, error) {
-	child, err := o.Optimize(n.Child)
+	child, err := o.optimize(n.Child)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +301,7 @@ func (o *Optimizer) optimizeLimit(n *LogicalLimit) (PhysicalNode, error) {
 }
 
 func (o *Optimizer) optimizeSort(n *LogicalSort) (PhysicalNode, error) {
-	child, err := o.Optimize(n.Child)
+	child, err := o.optimize(n.Child)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +321,7 @@ func (o *Optimizer) optimizeInsert(n *LogicalInsert) (PhysicalNode, error) {
 }
 
 func (o *Optimizer) optimizeDelete(n *LogicalDelete) (PhysicalNode, error) {
-	child, err := o.Optimize(n.Child)
+	child, err := o.optimize(n.Child)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +329,7 @@ func (o *Optimizer) optimizeDelete(n *LogicalDelete) (PhysicalNode, error) {
 }
 
 func (o *Optimizer) optimizeUpdate(n *LogicalUpdate) (PhysicalNode, error) {
-	child, err := o.Optimize(n.Child)
+	child, err := o.optimize(n.Child)
 	if err != nil {
 		return nil, err
 	}

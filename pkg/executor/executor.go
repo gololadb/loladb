@@ -3,6 +3,7 @@ package executor
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jespino/loladb/pkg/catalog"
@@ -21,12 +22,139 @@ type Result struct {
 
 // Executor runs physical plan trees against the catalog/engine.
 type Executor struct {
-	Cat *catalog.Catalog
+	Cat         *catalog.Catalog
+	CurrentUser string // session user for privilege checks
 }
 
 // NewExecutor creates a plan executor.
 func NewExecutor(cat *catalog.Catalog) *Executor {
 	return &Executor{Cat: cat}
+}
+
+// checkTablePrivilege verifies the current user has the required privilege
+// on the given table. Superusers and empty CurrentUser (no auth) bypass checks.
+func (ex *Executor) checkTablePrivilege(tableName string, required catalog.Privilege) error {
+	if ex.CurrentUser == "" {
+		return nil // no auth configured
+	}
+	rel, err := ex.Cat.FindRelation(tableName)
+	if err != nil || rel == nil {
+		return nil // table not found errors handled elsewhere
+	}
+
+	ok, err := ex.Cat.CheckPrivilege(ex.CurrentUser, rel.OID, required)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("permission denied for table %s", tableName)
+	}
+	return nil
+}
+
+// resolveProjectNames qualifies unqualified column names using the child's
+// column names (which are in table.column format).
+func resolveProjectNames(projNames, childCols []string) []string {
+	// Build a map from bare column name → table.column from child.
+	colMap := make(map[string]string)
+	for _, c := range childCols {
+		parts := strings.SplitN(c, ".", 2)
+		if len(parts) == 2 {
+			colMap[parts[1]] = c
+		}
+	}
+
+	resolved := make([]string, len(projNames))
+	for i, name := range projNames {
+		if strings.Contains(name, ".") {
+			resolved[i] = name
+		} else if qualified, ok := colMap[name]; ok {
+			resolved[i] = qualified
+		} else {
+			resolved[i] = name
+		}
+	}
+	return resolved
+}
+
+// checkProjectedColumns verifies column-level privileges for projected columns.
+// Column names are in "table.column" format. Groups by table and checks each.
+func (ex *Executor) checkProjectedColumns(colNames []string, required catalog.Privilege) error {
+	// Group columns by table.
+	tableCols := make(map[string][]string)
+	for _, name := range colNames {
+		parts := strings.SplitN(name, ".", 2)
+		if len(parts) == 2 {
+			tableCols[parts[0]] = append(tableCols[parts[0]], parts[1])
+		}
+	}
+
+	for table, cols := range tableCols {
+		if err := ex.checkColumnPrivilege(table, cols, required); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// hasAnyColumnGrant returns true if the current user has any column-level
+// grant of the required privilege on the table.
+func (ex *Executor) hasAnyColumnGrant(tableName string, required catalog.Privilege) bool {
+	if ex.CurrentUser == "" {
+		return false
+	}
+	rel, err := ex.Cat.FindRelation(tableName)
+	if err != nil || rel == nil {
+		return false
+	}
+	role, err := ex.Cat.FindRole(ex.CurrentUser)
+	if err != nil || role == nil {
+		return false
+	}
+	acls := ex.Cat.ACLs.GetACL(rel.OID)
+	allRoles, _ := ex.Cat.GetAllRoleOIDs(role.OID)
+	for _, item := range acls {
+		if len(item.Columns) > 0 && item.Privileges&required != 0 {
+			if allRoles[item.Grantee] || item.Grantee == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// checkColumnPrivilege verifies the current user has the required privilege
+// on specific columns. If the user has table-level privilege, column checks
+// are skipped. Otherwise, each column is checked individually.
+func (ex *Executor) checkColumnPrivilege(tableName string, columns []string, required catalog.Privilege) error {
+	if ex.CurrentUser == "" {
+		return nil
+	}
+	rel, err := ex.Cat.FindRelation(tableName)
+	if err != nil || rel == nil {
+		return nil
+	}
+
+	// First check table-level privilege.
+	ok, err := ex.Cat.CheckPrivilege(ex.CurrentUser, rel.OID, required)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+
+	// Check each column individually.
+	for _, col := range columns {
+		ok, err := ex.Cat.CheckColumnPrivilege(ex.CurrentUser, rel.OID, required, col)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("permission denied for column %s of table %s", col, tableName)
+		}
+	}
+	return nil
 }
 
 // Execute runs a physical plan and returns the result.
@@ -72,6 +200,20 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execEnableRLS(n)
 	case *planner.PhysDisableRLS:
 		return ex.execDisableRLS(n)
+	case *planner.PhysCreateRole:
+		return ex.execCreateRole(n)
+	case *planner.PhysAlterRole:
+		return ex.execAlterRole(n)
+	case *planner.PhysDropRole:
+		return ex.execDropRole(n)
+	case *planner.PhysGrantRole:
+		return ex.execGrantRole(n)
+	case *planner.PhysRevokeRole:
+		return ex.execRevokeRole(n)
+	case *planner.PhysGrantPrivilege:
+		return ex.execGrantPrivilege(n)
+	case *planner.PhysRevokePrivilege:
+		return ex.execRevokePrivilege(n)
 	default:
 		return nil, fmt.Errorf("executor: unsupported node %T", node)
 	}
@@ -143,6 +285,24 @@ func splitByNewline(s string) []string {
 // --- Scan executors ---
 
 func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
+	if n.IsTerminal {
+		// No Project node narrows the output (e.g. SELECT *).
+		// Check every scanned column individually.
+		if err := ex.checkColumnPrivilege(n.Table, n.Columns, catalog.PrivSelect); err != nil {
+			return nil, err
+		}
+	} else {
+		// A Project node will check the specific projected columns.
+		// Here we only verify table-level access or existence of any column grant.
+		if err := ex.checkTablePrivilege(n.Table, catalog.PrivSelect); err != nil {
+			if ex.hasAnyColumnGrant(n.Table, catalog.PrivSelect) {
+				err = nil
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	alias := n.Alias
 	if alias == "" {
 		alias = n.Table
@@ -167,6 +327,9 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 }
 
 func (ex *Executor) execIndexScan(n *planner.PhysIndexScan) (*Result, error) {
+	if err := ex.checkTablePrivilege(n.Table, catalog.PrivSelect); err != nil {
+		return nil, err
+	}
 	if n.Key == nil {
 		return nil, fmt.Errorf("executor: IndexScan requires a key")
 	}
@@ -225,6 +388,16 @@ func (ex *Executor) execProject(n *planner.PhysProject) (*Result, error) {
 	child, err := ex.Execute(n.Child)
 	if err != nil {
 		return nil, err
+	}
+
+	// Column-level privilege check: verify the user can SELECT each projected column.
+	// Use the child's column names (table.col format) to resolve table context
+	// for unqualified projected column names.
+	if ex.CurrentUser != "" {
+		projNames := resolveProjectNames(n.Names, child.Columns)
+		if err := ex.checkProjectedColumns(projNames, catalog.PrivSelect); err != nil {
+			return nil, err
+		}
 	}
 
 	result := &Result{Columns: n.Names}
@@ -439,6 +612,9 @@ func (ex *Executor) execSort(n *planner.PhysSort) (*Result, error) {
 // --- DML executors ---
 
 func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
+	if err := ex.checkTablePrivilege(n.Table, catalog.PrivInsert); err != nil {
+		return nil, err
+	}
 	var count int64
 	for _, rowExprs := range n.Values {
 		values := make([]tuple.Datum, len(rowExprs))
@@ -459,6 +635,9 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 }
 
 func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
+	if err := ex.checkTablePrivilege(n.Table, catalog.PrivDelete); err != nil {
+		return nil, err
+	}
 	child, err := ex.Execute(n.Child)
 	if err != nil {
 		return nil, err
@@ -493,6 +672,9 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 }
 
 func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
+	if err := ex.checkTablePrivilege(n.Table, catalog.PrivUpdate); err != nil {
+		return nil, err
+	}
 	child, err := ex.Execute(n.Child)
 	if err != nil {
 		return nil, err
@@ -548,7 +730,15 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 	for i, c := range n.Columns {
 		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type}
 	}
-	_, err := ex.Cat.CreateTable(n.Table, cols)
+	// Set the owner to the current session user.
+	var ownerOID int32
+	if ex.CurrentUser != "" {
+		role, _ := ex.Cat.FindRole(ex.CurrentUser)
+		if role != nil {
+			ownerOID = role.OID
+		}
+	}
+	_, err := ex.Cat.CreateTableOwned(n.Table, cols, ownerOID)
 	if err != nil {
 		return nil, err
 	}
@@ -737,3 +927,153 @@ func (ex *Executor) execDisableRLS(n *planner.PhysDisableRLS) (*Result, error) {
 	}
 	return &Result{Message: fmt.Sprintf("ALTER TABLE %s", n.Table)}, nil
 }
+
+// -----------------------------------------------------------------------
+// Role management
+// -----------------------------------------------------------------------
+
+func (ex *Executor) execCreateRole(n *planner.PhysCreateRole) (*Result, error) {
+	role := &catalog.Role{
+		Inherit:   true,
+		ConnLimit: -1,
+	}
+	role.Name = n.RoleName
+
+	if v, ok := n.Options["superuser"]; ok {
+		role.SuperUser = v.(bool)
+	}
+	if v, ok := n.Options["createdb"]; ok {
+		role.CreateDB = v.(bool)
+	}
+	if v, ok := n.Options["createrole"]; ok {
+		role.CreateRole = v.(bool)
+	}
+	if v, ok := n.Options["inherit"]; ok {
+		role.Inherit = v.(bool)
+	}
+	if v, ok := n.Options["login"]; ok {
+		role.Login = v.(bool)
+	}
+	if v, ok := n.Options["bypassrls"]; ok {
+		role.BypassRLS = v.(bool)
+	}
+	if v, ok := n.Options["connlimit"]; ok {
+		role.ConnLimit = v.(int32)
+	}
+	if v, ok := n.Options["password"]; ok {
+		role.Password = v.(string)
+	}
+
+	if err := ex.Cat.CreateRole(role); err != nil {
+		return nil, fmt.Errorf("executor: %w", err)
+	}
+
+	stmtType := "ROLE"
+	if n.StmtType != "" {
+		stmtType = n.StmtType
+	}
+	return &Result{Message: fmt.Sprintf("CREATE %s", stmtType)}, nil
+}
+
+func (ex *Executor) execAlterRole(n *planner.PhysAlterRole) (*Result, error) {
+	if err := ex.Cat.AlterRole(n.RoleName, n.Options); err != nil {
+		return nil, fmt.Errorf("executor: %w", err)
+	}
+	return &Result{Message: "ALTER ROLE"}, nil
+}
+
+func (ex *Executor) execDropRole(n *planner.PhysDropRole) (*Result, error) {
+	for _, name := range n.Roles {
+		if err := ex.Cat.DropRole(name, n.MissingOk); err != nil {
+			return nil, fmt.Errorf("executor: %w", err)
+		}
+	}
+	return &Result{Message: "DROP ROLE"}, nil
+}
+
+func (ex *Executor) execGrantRole(n *planner.PhysGrantRole) (*Result, error) {
+	for _, grantedRole := range n.GrantedRoles {
+		for _, grantee := range n.Grantees {
+			if err := ex.Cat.GrantRoleMembership(grantedRole, grantee, n.AdminOption); err != nil {
+				return nil, fmt.Errorf("executor: %w", err)
+			}
+		}
+	}
+	return &Result{Message: "GRANT ROLE"}, nil
+}
+
+func (ex *Executor) execRevokeRole(n *planner.PhysRevokeRole) (*Result, error) {
+	for _, revokedRole := range n.RevokedRoles {
+		for _, grantee := range n.Grantees {
+			if err := ex.Cat.RevokeRoleMembership(revokedRole, grantee); err != nil {
+				return nil, fmt.Errorf("executor: %w", err)
+			}
+		}
+	}
+	return &Result{Message: "REVOKE ROLE"}, nil
+}
+
+func (ex *Executor) resolveGranteeOID(name string) (int32, error) {
+	if strings.EqualFold(name, "public") {
+		return 0, nil
+	}
+	role, err := ex.Cat.FindRole(name)
+	if err != nil || role == nil {
+		return 0, fmt.Errorf("executor: role %q does not exist", name)
+	}
+	return role.OID, nil
+}
+
+func (ex *Executor) execGrantPrivilege(n *planner.PhysGrantPrivilege) (*Result, error) {
+	for _, objName := range n.Objects {
+		rel, err := ex.Cat.FindRelation(objName)
+		if err != nil || rel == nil {
+			return nil, fmt.Errorf("executor: relation %q not found", objName)
+		}
+
+		for i, p := range n.Privileges {
+			priv := catalog.ParsePrivilege(p)
+			// Get column list for this privilege (if any).
+			var cols []string
+			if i < len(n.PrivCols) && len(n.PrivCols[i]) > 0 {
+				cols = n.PrivCols[i]
+			}
+
+			for _, granteeName := range n.Grantees {
+				granteeOID, err := ex.resolveGranteeOID(granteeName)
+				if err != nil {
+					return nil, err
+				}
+				ex.Cat.GrantObjectPrivilegeColumns(rel.OID, granteeOID, 0, priv, cols)
+			}
+		}
+	}
+	return &Result{Message: "GRANT"}, nil
+}
+
+func (ex *Executor) execRevokePrivilege(n *planner.PhysRevokePrivilege) (*Result, error) {
+	for _, objName := range n.Objects {
+		rel, err := ex.Cat.FindRelation(objName)
+		if err != nil || rel == nil {
+			return nil, fmt.Errorf("executor: relation %q not found", objName)
+		}
+
+		for i, p := range n.Privileges {
+			priv := catalog.ParsePrivilege(p)
+			var cols []string
+			if i < len(n.PrivCols) && len(n.PrivCols[i]) > 0 {
+				cols = n.PrivCols[i]
+			}
+
+			for _, granteeName := range n.Grantees {
+				granteeOID, err := ex.resolveGranteeOID(granteeName)
+				if err != nil {
+					return nil, err
+				}
+				ex.Cat.RevokeObjectPrivilegeColumns(rel.OID, granteeOID, 0, priv, cols)
+			}
+		}
+	}
+	return &Result{Message: "REVOKE"}, nil
+}
+

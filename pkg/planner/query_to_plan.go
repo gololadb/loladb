@@ -191,6 +191,20 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 		return &LogicalEnableRLS{Table: u.TableName}, nil
 	case UtilDisableRLS:
 		return &LogicalDisableRLS{Table: u.TableName}, nil
+	case UtilCreateRole:
+		return &LogicalCreateRole{RoleName: u.RoleName, Options: u.RoleOptions, StmtType: u.RoleStmtType}, nil
+	case UtilAlterRole:
+		return &LogicalAlterRole{RoleName: u.RoleName, Options: u.RoleOptions}, nil
+	case UtilDropRole:
+		return &LogicalDropRole{Roles: u.DropRoles, MissingOk: u.DropMissingOk}, nil
+	case UtilGrantRole:
+		return &LogicalGrantRole{GrantedRoles: u.GrantedRoles, Grantees: u.Grantees, AdminOption: u.AdminOption}, nil
+	case UtilRevokeRole:
+		return &LogicalRevokeRole{RevokedRoles: u.GrantedRoles, Grantees: u.Grantees}, nil
+	case UtilGrantPrivilege:
+		return &LogicalGrantPrivilege{Privileges: u.Privileges, PrivCols: u.PrivCols, TargetType: u.TargetType, Objects: u.Objects, Grantees: u.Grantees, GrantOption: u.GrantOption}, nil
+	case UtilRevokePrivilege:
+		return &LogicalRevokePrivilege{Privileges: u.Privileges, PrivCols: u.PrivCols, TargetType: u.TargetType, Objects: u.Objects, Grantees: u.Grantees}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

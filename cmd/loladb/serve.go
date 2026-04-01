@@ -22,7 +22,9 @@ import (
 )
 
 // sqlAdapter bridges sql.Executor to pgwire.QueryExecutor.
+// It implements pgwire.SessionExecutor for per-connection user context.
 type sqlAdapter struct {
+	cat  *catalog.Catalog
 	exec *sql.Executor
 }
 
@@ -44,6 +46,39 @@ func (a *sqlAdapter) Execute(sqlStr string) (*pgwire.QueryResult, error) {
 	}, nil
 }
 
+func (a *sqlAdapter) SetUser(user string) {
+	a.exec.SetRole(user)
+}
+
+func (a *sqlAdapter) NewSession() pgwire.QueryExecutor {
+	ex := sql.NewExecutor(a.cat)
+	return &sqlAdapter{cat: a.cat, exec: ex}
+}
+
+// catalogAuthenticator validates passwords against pg_authid.
+type catalogAuthenticator struct {
+	cat *catalog.Catalog
+}
+
+func (a *catalogAuthenticator) Authenticate(user, password string) error {
+	role, err := a.cat.FindRole(user)
+	if err != nil {
+		return fmt.Errorf("authentication failed for user %q", user)
+	}
+	if role == nil {
+		return fmt.Errorf("password authentication failed for user %q", user)
+	}
+	if !role.Login {
+		return fmt.Errorf("role %q is not permitted to log in", user)
+	}
+	// Empty password in catalog means no password set — allow any password.
+	// Non-empty password must match exactly.
+	if role.Password != "" && role.Password != password {
+		return fmt.Errorf("password authentication failed for user %q", user)
+	}
+	return nil
+}
+
 // serveOpts holds parsed flags for the serve command.
 type serveOpts struct {
 	path    string
@@ -51,6 +86,7 @@ type serveOpts struct {
 	tlsCert string
 	tlsKey  string
 	noTLS   bool
+	noAuth  bool
 }
 
 func parseServeOpts(args []string) serveOpts {
@@ -66,6 +102,8 @@ func parseServeOpts(args []string) serveOpts {
 			opts.tlsKey = args[i]
 		case args[i] == "--no-tls":
 			opts.noTLS = true
+		case args[i] == "--no-auth":
+			opts.noAuth = true
 		default:
 			if positional == 0 {
 				opts.path = args[i]
@@ -118,7 +156,7 @@ func selfSignedCert() (tls.Certificate, error) {
 func runServe(args []string) {
 	opts := parseServeOpts(args)
 	if opts.path == "" {
-		fatal("Usage: loladb serve <path> [addr] [--tls-cert FILE --tls-key FILE] [--no-tls]")
+		fatal("Usage: loladb serve <path> [addr] [--tls-cert FILE --tls-key FILE] [--no-tls] [--no-auth]")
 	}
 
 	eng, err := engine.Open(opts.path, 0)
@@ -133,11 +171,14 @@ func runServe(args []string) {
 	}
 
 	ex := sql.NewExecutor(cat)
-	adapter := &sqlAdapter{exec: ex}
+	adapter := &sqlAdapter{cat: cat, exec: ex}
 
 	srv := &pgwire.Server{
 		Addr:     opts.addr,
 		Executor: adapter,
+	}
+	if !opts.noAuth {
+		srv.Authenticator = &catalogAuthenticator{cat: cat}
 	}
 
 	// Configure TLS unless explicitly disabled.

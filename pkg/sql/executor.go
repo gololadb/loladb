@@ -48,6 +48,7 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 func (ex *Executor) SetRole(role string) {
 	ex.CurrentUser = role
 	ex.rewriter.CurrentUser = role
+	ex.exec.CurrentUser = role
 }
 
 // Exec parses and executes one or more SQL statements through the

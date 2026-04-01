@@ -11,12 +11,13 @@ type PhysicalNode interface {
 
 // PhysSeqScan is a full table sequential scan.
 type PhysSeqScan struct {
-	Table    string
-	Alias    string
-	Columns  []string
-	HeadPage uint32
-	Estimate PlanCost
-	Filter   Expr // optional pushed-down filter
+	Table      string
+	Alias      string
+	Columns    []string
+	HeadPage   uint32
+	Estimate   PlanCost
+	Filter     Expr // optional pushed-down filter
+	IsTerminal bool // true when no Project node narrows the output columns
 }
 
 func (n *PhysSeqScan) String() string {
@@ -271,3 +272,82 @@ type PhysDisableRLS struct {
 func (n *PhysDisableRLS) String() string            { return fmt.Sprintf("DisableRLS %s", n.Table) }
 func (n *PhysDisableRLS) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysDisableRLS) Children() []PhysicalNode  { return nil }
+
+// PhysCreateRole represents CREATE ROLE / CREATE USER.
+type PhysCreateRole struct {
+	RoleName    string
+	Options     map[string]interface{}
+	StmtType    string // "ROLE", "USER", "GROUP"
+}
+
+func (n *PhysCreateRole) String() string            { return fmt.Sprintf("CreateRole %s", n.RoleName) }
+func (n *PhysCreateRole) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreateRole) Children() []PhysicalNode  { return nil }
+
+// PhysAlterRole represents ALTER ROLE / ALTER USER.
+type PhysAlterRole struct {
+	RoleName string
+	Options  map[string]interface{}
+}
+
+func (n *PhysAlterRole) String() string            { return fmt.Sprintf("AlterRole %s", n.RoleName) }
+func (n *PhysAlterRole) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysAlterRole) Children() []PhysicalNode  { return nil }
+
+// PhysDropRole represents DROP ROLE / DROP USER.
+type PhysDropRole struct {
+	Roles     []string
+	MissingOk bool
+}
+
+func (n *PhysDropRole) String() string            { return fmt.Sprintf("DropRole %v", n.Roles) }
+func (n *PhysDropRole) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropRole) Children() []PhysicalNode  { return nil }
+
+// PhysGrantRole represents GRANT role TO role.
+type PhysGrantRole struct {
+	GrantedRoles []string
+	Grantees     []string
+	AdminOption  bool
+}
+
+func (n *PhysGrantRole) String() string            { return fmt.Sprintf("GrantRole %v TO %v", n.GrantedRoles, n.Grantees) }
+func (n *PhysGrantRole) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysGrantRole) Children() []PhysicalNode  { return nil }
+
+// PhysRevokeRole represents REVOKE role FROM role.
+type PhysRevokeRole struct {
+	RevokedRoles []string
+	Grantees     []string
+}
+
+func (n *PhysRevokeRole) String() string            { return fmt.Sprintf("RevokeRole %v FROM %v", n.RevokedRoles, n.Grantees) }
+func (n *PhysRevokeRole) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysRevokeRole) Children() []PhysicalNode  { return nil }
+
+// PhysGrantPrivilege represents GRANT privileges ON object TO role.
+type PhysGrantPrivilege struct {
+	Privileges  []string
+	PrivCols    [][]string // per-privilege column lists
+	TargetType  string
+	Objects     []string
+	Grantees    []string
+	GrantOption bool
+}
+
+func (n *PhysGrantPrivilege) String() string            { return fmt.Sprintf("Grant %v ON %v TO %v", n.Privileges, n.Objects, n.Grantees) }
+func (n *PhysGrantPrivilege) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysGrantPrivilege) Children() []PhysicalNode  { return nil }
+
+// PhysRevokePrivilege represents REVOKE privileges ON object FROM role.
+type PhysRevokePrivilege struct {
+	Privileges []string
+	PrivCols   [][]string
+	TargetType string
+	Objects    []string
+	Grantees   []string
+}
+
+func (n *PhysRevokePrivilege) String() string            { return fmt.Sprintf("Revoke %v ON %v FROM %v", n.Privileges, n.Objects, n.Grantees) }
+func (n *PhysRevokePrivilege) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysRevokePrivilege) Children() []PhysicalNode  { return nil }
