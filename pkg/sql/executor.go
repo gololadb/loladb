@@ -2,13 +2,14 @@ package sql
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/auxten/postgresql-parser/pkg/sql/parser"
-	"github.com/auxten/postgresql-parser/pkg/sql/sem/tree"
+	"github.com/jespino/gopgsql/parser"
 
 	"github.com/jespino/loladb/pkg/catalog"
 	"github.com/jespino/loladb/pkg/executor"
 	"github.com/jespino/loladb/pkg/planner"
+	"github.com/jespino/loladb/pkg/rewriter"
 	"github.com/jespino/loladb/pkg/tuple"
 )
 
@@ -20,30 +21,32 @@ type Result struct {
 	Message      string
 }
 
-// Executor parses SQL, builds a logical plan, optimizes it into a
-// physical plan, and executes it. This is the full pipeline:
-// SQL → Parser → Analyzer → Optimizer → Executor → Result
+// Executor parses SQL and runs it through the full pipeline:
+// SQL → Parser → Analyzer (Query tree) → Rewriter → Planner (Logical) → Optimizer (Physical) → Executor → Result
 type Executor struct {
 	Cat       *catalog.Catalog
 	analyzer  *planner.Analyzer
+	rewriter  *rewriter.Rewriter
 	optimizer *planner.Optimizer
 	exec      *executor.Executor
 }
 
 // NewExecutor creates a SQL executor backed by the given catalog.
 func NewExecutor(cat *catalog.Catalog) *Executor {
+	a := &planner.Analyzer{Cat: cat}
 	return &Executor{
 		Cat:       cat,
-		analyzer:  &planner.Analyzer{Cat: cat},
+		analyzer:  a,
+		rewriter:  rewriter.New(cat, a),
 		optimizer: &planner.Optimizer{Cat: cat, Costs: planner.DefaultCosts()},
 		exec:      executor.NewExecutor(cat),
 	}
 }
 
 // Exec parses and executes one or more SQL statements through the
-// full pipeline: parse → analyze → optimize → execute.
+// full pipeline: parse → analyze → plan → optimize → execute.
 func (ex *Executor) Exec(sql string) (*Result, error) {
-	stmts, err := parser.Parse(sql)
+	stmts, err := parser.Parse(strings.NewReader(sql), nil)
 	if err != nil {
 		return nil, fmt.Errorf("sql: parse error: %w", err)
 	}
@@ -51,49 +54,83 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return &Result{Message: "OK"}, nil
 	}
 
-	stmt := stmts[0].AST
+	stmt := stmts[0].Stmt
 
 	// Check for EXPLAIN.
 	isExplain := false
 	isAnalyze := false
-	if explain, ok := stmt.(*tree.Explain); ok {
+	if explain, ok := stmt.(*parser.ExplainStmt); ok {
 		isExplain = true
-		_ = isAnalyze // EXPLAIN ANALYZE not yet supported by pg parser binding
-		stmt = explain.Statement
+		_ = isAnalyze // EXPLAIN ANALYZE not yet supported
+		stmt = explain.Query
 	}
 
-	// Analyze: AST → Logical Plan
-	logical, err := ex.analyzer.Analyze(stmt)
+	// For CREATE VIEW, extract the SELECT definition from the original SQL
+	// so we can store it as the rewrite rule definition.
+	var viewDefSQL string
+	if _, ok := stmt.(*parser.ViewStmt); ok {
+		viewDefSQL = extractViewDef(sql)
+	}
+
+	// Phase 1: Analyze — parse tree → Query tree (semantic analysis).
+	query, err := ex.analyzer.Analyze(stmt)
 	if err != nil {
 		return nil, err
 	}
 
-	// Optimize: Logical Plan → Physical Plan
-	physical, err := ex.optimizer.Optimize(logical)
+	// Attach the original SELECT SQL to CREATE VIEW utility statements.
+	if query.CommandType == planner.CmdUtility && query.Utility != nil &&
+		query.Utility.Type == planner.UtilCreateView && viewDefSQL != "" {
+		query.Utility.ViewDef = viewDefSQL
+	}
+
+	// Phase 2: Rewrite — apply rewrite rules (view expansion, DML rules).
+	queries, err := ex.rewriter.Rewrite(query)
 	if err != nil {
 		return nil, err
 	}
+	if len(queries) == 0 {
+		return &Result{Message: "OK"}, nil
+	}
 
-	if isExplain {
-		r, err := ex.exec.ExecuteExplain(physical, isAnalyze)
+	// Execute each rewritten query. For ALSO rules there may be
+	// multiple queries; return the result of the last one.
+	var lastResult *Result
+	for _, q := range queries {
+		// Phase 3: Plan — Query tree → Logical plan.
+		logical, err := planner.QueryToLogicalPlan(q)
 		if err != nil {
 			return nil, err
 		}
-		return convertResult(r), nil
+
+		// Phase 4: Optimize — Logical plan → Physical plan.
+		physical, err := ex.optimizer.Optimize(logical)
+		if err != nil {
+			return nil, err
+		}
+
+		if isExplain {
+			r, err := ex.exec.ExecuteExplain(physical, isAnalyze)
+			if err != nil {
+				return nil, err
+			}
+			return convertResult(r), nil
+		}
+
+		// Phase 5: Execute.
+		r, err := ex.exec.Execute(physical)
+		if err != nil {
+			return nil, err
+		}
+		lastResult = convertResult(r)
 	}
 
-	// Execute
-	r, err := ex.exec.Execute(physical)
-	if err != nil {
-		return nil, err
-	}
-
-	return convertResult(r), nil
+	return lastResult, nil
 }
 
 // ExplainPlan returns the physical plan text without executing.
 func (ex *Executor) ExplainPlan(sql string) (string, error) {
-	stmts, err := parser.Parse(sql)
+	stmts, err := parser.Parse(strings.NewReader(sql), nil)
 	if err != nil {
 		return "", err
 	}
@@ -101,12 +138,23 @@ func (ex *Executor) ExplainPlan(sql string) (string, error) {
 		return "", nil
 	}
 
-	stmt := stmts[0].AST
-	if explain, ok := stmt.(*tree.Explain); ok {
-		stmt = explain.Statement
+	stmt := stmts[0].Stmt
+	if explain, ok := stmt.(*parser.ExplainStmt); ok {
+		stmt = explain.Query
 	}
 
-	logical, err := ex.analyzer.Analyze(stmt)
+	query, err := ex.analyzer.Analyze(stmt)
+	if err != nil {
+		return "", err
+	}
+	queries, err := ex.rewriter.Rewrite(query)
+	if err != nil {
+		return "", err
+	}
+	if len(queries) == 0 {
+		return "", nil
+	}
+	logical, err := planner.QueryToLogicalPlan(queries[0])
 	if err != nil {
 		return "", err
 	}
@@ -138,4 +186,15 @@ func stripQualifier(name string) string {
 		}
 	}
 	return name
+}
+
+// extractViewDef extracts the SELECT portion from a CREATE VIEW statement.
+// e.g., "CREATE VIEW v AS SELECT * FROM t" → "SELECT * FROM t"
+func extractViewDef(sql string) string {
+	upper := strings.ToUpper(sql)
+	idx := strings.Index(upper, " AS ")
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(sql[idx+4:])
 }
