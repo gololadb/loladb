@@ -12,6 +12,7 @@ Usage:
   loladb info <path>              Display database metadata
   loladb cli <path>               Open an interactive SQL shell
   loladb exec <path> "<sql>"      Execute a SQL statement
+  loladb serve <path> [addr]      Start PostgreSQL wire protocol server (default: :5432)
   loladb tui <path>               Open a terminal UI shell
   loladb <path> < file.sql        Import SQL from stdin
   loladb help                     Show this help message
@@ -47,6 +48,15 @@ func main() {
 			fatal("Usage: loladb exec <path> \"<sql>\" [--role=<user>]")
 		}
 		runExec(args[0], args[1], args[2:]...)
+	case "serve":
+		if len(args) < 1 {
+			fatal("Usage: loladb serve <path> [addr]")
+		}
+		addr := ":5432"
+		if len(args) >= 2 {
+			addr = args[1]
+		}
+		runServe(args[0], addr)
 	case "tui":
 		if len(args) < 1 {
 			fatal("Usage: loladb tui <path>")

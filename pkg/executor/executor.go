@@ -455,7 +455,7 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		}
 		count++
 	}
-	return &Result{RowsAffected: count, Message: fmt.Sprintf("INSERT %d", count)}, nil
+	return &Result{RowsAffected: count, Message: fmt.Sprintf("INSERT 0 %d", count)}, nil
 }
 
 func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {

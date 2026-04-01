@@ -82,7 +82,7 @@ func TestCLI_ExecCreateInsertSelect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "INSERT 2") {
+	if !strings.Contains(string(out), "INSERT 0 2") {
 		t.Fatalf("unexpected insert output: %s", out)
 	}
 
@@ -266,7 +266,7 @@ SELECT * FROM users;
 		t.Fatalf("missing CREATE TABLE: %s", s)
 	}
 	// Should show INSERT messages.
-	if !strings.Contains(s, "INSERT 1") {
+	if !strings.Contains(s, "INSERT 0 1") {
 		t.Fatalf("missing INSERT: %s", s)
 	}
 	// Should show SELECT results.
