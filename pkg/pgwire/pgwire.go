@@ -15,10 +15,12 @@
 //  9. Client sends Terminate ('X') to close.
 //
 // SSL negotiation: if the first 4 bytes after length are the SSL request
-// code (80877103), we reply 'N' (no SSL) and wait for the real startup.
+// code (80877103), we reply 'S' and upgrade to TLS when a TLSConfig is set,
+// or 'N' (no SSL) otherwise.
 package pgwire
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -111,9 +113,10 @@ type QueryExecutor interface {
 
 // Server listens for PostgreSQL wire protocol connections.
 type Server struct {
-	Addr     string
-	Executor QueryExecutor
-	listener net.Listener
+	Addr      string
+	Executor  QueryExecutor
+	TLSConfig *tls.Config // if non-nil, SSL is offered to clients
+	listener  net.Listener
 }
 
 // ListenAndServe starts listening and serving connections.
@@ -155,6 +158,7 @@ func (s *Server) Close() error {
 type conn struct {
 	nc          net.Conn
 	executor    QueryExecutor
+	tlsConfig   *tls.Config
 	params      map[string]string // startup parameters from client
 	preparedSQL string            // last Parse'd statement
 	portalSQL   string            // last Bind'd portal
@@ -164,9 +168,10 @@ func (s *Server) handleConn(nc net.Conn) {
 	defer nc.Close()
 
 	c := &conn{
-		nc:       nc,
-		executor: s.Executor,
-		params:   make(map[string]string),
+		nc:        nc,
+		executor:  s.Executor,
+		tlsConfig: s.TLSConfig,
+		params:    make(map[string]string),
 	}
 
 	if err := c.startup(); err != nil {
@@ -202,8 +207,18 @@ func (c *conn) startup() error {
 
 		switch version {
 		case sslRequestCode:
-			// Client wants SSL — we don't support it. Reply 'N'.
-			c.nc.Write([]byte{'N'})
+			if c.tlsConfig != nil {
+				// Accept SSL — upgrade to TLS.
+				c.nc.Write([]byte{'S'})
+				tlsConn := tls.Server(c.nc, c.tlsConfig)
+				if err := tlsConn.Handshake(); err != nil {
+					return fmt.Errorf("tls handshake: %w", err)
+				}
+				c.nc = tlsConn
+			} else {
+				// No TLS configured — decline.
+				c.nc.Write([]byte{'N'})
+			}
 			continue // client will send real startup next
 
 		case cancelRequestCode:

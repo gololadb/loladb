@@ -1,9 +1,17 @@
 package pgwire
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -506,3 +514,183 @@ func TestDatumToText(t *testing.T) {
 		}
 	}
 }
+
+// testTLSConfig generates a self-signed cert and returns a server and client TLS config.
+func testTLSConfig(t *testing.T) (serverCfg *tls.Config, clientCfg *tls.Config) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "loladb-test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("x509 key pair: %v", err)
+	}
+
+	serverCfg = &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(certPEM)
+	clientCfg = &tls.Config{RootCAs: pool, ServerName: "localhost"}
+
+	return serverCfg, clientCfg
+}
+
+func startTLSTestServer(t *testing.T, exec QueryExecutor, tlsCfg *tls.Config) (*Server, string) {
+	t.Helper()
+	srv := &Server{
+		Addr:      "127.0.0.1:0",
+		Executor:  exec,
+		TLSConfig: tlsCfg,
+	}
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv.listener = ln
+	srv.Addr = ln.Addr().String()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+
+	return srv, srv.Addr
+}
+
+func TestTLSUpgrade(t *testing.T) {
+	serverCfg, clientCfg := testTLSConfig(t)
+	exec := &mockExecutor{results: map[string]*QueryResult{
+		"SELECT 1": {
+			Columns: []string{"?column?"},
+			Rows:    [][]tuple.Datum{{{Type: tuple.TypeInt32, I32: 1}}},
+			Message: "SELECT 1",
+		},
+	}}
+	srv, addr := startTLSTestServer(t, exec, serverCfg)
+	defer srv.Close()
+
+	// Dial plain TCP.
+	rawConn := dial(t, addr)
+	defer rawConn.Close()
+	rawConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Send SSL request.
+	var sslMsg [8]byte
+	binary.BigEndian.PutUint32(sslMsg[:4], 8)
+	binary.BigEndian.PutUint32(sslMsg[4:], sslRequestCode)
+	if _, err := rawConn.Write(sslMsg[:]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Expect 'S' (SSL accepted).
+	resp := make([]byte, 1)
+	if _, err := io.ReadFull(rawConn, resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp[0] != 'S' {
+		t.Fatalf("expected 'S' (SSL accepted), got %c", resp[0])
+	}
+
+	// Upgrade to TLS.
+	tlsConn := tls.Client(rawConn, clientCfg)
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+
+	// Send startup over TLS.
+	if err := writeStartup(tlsConn, map[string]string{"user": "test"}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := consumeUntilReady(tlsConn)
+	if err != nil {
+		t.Fatalf("startup over TLS: %v", err)
+	}
+
+	gotAuth := false
+	for _, m := range msgs {
+		if m.typ == 'R' {
+			gotAuth = true
+		}
+	}
+	if !gotAuth {
+		t.Fatal("missing AuthenticationOk over TLS")
+	}
+
+	// Send a query over TLS.
+	if err := writeQuery(tlsConn, "SELECT 1"); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err = consumeUntilReady(tlsConn)
+	if err != nil {
+		t.Fatalf("query over TLS: %v", err)
+	}
+
+	var gotRowDesc, gotDataRow bool
+	for _, m := range msgs {
+		switch m.typ {
+		case 'T':
+			gotRowDesc = true
+		case 'D':
+			gotDataRow = true
+		}
+	}
+	if !gotRowDesc {
+		t.Error("missing RowDescription over TLS")
+	}
+	if !gotDataRow {
+		t.Error("missing DataRow over TLS")
+	}
+}
+
+func TestTLSDeclinedWithoutConfig(t *testing.T) {
+	// Server without TLS config should respond 'N'.
+	exec := &mockExecutor{results: map[string]*QueryResult{}}
+	srv, addr := startTestServer(t, exec) // no TLS
+	defer srv.Close()
+
+	conn := dial(t, addr)
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	var sslMsg [8]byte
+	binary.BigEndian.PutUint32(sslMsg[:4], 8)
+	binary.BigEndian.PutUint32(sslMsg[4:], sslRequestCode)
+	if _, err := conn.Write(sslMsg[:]); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := make([]byte, 1)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp[0] != 'N' {
+		t.Fatalf("expected 'N' (no SSL), got %c", resp[0])
+	}
+}
+
