@@ -1,0 +1,28 @@
+tasks:
+  install-deps:
+    name: Install dependencies
+    description: Download Go module dependencies.
+    command: |
+      go mod download
+    triggeredBy:
+      - postDevcontainerStart
+
+  build:
+    name: Build
+    description: Build the loladb binary.
+    command: |
+      go build -o loladb ./cmd/loladb
+    triggeredBy:
+      - postDevcontainerStart
+    dependsOn:
+      - install-deps
+
+  test:
+    name: Run tests
+    description: Run all unit and integration tests.
+    command: |
+      go test ./...
+    triggeredBy:
+      - manual
+    dependsOn:
+      - install-deps
