@@ -222,6 +222,7 @@ func (n *LogicalCreateSequence) OutputColumns() []string { return nil }
 type LogicalCreateView struct {
 	Name       string
 	Definition string
+	Columns    []ColDef
 }
 
 func (n *LogicalCreateView) String() string         { return fmt.Sprintf("CreateView(%s)", n.Name) }

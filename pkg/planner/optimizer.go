@@ -46,7 +46,7 @@ func (o *Optimizer) Optimize(node LogicalNode) (PhysicalNode, error) {
 	case *LogicalCreateSequence:
 		return &PhysCreateSequence{Name: n.Name}, nil
 	case *LogicalCreateView:
-		return &PhysCreateView{Name: n.Name, Definition: n.Definition}, nil
+		return &PhysCreateView{Name: n.Name, Definition: n.Definition, Columns: n.Columns}, nil
 	case *LogicalAlterTable:
 		return &PhysAlterTable{Table: n.Table, Commands: n.Commands}, nil
 	default:

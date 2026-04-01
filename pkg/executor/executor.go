@@ -63,7 +63,7 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 	case *planner.PhysCreateSequence:
 		return &Result{Message: fmt.Sprintf("CREATE SEQUENCE %s", n.Name)}, nil
 	case *planner.PhysCreateView:
-		return &Result{Message: fmt.Sprintf("CREATE VIEW %s", n.Name)}, nil
+		return ex.execCreateView(n)
 	case *planner.PhysAlterTable:
 		return &Result{Message: fmt.Sprintf("ALTER TABLE %s", n.Table)}, nil
 	default:
@@ -670,4 +670,19 @@ func rowsMatch(a, b []tuple.Datum) bool {
 		}
 	}
 	return true
+}
+
+func (ex *Executor) execCreateView(n *planner.PhysCreateView) (*Result, error) {
+	// Convert planner.ColDef to catalog.ColumnDef.
+	cols := make([]catalog.ColumnDef, len(n.Columns))
+	for i, c := range n.Columns {
+		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type}
+	}
+
+	_, err := ex.Cat.CreateView(n.Name, cols, n.Definition)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Result{Message: fmt.Sprintf("CREATE VIEW %s", n.Name)}, nil
 }

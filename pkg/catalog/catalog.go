@@ -15,6 +15,7 @@ import (
 const (
 	RelKindTable = 0
 	RelKindIndex = 1
+	RelKindView  = 2
 )
 
 // ColumnDef describes a column in a table.
@@ -63,23 +64,32 @@ func (a *engineAllocator) MarkDirty(pn uint32)                     { a.eng.Pool.
 type Catalog struct {
 	Eng   *engine.Engine
 	alloc *engineAllocator // shared btree page allocator
+	Rules *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
 }
 
 // New wraps an engine with catalog operations. If the database is
 // freshly created (PgClassPage == 0), it bootstraps the system tables.
 func New(eng *engine.Engine) (*Catalog, error) {
-	c := &Catalog{Eng: eng, alloc: &engineAllocator{eng: eng}}
+	c := &Catalog{Eng: eng, alloc: &engineAllocator{eng: eng}, Rules: newRuleStore()}
 
 	if eng.Super.PgClassPage == 0 {
 		if err := c.bootstrap(); err != nil {
 			return nil, fmt.Errorf("catalog: bootstrap: %w", err)
 		}
 	}
+
+	// Load persisted rewrite rules into the in-memory store.
+	if eng.Super.PgRewritePage != 0 {
+		if err := c.loadRules(); err != nil {
+			return nil, fmt.Errorf("catalog: load rules: %w", err)
+		}
+	}
+
 	return c, nil
 }
 
-// bootstrap allocates heap pages for pg_class and pg_attribute and
-// stores their page numbers in the superblock.
+// bootstrap allocates heap pages for pg_class, pg_attribute, and
+// pg_rewrite, storing their page numbers in the superblock.
 func (c *Catalog) bootstrap() error {
 	pgClassPage, err := c.Eng.AllocPage()
 	if err != nil {
@@ -89,9 +99,13 @@ func (c *Catalog) bootstrap() error {
 	if err != nil {
 		return err
 	}
+	pgRewritePage, err := c.Eng.AllocPage()
+	if err != nil {
+		return err
+	}
 
 	// Init the heap pages.
-	for _, pg := range []uint32{pgClassPage, pgAttrPage} {
+	for _, pg := range []uint32{pgClassPage, pgAttrPage, pgRewritePage} {
 		buf, err := c.Eng.Pool.FetchPage(pg)
 		if err != nil {
 			return err
@@ -104,6 +118,7 @@ func (c *Catalog) bootstrap() error {
 
 	c.Eng.Super.PgClassPage = pgClassPage
 	c.Eng.Super.PgAttrPage = pgAttrPage
+	c.Eng.Super.PgRewritePage = pgRewritePage
 
 	return nil
 }
@@ -171,6 +186,113 @@ func (c *Catalog) CreateTable(name string, cols []ColumnDef) (int32, error) {
 
 	c.Eng.TxMgr.Commit(xid)
 	return oid, nil
+}
+
+// CreateView registers a view in the catalog. A view is a relation with
+// RelKindView and an associated _RETURN rewrite rule that holds the
+// defining SELECT query. This mirrors PostgreSQL's DefineView() which
+// creates a pg_class entry + a pg_rewrite _RETURN rule.
+func (c *Catalog) CreateView(name string, cols []ColumnDef, definition string) (int32, error) {
+	existing, err := c.FindRelation(name)
+	if err != nil {
+		return 0, err
+	}
+	if existing != nil {
+		return 0, fmt.Errorf("catalog: relation %q already exists", name)
+	}
+
+	oid := int32(c.Eng.Super.AllocOID())
+
+	xid := c.Eng.TxMgr.Begin()
+
+	// Insert into pg_class with RelKindView and HeadPage=0 (no storage).
+	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, []tuple.Datum{
+		tuple.DInt32(oid),
+		tuple.DText(name),
+		tuple.DInt32(RelKindView),
+		tuple.DInt32(0), // relpages (views have no storage)
+		tuple.DInt32(0), // headpage (views have no storage)
+	})
+	if err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return 0, fmt.Errorf("catalog: insert pg_class for view: %w", err)
+	}
+
+	// Insert columns into pg_attribute.
+	for i, col := range cols {
+		_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, []tuple.Datum{
+			tuple.DInt32(oid),
+			tuple.DText(col.Name),
+			tuple.DInt32(int32(i + 1)),
+			tuple.DInt32(int32(col.Type)),
+		})
+		if err != nil {
+			c.Eng.TxMgr.Abort(xid)
+			return 0, fmt.Errorf("catalog: insert pg_attribute for view col %q: %w", col.Name, err)
+		}
+	}
+
+	c.Eng.TxMgr.Commit(xid)
+
+	// Persist the _RETURN rule to pg_rewrite.
+	rule := &RewriteRule{
+		Name:       "_RETURN",
+		RelOID:     oid,
+		Event:      RuleEventSelect,
+		Action:     RuleActionInstead,
+		Definition: definition,
+		Enabled:    true,
+	}
+	if err := c.persistRule(rule); err != nil {
+		return 0, fmt.Errorf("catalog: persist rule for view: %w", err)
+	}
+
+	// Also register in the in-memory store.
+	c.Rules.AddRule(rule)
+
+	return oid, nil
+}
+
+// persistRule writes a rewrite rule to the pg_rewrite heap page.
+// Tuple format: (relOID int32, name text, event int32, action int32, definition text)
+func (c *Catalog) persistRule(rule *RewriteRule) error {
+	xid := c.Eng.TxMgr.Begin()
+	_, err := c.Eng.Insert(xid, c.Eng.Super.PgRewritePage, []tuple.Datum{
+		tuple.DInt32(rule.RelOID),
+		tuple.DText(rule.Name),
+		tuple.DInt32(int32(rule.Event)),
+		tuple.DInt32(int32(rule.Action)),
+		tuple.DText(rule.Definition),
+	})
+	if err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
+
+// loadRules reads all rules from pg_rewrite into the in-memory store.
+func (c *Catalog) loadRules() error {
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	defer c.Eng.TxMgr.Commit(xid)
+
+	return c.Eng.SeqScan(c.Eng.Super.PgRewritePage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) < 5 {
+			return true
+		}
+		rule := &RewriteRule{
+			RelOID:     tup.Columns[0].I32,
+			Name:       tup.Columns[1].Text,
+			Event:      RuleEvent(tup.Columns[2].I32),
+			Action:     RuleAction(tup.Columns[3].I32),
+			Definition: tup.Columns[4].Text,
+			Enabled:    true,
+		}
+		c.Rules.AddRule(rule)
+		return true
+	})
 }
 
 // FindRelation searches pg_class for a relation by name. Returns nil
@@ -776,6 +898,34 @@ type TableStats struct {
 }
 
 // Stats gathers basic statistics for the named table.
+// IsView returns true if the relation is a view.
+func (c *Catalog) IsView(relOID int32) bool {
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	defer c.Eng.TxMgr.Commit(xid)
+
+	var kind int32
+	_ = c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) >= 5 && tup.Columns[0].I32 == relOID {
+			kind = tup.Columns[2].I32
+			return false
+		}
+		return true
+	})
+	return kind == RelKindView
+}
+
+// AddRule registers a rewrite rule for a relation. This is the
+// equivalent of INSERT INTO pg_rewrite.
+func (c *Catalog) AddRule(rule *RewriteRule) {
+	c.Rules.AddRule(rule)
+}
+
+// GetRulesForEvent returns all enabled rules for a relation and event.
+func (c *Catalog) GetRulesForEvent(relOID int32, event RuleEvent) []*RewriteRule {
+	return c.Rules.GetRulesForEvent(relOID, event)
+}
+
 func (c *Catalog) Stats(tableName string) (*TableStats, error) {
 	rel, err := c.FindRelation(tableName)
 	if err != nil {

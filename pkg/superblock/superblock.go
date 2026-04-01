@@ -33,8 +33,9 @@ const (
 //	 24      4    PgAttrPage     — first heap page of pg_attribute
 //	 28      4    FreeListPage   — page number of the free-list bitmap
 //	 32      4    TotalPages     — total pages allocated in the data file
+//	 36      4    PgRewritePage  — first heap page of pg_rewrite (rule storage)
 //
-// The rest of the page (bytes 36..4095) is reserved and zero-filled.
+// The rest of the page (bytes 40..4095) is reserved and zero-filled.
 type Superblock struct {
 	Magic         uint32
 	Version       uint32
@@ -45,9 +46,10 @@ type Superblock struct {
 	PgAttrPage    uint32
 	FreeListPage  uint32
 	TotalPages    uint32
+	PgRewritePage uint32
 }
 
-const serializedSize = 9 * 4 // 36 bytes
+const serializedSize = 10 * 4 // 40 bytes
 
 // New returns a Superblock initialised with default values for a
 // fresh database.
@@ -77,6 +79,7 @@ func (sb *Superblock) Serialize() []byte {
 	binary.LittleEndian.PutUint32(buf[24:28], sb.PgAttrPage)
 	binary.LittleEndian.PutUint32(buf[28:32], sb.FreeListPage)
 	binary.LittleEndian.PutUint32(buf[32:36], sb.TotalPages)
+	binary.LittleEndian.PutUint32(buf[36:40], sb.PgRewritePage)
 	return buf
 }
 
@@ -96,6 +99,7 @@ func Deserialize(buf []byte) (*Superblock, error) {
 		PgAttrPage:    binary.LittleEndian.Uint32(buf[24:28]),
 		FreeListPage:  binary.LittleEndian.Uint32(buf[28:32]),
 		TotalPages:    binary.LittleEndian.Uint32(buf[32:36]),
+		PgRewritePage: binary.LittleEndian.Uint32(buf[36:40]),
 	}
 
 	if sb.Magic != Magic {

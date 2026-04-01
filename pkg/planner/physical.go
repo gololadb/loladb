@@ -221,6 +221,7 @@ func (n *PhysCreateSequence) Children() []PhysicalNode  { return nil }
 type PhysCreateView struct {
 	Name       string
 	Definition string
+	Columns    []ColDef // resolved column definitions for the view
 }
 
 func (n *PhysCreateView) String() string            { return fmt.Sprintf("CreateView %s", n.Name) }
