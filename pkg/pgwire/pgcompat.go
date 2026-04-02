@@ -125,15 +125,8 @@ func interceptQuery(sql string, provider CatalogProvider) (*QueryResult, bool) {
 	}
 	// Let SELECT current_schema pass through to the SQL executor.
 
-	// WITH RECURSIVE / WITH queries — pg_dump uses these for
-	// materialized view dependencies. Return empty results.
-	if strings.HasPrefix(upper, "WITH RECURSIVE") || strings.HasPrefix(upper, "WITH ") {
-		return &QueryResult{
-			Columns: []string{"classid", "objid", "refobjid"},
-			Rows:    [][]tuple.Datum{},
-			Message: "SELECT 0",
-		}, true
-	}
+	// WITH / WITH RECURSIVE queries are now handled by the SQL executor
+	// via native CTE support. No interception needed.
 
 	// Extract the primary FROM table (first FROM not inside parens)
 	// to route to the correct handler.

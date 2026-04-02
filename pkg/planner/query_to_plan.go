@@ -431,6 +431,38 @@ func joinTreeNodeToPlan(node JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, 
 		for i, c := range rte.Columns {
 			colNames[i] = c.Name
 		}
+
+		// Subquery / CTE scan.
+		if rte.Subquery != nil {
+			if rte.IsRecursive {
+				// Recursive CTE: build plans for both init and recursive terms.
+				initPlan, err := queryToSelectPlan(rte.Subquery.SetLeft)
+				if err != nil {
+					return nil, fmt.Errorf("planner: recursive CTE %q init: %w", rte.RelName, err)
+				}
+				recPlan, err := queryToSelectPlan(rte.Subquery.SetRight)
+				if err != nil {
+					return nil, fmt.Errorf("planner: recursive CTE %q recursive: %w", rte.RelName, err)
+				}
+				return &LogicalSubqueryScan{
+					Alias:         rte.Alias,
+					Columns:       colNames,
+					ChildPlan:     recPlan,
+					IsRecursive:   true,
+					RecursiveInit: initPlan,
+				}, nil
+			}
+			childPlan, err := QueryToLogicalPlan(rte.Subquery)
+			if err != nil {
+				return nil, fmt.Errorf("planner: CTE %q: %w", rte.RelName, err)
+			}
+			return &LogicalSubqueryScan{
+				Alias:     rte.Alias,
+				Columns:   colNames,
+				ChildPlan: childPlan,
+			}, nil
+		}
+
 		return &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames}, nil
 
 	case *JoinNode:

@@ -52,11 +52,40 @@ type Executor struct {
 	CurrentUser string // session user for privilege checks
 	TriggerExec TriggerExecFunc // optional PL/pgSQL trigger executor
 	SQLExec     SQLExecFunc     // optional SQL executor for constraint evaluation
+
+	// cteResults holds materialized CTE results for recursive CTE execution.
+	// Keyed by CTE alias name.
+	cteResults map[string]*cteResultEntry
+}
+
+type cteResultEntry struct {
+	Columns []string
+	Rows    [][]tuple.Datum
 }
 
 // NewExecutor creates a plan executor.
 func NewExecutor(cat *catalog.Catalog) *Executor {
 	return &Executor{Cat: cat}
+}
+
+func (ex *Executor) setCTEResult(name string, cols []string, rows [][]tuple.Datum) {
+	if ex.cteResults == nil {
+		ex.cteResults = make(map[string]*cteResultEntry)
+	}
+	ex.cteResults[strings.ToLower(name)] = &cteResultEntry{Columns: cols, Rows: rows}
+}
+
+func (ex *Executor) clearCTEResult(name string) {
+	if ex.cteResults != nil {
+		delete(ex.cteResults, strings.ToLower(name))
+	}
+}
+
+func (ex *Executor) getCTEResult(name string) *cteResultEntry {
+	if ex.cteResults == nil {
+		return nil
+	}
+	return ex.cteResults[strings.ToLower(name)]
 }
 
 // checkTablePrivilege verifies the current user has the required privilege
@@ -286,6 +315,8 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execDistinct(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
+	case *planner.PhysSubqueryScan:
+		return ex.execSubqueryScan(n)
 	default:
 		return nil, fmt.Errorf("executor: unsupported node %T", node)
 	}
@@ -357,6 +388,42 @@ func splitByNewline(s string) []string {
 // --- Scan executors ---
 
 func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
+	// Check if this scan targets a CTE working table (recursive CTE self-reference).
+	if cte := ex.getCTEResult(n.Table); cte != nil {
+		// Remap column names to use the scan's alias.
+		alias := n.Alias
+		if alias == "" {
+			alias = n.Table
+		}
+		cols := make([]string, len(n.Columns))
+		for i, c := range n.Columns {
+			cols[i] = alias + "." + c
+		}
+
+		// Apply pushed-down filter if present.
+		var rows [][]tuple.Datum
+		if n.Filter != nil {
+			for _, r := range cte.Rows {
+				row := &planner.Row{Columns: r, Names: cols}
+				val, err := n.Filter.Eval(row)
+				if err != nil {
+					continue
+				}
+				if val.Type == tuple.TypeBool && val.Bool {
+					rows = append(rows, r)
+				}
+			}
+		} else {
+			rows = cte.Rows
+		}
+
+		return &Result{
+			Columns: cols,
+			Rows:    rows,
+			Message: fmt.Sprintf("SELECT %d", len(rows)),
+		}, nil
+	}
+
 	if n.IsTerminal {
 		// No Project node narrows the output (e.g. SELECT *).
 		// Check every scanned column individually.
@@ -2572,6 +2639,82 @@ func (ex *Executor) execDropColumn(n *planner.PhysDropColumn) (*Result, error) {
 		return nil, err
 	}
 	return &Result{Message: "ALTER TABLE"}, nil
+}
+
+func (ex *Executor) execSubqueryScan(n *planner.PhysSubqueryScan) (*Result, error) {
+	if n.IsRecursive {
+		return ex.execRecursiveSubqueryScan(n)
+	}
+
+	// Materialize the child plan.
+	childResult, err := ex.Execute(n.Child)
+	if err != nil {
+		return nil, fmt.Errorf("executor: subquery scan %q: %w", n.Alias, err)
+	}
+
+	// Build qualified column names for the subquery output.
+	cols := make([]string, len(n.Columns))
+	for i, c := range n.Columns {
+		cols[i] = n.Alias + "." + c
+	}
+
+	return &Result{
+		Columns: cols,
+		Rows:    childResult.Rows,
+		Message: fmt.Sprintf("SELECT %d", len(childResult.Rows)),
+	}, nil
+}
+
+func (ex *Executor) execRecursiveSubqueryScan(n *planner.PhysSubqueryScan) (*Result, error) {
+	// Execute the non-recursive (initial) term.
+	initResult, err := ex.Execute(n.RecursiveInit)
+	if err != nil {
+		return nil, fmt.Errorf("executor: recursive CTE %q init: %w", n.Alias, err)
+	}
+
+	allRows := make([][]tuple.Datum, len(initResult.Rows))
+	copy(allRows, initResult.Rows)
+	workingTable := initResult.Rows
+
+	// Build column names.
+	cols := make([]string, len(n.Columns))
+	for i, c := range n.Columns {
+		cols[i] = n.Alias + "." + c
+	}
+
+	// Iteratively execute the recursive term, feeding the working table
+	// as the CTE's content, until no new rows are produced.
+	const maxIterations = 1000
+	for iter := 0; iter < maxIterations; iter++ {
+		if len(workingTable) == 0 {
+			break
+		}
+
+		// The recursive term references the CTE name. We need to make
+		// the working table available. We do this by temporarily
+		// registering the working table in the executor's CTE store.
+		ex.setCTEResult(n.Alias, cols, workingTable)
+
+		recResult, err := ex.Execute(n.Child)
+		if err != nil {
+			return nil, fmt.Errorf("executor: recursive CTE %q iteration %d: %w", n.Alias, iter, err)
+		}
+
+		if len(recResult.Rows) == 0 {
+			break
+		}
+
+		allRows = append(allRows, recResult.Rows...)
+		workingTable = recResult.Rows
+	}
+
+	ex.clearCTEResult(n.Alias)
+
+	return &Result{
+		Columns: cols,
+		Rows:    allRows,
+		Message: fmt.Sprintf("SELECT %d", len(allRows)),
+	}, nil
 }
 
 func (ex *Executor) execResult(n *planner.PhysResult) (*Result, error) {

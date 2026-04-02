@@ -143,6 +143,8 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysDropColumn{Table: n.Table, ColName: n.ColName, IfExists: n.IfExists}, nil
 	case *LogicalResult:
 		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
+	case *LogicalSubqueryScan:
+		return o.optimizeSubqueryScan(n)
 	default:
 		child, err := o.optimize(node)
 		return child, err
@@ -152,7 +154,17 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 func (o *Optimizer) optimizeScan(n *LogicalScan, filter Expr) (PhysicalNode, error) {
 	rel, err := o.Cat.FindRelation(n.Table)
 	if err != nil || rel == nil {
-		return nil, err
+		// Table not in catalog — may be a CTE self-reference in a recursive query.
+		// Produce a SeqScan with default estimates; the executor resolves it
+		// at runtime via the CTE working table.
+		return &PhysSeqScan{
+			Table:    n.Table,
+			Alias:    n.Alias,
+			Columns:  n.Columns,
+			HeadPage: 0,
+			Estimate: PlanCost{Total: 10, Rows: 100, Width: 40},
+			Filter:   filter,
+		}, nil
 	}
 	stats, _ := o.Cat.Stats(n.Table)
 	tupleCount := float64(100) // default
@@ -1148,6 +1160,27 @@ func (o *Optimizer) optimizeInsertSelect(n *LogicalInsertSelect) (PhysicalNode, 
 		Child:    child,
 		Estimate: child.Cost(),
 	}, nil
+}
+
+func (o *Optimizer) optimizeSubqueryScan(n *LogicalSubqueryScan) (PhysicalNode, error) {
+	child, err := o.Optimize(n.ChildPlan)
+	if err != nil {
+		return nil, err
+	}
+	phys := &PhysSubqueryScan{
+		Alias:       n.Alias,
+		Columns:     n.Columns,
+		Child:       child,
+		IsRecursive: n.IsRecursive,
+	}
+	if n.RecursiveInit != nil {
+		initPhys, err := o.Optimize(n.RecursiveInit)
+		if err != nil {
+			return nil, err
+		}
+		phys.RecursiveInit = initPhys
+	}
+	return phys, nil
 }
 
 func (o *Optimizer) optimizeInsert(n *LogicalInsert) (PhysicalNode, error) {

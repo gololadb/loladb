@@ -27,6 +27,9 @@ type Analyzer struct {
 
 	// Per-query state, reset for each Analyze call.
 	rangeTable []*RangeTblEntry
+
+	// cteMap holds CTE definitions visible in the current query scope.
+	cteMap map[string]*CTEDef
 }
 
 // Analyze transforms a raw parse tree statement into a Query.
@@ -35,6 +38,7 @@ type Analyzer struct {
 func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 	// Reset per-query state.
 	a.rangeTable = nil
+	a.cteMap = nil
 
 	switch n := stmt.(type) {
 	case *parser.SelectStmt:
@@ -190,6 +194,14 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 
 	q := &Query{CommandType: CmdSelect}
 
+	// Process WITH clause (CTEs) before anything else so CTE names
+	// are available when resolving FROM references.
+	if n.WithClause != nil {
+		if err := a.transformWithClause(n.WithClause, q); err != nil {
+			return nil, err
+		}
+	}
+
 	// DISTINCT
 	if n.DistinctClause != nil {
 		q.Distinct = true
@@ -313,6 +325,124 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 	return q, nil
 }
 
+// transformWithClause processes a WITH clause, analyzing each CTE and
+// registering it in the analyzer's CTE map so FROM references can find it.
+func (a *Analyzer) transformWithClause(wc *parser.WithClause, q *Query) error {
+	if a.cteMap == nil {
+		a.cteMap = make(map[string]*CTEDef)
+	}
+
+	for _, cte := range wc.CTEs {
+		cteName := strings.ToLower(cte.Ctename)
+		isRecursive := wc.Recursive
+
+		selectStmt, ok := cte.Ctequery.(*parser.SelectStmt)
+		if !ok {
+			return fmt.Errorf("analyzer: CTE %q: only SELECT queries are supported", cteName)
+		}
+
+		if isRecursive {
+			// For recursive CTEs, the query must be a UNION ALL with
+			// the non-recursive term on the left and recursive term on the right.
+			// Register a placeholder CTE first so the recursive term can
+			// reference it.
+			if selectStmt.Op != parser.SETOP_UNION {
+				return fmt.Errorf("analyzer: recursive CTE %q must use UNION [ALL]", cteName)
+			}
+
+			// Analyze the non-recursive (initial) term first.
+			savedRT := a.rangeTable
+			savedCTEs := a.cteMap
+			a.rangeTable = nil
+			initQuery, err := a.transformSelectStmt(selectStmt.Larg)
+			if err != nil {
+				a.rangeTable = savedRT
+				a.cteMap = savedCTEs
+				return fmt.Errorf("analyzer: CTE %q initial term: %w", cteName, err)
+			}
+			a.rangeTable = savedRT
+			a.cteMap = savedCTEs
+
+			// Derive column info from the initial term.
+			cols := cteColumnsFromQuery(cteName, cte.Aliascolnames, initQuery)
+
+			// Register the CTE so the recursive term can self-reference.
+			def := &CTEDef{
+				Name:      cteName,
+				Columns:   cols,
+				Recursive: true,
+			}
+			a.cteMap[cteName] = def
+
+			// Analyze the recursive term (which may reference the CTE itself).
+			savedRT = a.rangeTable
+			a.rangeTable = nil
+			recQuery, err := a.transformSelectStmt(selectStmt.Rarg)
+			if err != nil {
+				a.rangeTable = savedRT
+				return fmt.Errorf("analyzer: CTE %q recursive term: %w", cteName, err)
+			}
+			a.rangeTable = savedRT
+
+			// Build a combined query that represents the full recursive CTE.
+			// We store both parts in a SetOp query.
+			combined := &Query{
+				CommandType: CmdSelect,
+				SetOp:       SetOpUnion,
+				SetAll:       selectStmt.All,
+				SetLeft:     initQuery,
+				SetRight:    recQuery,
+				TargetList:  initQuery.TargetList,
+				RangeTable:  initQuery.RangeTable,
+			}
+
+			def.Query = combined
+			q.CTEs = append(q.CTEs, def)
+		} else {
+			// Non-recursive CTE: analyze the subquery in isolation.
+			savedRT := a.rangeTable
+			savedCTEs := a.cteMap
+			a.rangeTable = nil
+			subQuery, err := a.transformSelectStmt(selectStmt)
+			if err != nil {
+				a.rangeTable = savedRT
+				a.cteMap = savedCTEs
+				return fmt.Errorf("analyzer: CTE %q: %w", cteName, err)
+			}
+			a.rangeTable = savedRT
+			a.cteMap = savedCTEs
+
+			cols := cteColumnsFromQuery(cteName, cte.Aliascolnames, subQuery)
+
+			def := &CTEDef{
+				Name:    cteName,
+				Query:   subQuery,
+				Columns: cols,
+			}
+			a.cteMap[cteName] = def
+			q.CTEs = append(q.CTEs, def)
+		}
+	}
+	return nil
+}
+
+// cteColumnsFromQuery derives RTEColumn metadata from a CTE's analyzed query.
+func cteColumnsFromQuery(cteName string, aliasColNames []string, q *Query) []RTEColumn {
+	cols := make([]RTEColumn, len(q.TargetList))
+	for i, te := range q.TargetList {
+		name := te.Name
+		if i < len(aliasColNames) {
+			name = aliasColNames[i]
+		}
+		cols[i] = RTEColumn{
+			Name:   name,
+			Type:   te.Expr.ResultType(),
+			ColNum: int32(i + 1),
+		}
+	}
+	return cols
+}
+
 // transformFromClause processes the FROM clause items, adding range
 // table entries and building join tree nodes.
 // Mirrors PostgreSQL's transformFromClauseItem().
@@ -336,6 +466,14 @@ func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 		if t.Alias != nil && t.Alias.Aliasname != "" {
 			alias = t.Alias.Aliasname
 		}
+
+		// Check if this references a CTE.
+		if a.cteMap != nil {
+			if cteDef, ok := a.cteMap[strings.ToLower(tableName)]; ok {
+				return a.addCTERangeTableEntry(cteDef, alias)
+			}
+		}
+
 		rte, err := a.addRangeTableEntryQualified(t.Schemaname, tableName, alias)
 		if err != nil {
 			return nil, err
@@ -345,9 +483,76 @@ func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 	case *parser.JoinExpr:
 		return a.transformJoinExpr(t)
 
+	case *parser.RangeSubselect:
+		return a.transformRangeSubselect(t)
+
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported FROM item %T", item)
 	}
+}
+
+// addCTERangeTableEntry creates a range table entry for a CTE reference.
+func (a *Analyzer) addCTERangeTableEntry(cteDef *CTEDef, alias string) (JoinTreeNode, error) {
+	rte := &RangeTblEntry{
+		RTIndex:     len(a.rangeTable) + 1,
+		RelName:     cteDef.Name,
+		Alias:       alias,
+		Columns:     cteDef.Columns,
+		Subquery:    cteDef.Query,
+		IsRecursive: cteDef.Recursive,
+	}
+	a.rangeTable = append(a.rangeTable, rte)
+	return &RangeTblRef{RTIndex: rte.RTIndex}, nil
+}
+
+// transformRangeSubselect handles subqueries in FROM: (SELECT ...) AS alias.
+func (a *Analyzer) transformRangeSubselect(rs *parser.RangeSubselect) (JoinTreeNode, error) {
+	selectStmt, ok := rs.Subquery.(*parser.SelectStmt)
+	if !ok {
+		return nil, fmt.Errorf("analyzer: subquery in FROM must be a SELECT")
+	}
+
+	alias := "subquery"
+	if rs.Alias != nil && rs.Alias.Aliasname != "" {
+		alias = rs.Alias.Aliasname
+	}
+
+	// Analyze the subquery in its own scope.
+	savedRT := a.rangeTable
+	savedCTEs := a.cteMap
+	a.rangeTable = nil
+	subQuery, err := a.transformSelectStmt(selectStmt)
+	if err != nil {
+		a.rangeTable = savedRT
+		a.cteMap = savedCTEs
+		return nil, fmt.Errorf("analyzer: subquery %q: %w", alias, err)
+	}
+	a.rangeTable = savedRT
+	a.cteMap = savedCTEs
+
+	// Build columns from the subquery's target list.
+	cols := make([]RTEColumn, len(subQuery.TargetList))
+	for i, te := range subQuery.TargetList {
+		name := te.Name
+		if rs.Alias != nil && i < len(rs.Alias.Colnames) {
+			name = rs.Alias.Colnames[i]
+		}
+		cols[i] = RTEColumn{
+			Name:   name,
+			Type:   te.Expr.ResultType(),
+			ColNum: int32(i + 1),
+		}
+	}
+
+	rte := &RangeTblEntry{
+		RTIndex:  len(a.rangeTable) + 1,
+		RelName:  alias,
+		Alias:    alias,
+		Columns:  cols,
+		Subquery: subQuery,
+	}
+	a.rangeTable = append(a.rangeTable, rte)
+	return &RangeTblRef{RTIndex: rte.RTIndex}, nil
 }
 
 // transformJoinExpr processes an explicit JOIN, mirroring

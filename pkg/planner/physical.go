@@ -670,3 +670,36 @@ type PhysResult struct {
 func (n *PhysResult) String() string            { return "Result" }
 func (n *PhysResult) Cost() PlanCost            { return PlanCost{Startup: 0.01, Total: 0.01, Rows: 1} }
 func (n *PhysResult) Children() []PhysicalNode  { return nil }
+
+// PhysSubqueryScan materializes a child plan and scans the result.
+type PhysSubqueryScan struct {
+	Alias       string
+	Columns     []string
+	Child       PhysicalNode
+	IsRecursive bool
+	// RecursiveInit is the physical plan for the non-recursive term.
+	RecursiveInit PhysicalNode
+}
+
+func (n *PhysSubqueryScan) String() string {
+	if n.IsRecursive {
+		return fmt.Sprintf("RecursiveSubqueryScan on %s", n.Alias)
+	}
+	return fmt.Sprintf("SubqueryScan on %s", n.Alias)
+}
+func (n *PhysSubqueryScan) Cost() PlanCost {
+	if n.Child != nil {
+		return n.Child.Cost()
+	}
+	return PlanCost{}
+}
+func (n *PhysSubqueryScan) Children() []PhysicalNode {
+	var ch []PhysicalNode
+	if n.RecursiveInit != nil {
+		ch = append(ch, n.RecursiveInit)
+	}
+	if n.Child != nil {
+		ch = append(ch, n.Child)
+	}
+	return ch
+}

@@ -118,6 +118,17 @@ type Query struct {
 
 	// Utility holds DDL/utility statement info when CommandType == CmdUtility.
 	Utility *UtilityStmt
+
+	// CTEs holds analyzed Common Table Expressions from WITH clauses.
+	CTEs []*CTEDef
+}
+
+// CTEDef holds a single analyzed CTE definition.
+type CTEDef struct {
+	Name      string
+	Query     *Query
+	Columns   []RTEColumn // resolved output columns
+	Recursive bool
 }
 
 // RangeTblEntry represents one entry in the query's range table,
@@ -142,6 +153,13 @@ type RangeTblEntry struct {
 
 	// HeadPage is the first heap page (from catalog), used by the planner.
 	HeadPage int32
+
+	// Subquery holds the analyzed query for CTE / subquery range table entries.
+	// When non-nil, this RTE represents a subquery scan rather than a heap scan.
+	Subquery *Query
+
+	// IsRecursive is true for recursive CTE entries (WITH RECURSIVE).
+	IsRecursive bool
 }
 
 // RTEColumn is a single column within a RangeTblEntry, carrying the

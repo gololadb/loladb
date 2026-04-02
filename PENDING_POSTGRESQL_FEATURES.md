@@ -18,7 +18,8 @@ For context, here is what is currently implemented:
   ADD CONSTRAINT, RLS enable/disable), CREATE FUNCTION, CREATE TRIGGER,
   CREATE DOMAIN, CREATE TYPE (enum), CREATE POLICY (RLS)
 - **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, GROUP BY, HAVING,
-  JOIN (INNER, LEFT, RIGHT, CROSS), DISTINCT, UNION/INTERSECT/EXCEPT
+  JOIN (INNER, LEFT, RIGHT, CROSS), DISTINCT, UNION/INTERSECT/EXCEPT,
+  WITH / WITH RECURSIVE (CTEs), subqueries in FROM
 - **Expressions:** Arithmetic (+, -, *, /, %), comparison (=, <>, <, >, <=, >=),
   AND/OR/NOT, IS [NOT] NULL, IS TRUE/FALSE/UNKNOWN, CASE (simple + searched),
   CAST, COALESCE, NULLIF, GREATEST, LEAST, LIKE/ILIKE/NOT LIKE/NOT ILIKE,
@@ -111,22 +112,6 @@ Niche use case. PostgreSQL supports these with operators and GiST indexing.
 ---
 
 ## 3. Query Features
-
-### 🔴 Common Table Expressions (WITH / WITH RECURSIVE)
-
-```sql
-WITH active AS (SELECT * FROM users WHERE active)
-SELECT * FROM active WHERE created > '2024-01-01';
-
-WITH RECURSIVE tree AS (
-  SELECT id, parent_id, name FROM categories WHERE parent_id IS NULL
-  UNION ALL
-  SELECT c.id, c.parent_id, c.name FROM categories c JOIN tree t ON c.parent_id = t.id
-)
-SELECT * FROM tree;
-```
-
-No CTE support. `WITH RECURSIVE` is essential for hierarchical queries.
 
 ### 🔴 Window Functions
 
@@ -637,7 +622,6 @@ SELECT pg_advisory_lock(12345);
 | Feature | Category |
 |---|---|
 | Subqueries (IN, EXISTS, scalar) | Queries |
-| CTEs (WITH) | Queries |
 | Window functions | Queries |
 | INSERT ... ON CONFLICT | DML |
 | UPDATE ... FROM | DML |

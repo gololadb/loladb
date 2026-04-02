@@ -600,3 +600,26 @@ type LogicalResult struct {
 
 func (n *LogicalResult) String() string         { return "Result" }
 func (n *LogicalResult) OutputColumns() []string { return n.Names }
+
+// LogicalSubqueryScan materializes a subquery (CTE or inline subquery)
+// and scans the result as if it were a table.
+type LogicalSubqueryScan struct {
+	Alias      string
+	Columns    []string
+	ChildPlan  LogicalNode
+	IsRecursive bool
+	// RecursiveInit is the non-recursive (initial) part for WITH RECURSIVE.
+	RecursiveInit LogicalNode
+}
+
+func (n *LogicalSubqueryScan) String() string {
+	return fmt.Sprintf("SubqueryScan(%s)", n.Alias)
+}
+
+func (n *LogicalSubqueryScan) OutputColumns() []string {
+	cols := make([]string, len(n.Columns))
+	for i, c := range n.Columns {
+		cols[i] = n.Alias + "." + c
+	}
+	return cols
+}
