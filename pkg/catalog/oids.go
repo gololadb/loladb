@@ -81,7 +81,8 @@ const (
 	PgTypeTypnamespace = 2 // typnamespace INT
 	PgTypeTyplen       = 3 // typlen INT
 	PgTypeTyptype      = 4 // typtype TEXT ('b'=base, 'c'=composite, etc.)
-	PgTypeNumCols      = 5
+	PgTypeTypbasetype  = 5 // typbasetype INT (base type OID for domains, 0 otherwise)
+	PgTypeNumCols      = 6
 )
 
 // pg_namespace column positions.

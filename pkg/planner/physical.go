@@ -477,6 +477,26 @@ func (n *PhysAlterFunction) String() string            { return fmt.Sprintf("Alt
 func (n *PhysAlterFunction) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysAlterFunction) Children() []PhysicalNode  { return nil }
 
+// PhysCreateDomain represents CREATE DOMAIN.
+type PhysCreateDomain struct {
+	Name     string
+	BaseType string
+}
+
+func (n *PhysCreateDomain) String() string            { return fmt.Sprintf("CreateDomain %s", n.Name) }
+func (n *PhysCreateDomain) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreateDomain) Children() []PhysicalNode  { return nil }
+
+// PhysCreateEnum represents CREATE TYPE ... AS ENUM.
+type PhysCreateEnum struct {
+	Name string
+	Vals []string
+}
+
+func (n *PhysCreateEnum) String() string            { return fmt.Sprintf("CreateEnum %s", n.Name) }
+func (n *PhysCreateEnum) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreateEnum) Children() []PhysicalNode  { return nil }
+
 // PhysResult produces a single row by evaluating expressions (SELECT without FROM).
 type PhysResult struct {
 	Exprs []Expr

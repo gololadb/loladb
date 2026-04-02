@@ -81,6 +81,7 @@ type Catalog struct {
 	ACLs     *aclStore        // in-memory object ACL cache
 	Funcs    *funcStore       // in-memory function definitions (pg_proc)
 	Triggers *triggerStore    // in-memory trigger definitions (pg_trigger)
+	Types    *typeStore       // in-memory custom type definitions (domains, enums)
 	cache    *syscache        // catalog lookup cache
 }
 
@@ -99,7 +100,7 @@ func New(eng *engine.Engine) (*Catalog, error) {
 	c := &Catalog{
 		Eng: eng, alloc: alloc, IdxAMs: ams,
 		Rules: newRuleStore(), Policies: newPolicyStore(), ACLs: newACLStore(),
-		Funcs: newFuncStore(), Triggers: newTriggerStore(),
+		Funcs: newFuncStore(), Triggers: newTriggerStore(), Types: newTypeStore(),
 		cache: newSyscache(),
 	}
 
@@ -126,6 +127,7 @@ func New(eng *engine.Engine) (*Catalog, error) {
 	if err := c.loadTriggers(); err != nil {
 		return nil, fmt.Errorf("catalog: load triggers: %w", err)
 	}
+	c.loadCustomTypes()
 
 	return c, nil
 }

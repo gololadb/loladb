@@ -111,6 +111,10 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysDropTrigger{TrigName: n.TrigName, Table: n.Table, MissingOk: n.MissingOk}, nil
 	case *LogicalAlterFunction:
 		return &PhysAlterFunction{Name: n.Name, NewName: n.NewName, NewOwner: n.NewOwner}, nil
+	case *LogicalCreateDomain:
+		return &PhysCreateDomain{Name: n.Name, BaseType: n.BaseType}, nil
+	case *LogicalCreateEnum:
+		return &PhysCreateEnum{Name: n.Name, Vals: n.Vals}, nil
 	case *LogicalResult:
 		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
 	default:

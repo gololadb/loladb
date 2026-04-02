@@ -238,6 +238,12 @@ type UtilityStmt struct {
 	FuncNewName  string // RENAME TO
 	FuncNewOwner string // OWNER TO
 
+	// CREATE DOMAIN / CREATE TYPE AS ENUM fields
+	DomainName     string
+	DomainBaseType string // SQL type name for the base type
+	EnumName       string
+	EnumVals       []string
+
 	// CREATE TRIGGER fields
 	TrigName       string
 	TrigTable      string
@@ -271,6 +277,8 @@ const (
 	UtilDropFunction
 	UtilDropTrigger
 	UtilAlterFunction
+	UtilCreateDomain
+	UtilCreateEnum
 	UtilNoOp
 )
 

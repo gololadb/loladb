@@ -90,6 +90,10 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		return a.transformDropStmt(n)
 	case *parser.AlterFunctionStmt:
 		return a.transformAlterFunctionStmt(n)
+	case *parser.CreateDomainStmt:
+		return a.transformCreateDomainStmt(n)
+	case *parser.CreateEnumStmt:
+		return a.transformCreateEnumStmt(n)
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported statement %T", stmt)
 	}
@@ -803,7 +807,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		if !ok {
 			continue
 		}
-		dt := mapSQLType(typeNameToString(colDef.TypeName))
+		dt := a.resolveColumnType(typeNameToString(colDef.TypeName))
 		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt})
 	}
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
@@ -958,7 +962,17 @@ func lastNamePart(names []string) string {
 	return names[len(names)-1]
 }
 
-func mapSQLType(sqlType string) tuple.DatumType {
+// resolveColumnType resolves a SQL type name, checking custom types
+// (domains, enums) in the catalog before falling back to built-in types.
+func (a *Analyzer) resolveColumnType(sqlType string) tuple.DatumType {
+	if dt, ok := a.Cat.ResolveType(sqlType); ok {
+		return dt
+	}
+	return MapSQLType(sqlType)
+}
+
+// MapSQLType maps a SQL type name to a DatumType.
+func MapSQLType(sqlType string) tuple.DatumType {
 	upper := strings.ToUpper(strings.TrimSpace(sqlType))
 
 	if strings.HasSuffix(upper, "[]") {
@@ -1465,4 +1479,23 @@ func (a *Analyzer) transformAlterFunctionStmt(n *parser.AlterFunctionStmt) (*Que
 		}
 	}
 	return a.makeUtilityQuery(UtilAlterFunction, u), nil
+}
+
+func (a *Analyzer) transformCreateDomainStmt(n *parser.CreateDomainStmt) (*Query, error) {
+	name := lastNamePart(n.Domainname)
+	baseType := typeNameToString(n.TypeName)
+	return a.makeUtilityQuery(UtilCreateDomain, &UtilityStmt{
+		Type:           UtilCreateDomain,
+		DomainName:     name,
+		DomainBaseType: baseType,
+	}), nil
+}
+
+func (a *Analyzer) transformCreateEnumStmt(n *parser.CreateEnumStmt) (*Query, error) {
+	name := lastNamePart(n.TypeName)
+	return a.makeUtilityQuery(UtilCreateEnum, &UtilityStmt{
+		Type:     UtilCreateEnum,
+		EnumName: name,
+		EnumVals: n.Vals,
+	}), nil
 }

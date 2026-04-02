@@ -244,6 +244,10 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execDropTrigger(n)
 	case *planner.PhysAlterFunction:
 		return ex.execAlterFunction(n)
+	case *planner.PhysCreateDomain:
+		return ex.execCreateDomain(n)
+	case *planner.PhysCreateEnum:
+		return ex.execCreateEnum(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
 	default:
@@ -1540,6 +1544,21 @@ func (ex *Executor) execAlterFunction(n *planner.PhysAlterFunction) (*Result, er
 		}
 	}
 	return &Result{Message: "ALTER FUNCTION"}, nil
+}
+
+func (ex *Executor) execCreateDomain(n *planner.PhysCreateDomain) (*Result, error) {
+	baseType := planner.MapSQLType(n.BaseType)
+	if err := ex.Cat.CreateDomain(n.Name, baseType); err != nil {
+		return nil, err
+	}
+	return &Result{Message: fmt.Sprintf("CREATE DOMAIN %s", n.Name)}, nil
+}
+
+func (ex *Executor) execCreateEnum(n *planner.PhysCreateEnum) (*Result, error) {
+	if err := ex.Cat.CreateEnum(n.Name, n.Vals); err != nil {
+		return nil, err
+	}
+	return &Result{Message: fmt.Sprintf("CREATE TYPE %s", n.Name)}, nil
 }
 
 func (ex *Executor) execDropTrigger(n *planner.PhysDropTrigger) (*Result, error) {

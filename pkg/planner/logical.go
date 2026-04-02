@@ -398,6 +398,24 @@ type LogicalAlterFunction struct {
 func (n *LogicalAlterFunction) String() string         { return fmt.Sprintf("AlterFunction(%s)", n.Name) }
 func (n *LogicalAlterFunction) OutputColumns() []string { return nil }
 
+// LogicalCreateDomain represents CREATE DOMAIN.
+type LogicalCreateDomain struct {
+	Name     string
+	BaseType string
+}
+
+func (n *LogicalCreateDomain) String() string         { return fmt.Sprintf("CreateDomain(%s)", n.Name) }
+func (n *LogicalCreateDomain) OutputColumns() []string { return nil }
+
+// LogicalCreateEnum represents CREATE TYPE ... AS ENUM.
+type LogicalCreateEnum struct {
+	Name string
+	Vals []string
+}
+
+func (n *LogicalCreateEnum) String() string         { return fmt.Sprintf("CreateEnum(%s)", n.Name) }
+func (n *LogicalCreateEnum) OutputColumns() []string { return nil }
+
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
 type LogicalResult struct {
 	Exprs []Expr

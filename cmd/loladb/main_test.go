@@ -540,3 +540,56 @@ func TestCLI_AlterFunction(t *testing.T) {
 		t.Fatalf("expected price=100 after trigger with renamed function, got: %s", out)
 	}
 }
+
+func TestCLI_CreateDomain(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "domain.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Create a domain backed by bigint.
+	run("CREATE DOMAIN positive_int AS bigint")
+
+	// Use the domain as a column type.
+	run("CREATE TABLE scores (id INTEGER, value positive_int)")
+	run("INSERT INTO scores VALUES (1, 42)")
+	out := run("SELECT * FROM scores")
+	if !strings.Contains(out, "42") {
+		t.Fatalf("expected value 42, got: %s", out)
+	}
+}
+
+func TestCLI_CreateEnum(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "enum.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Create an enum type.
+	run("CREATE TYPE mood AS ENUM ('happy', 'sad', 'neutral')")
+
+	// Use the enum as a column type.
+	run("CREATE TABLE people (name TEXT, feeling mood)")
+	run("INSERT INTO people VALUES ('Alice', 'happy')")
+	run("INSERT INTO people VALUES ('Bob', 'sad')")
+	out := run("SELECT * FROM people")
+	if !strings.Contains(out, "happy") || !strings.Contains(out, "sad") {
+		t.Fatalf("expected enum values, got: %s", out)
+	}
+}
