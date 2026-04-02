@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jespino/loladb/pkg/catalog"
+	"github.com/jespino/loladb/pkg/index"
 	"github.com/jespino/loladb/pkg/planner"
 	"github.com/jespino/loladb/pkg/slottedpage"
 	"github.com/jespino/loladb/pkg/tuple"
@@ -164,6 +165,8 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execSeqScan(n)
 	case *planner.PhysIndexScan:
 		return ex.execIndexScan(n)
+	case *planner.PhysBitmapHeapScan:
+		return ex.execBitmapHeapScan(n)
 	case *planner.PhysFilter:
 		return ex.execFilter(n)
 	case *planner.PhysProject:
@@ -366,6 +369,64 @@ func (ex *Executor) execIndexScan(n *planner.PhysIndexScan) (*Result, error) {
 	return result, nil
 }
 
+func (ex *Executor) execBitmapHeapScan(n *planner.PhysBitmapHeapScan) (*Result, error) {
+	if err := ex.checkTablePrivilege(n.Table, catalog.PrivSelect); err != nil {
+		return nil, err
+	}
+
+	// The child must be a BitmapIndexScan.
+	bitmapIdx, ok := n.Child.(*planner.PhysBitmapIndexScan)
+	if !ok {
+		return nil, fmt.Errorf("executor: BitmapHeapScan child must be BitmapIndexScan")
+	}
+	if bitmapIdx.Key == nil {
+		return nil, fmt.Errorf("executor: BitmapIndexScan requires a key")
+	}
+	keyVal, err := bitmapIdx.Key.Eval(&planner.Row{})
+	if err != nil {
+		return nil, err
+	}
+	key, ok2 := datumToInt64(keyVal)
+	if !ok2 {
+		return nil, fmt.Errorf("executor: bitmap index key must be integer")
+	}
+
+	// Phase 1: Bitmap Index Scan — collect TIDs sorted by page.
+	tids, err := ex.Cat.BitmapIndexScan(bitmapIdx.Index, key)
+	if err != nil {
+		return nil, err
+	}
+
+	alias := n.Alias
+	if alias == "" {
+		alias = n.Table
+	}
+	colNames := make([]string, len(n.Columns))
+	for i, c := range n.Columns {
+		colNames[i] = alias + "." + c
+	}
+
+	// Phase 2: Bitmap Heap Scan — fetch tuples in page order with recheck.
+	result := &Result{Columns: colNames}
+	for _, tid := range tids {
+		tup, err := ex.Cat.FetchHeapTuple(tid)
+		if err != nil || tup == nil {
+			continue
+		}
+		// Recheck condition (lossy bitmap may include false positives).
+		if n.Recheck != nil {
+			row := &planner.Row{Columns: tup.Columns, Names: colNames}
+			if !planner.EvalBool(n.Recheck, row) {
+				continue
+			}
+		}
+		rowCopy := make([]tuple.Datum, len(tup.Columns))
+		copy(rowCopy, tup.Columns)
+		result.Rows = append(result.Rows, rowCopy)
+	}
+	return result, nil
+}
+
 // --- Filter / Project ---
 
 func (ex *Executor) execFilter(n *planner.PhysFilter) (*Result, error) {
@@ -419,6 +480,11 @@ func (ex *Executor) execProject(n *planner.PhysProject) (*Result, error) {
 // --- Join executors ---
 
 func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, error) {
+	// Parameterized nested loop: re-execute inner index scan per outer row.
+	if n.InnerParam != nil {
+		return ex.execParamNestedLoop(n)
+	}
+
 	outer, err := ex.Execute(n.Outer)
 	if err != nil {
 		return nil, err
@@ -475,6 +541,99 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 				combined := append(append([]tuple.Datum{}, nulls...), innerRow...)
 				result.Rows = append(result.Rows, combined)
 			}
+		}
+	}
+
+	return result, nil
+}
+
+// execParamNestedLoop executes a parameterized nested loop join.
+// For each outer row, it extracts the join key from the outer column
+// and performs an index scan on the inner side with that key.
+func (ex *Executor) execParamNestedLoop(n *planner.PhysNestedLoopJoin) (*Result, error) {
+	outer, err := ex.Execute(n.Outer)
+	if err != nil {
+		return nil, err
+	}
+
+	innerIdx, ok := n.Inner.(*planner.PhysIndexScan)
+	if !ok {
+		return nil, fmt.Errorf("executor: parameterized NL inner must be IndexScan")
+	}
+
+	// Build inner column names.
+	innerAlias := innerIdx.Alias
+	if innerAlias == "" {
+		innerAlias = innerIdx.Table
+	}
+	innerColNames := make([]string, len(innerIdx.Columns))
+	for i, c := range innerIdx.Columns {
+		innerColNames[i] = innerAlias + "." + c
+	}
+
+	colNames := append(outer.Columns, innerColNames...)
+	result := &Result{Columns: colNames}
+
+	// Find the outer column index.
+	paramCol := n.InnerParam.OuterCol
+	outerColIdx := -1
+	for i, name := range outer.Columns {
+		if strings.EqualFold(name, paramCol) {
+			outerColIdx = i
+			break
+		}
+	}
+	if outerColIdx < 0 {
+		// Try unqualified match.
+		parts := strings.SplitN(paramCol, ".", 2)
+		target := paramCol
+		if len(parts) == 2 {
+			target = parts[1]
+		}
+		for i, name := range outer.Columns {
+			nameParts := strings.SplitN(name, ".", 2)
+			colName := name
+			if len(nameParts) == 2 {
+				colName = nameParts[1]
+			}
+			if strings.EqualFold(colName, target) {
+				outerColIdx = i
+				break
+			}
+		}
+	}
+	if outerColIdx < 0 {
+		return nil, fmt.Errorf("executor: parameterized NL outer column %q not found in %v", paramCol, outer.Columns)
+	}
+
+	for _, outerRow := range outer.Rows {
+		keyVal := outerRow[outerColIdx]
+		key, ok := datumToInt64(keyVal)
+		if !ok {
+			continue
+		}
+
+		tuples, _, err := ex.Cat.IndexScan(innerIdx.Index, key)
+		if err != nil {
+			return nil, err
+		}
+
+		matched := false
+		for _, tup := range tuples {
+			matched = true
+			combined := make([]tuple.Datum, 0, len(outerRow)+len(tup.Columns))
+			combined = append(combined, outerRow...)
+			combined = append(combined, tup.Columns...)
+			result.Rows = append(result.Rows, combined)
+		}
+
+		if !matched && n.Type == planner.JoinLeft {
+			nulls := make([]tuple.Datum, len(innerColNames))
+			for i := range nulls {
+				nulls[i] = tuple.DNull()
+			}
+			combined := append(append([]tuple.Datum{}, outerRow...), nulls...)
+			result.Rows = append(result.Rows, combined)
 		}
 	}
 
@@ -756,14 +915,7 @@ func (ex *Executor) execCreateIndex(n *planner.PhysCreateIndex) (*Result, error)
 // --- Helpers ---
 
 func datumToInt64(d tuple.Datum) (int64, bool) {
-	switch d.Type {
-	case tuple.TypeInt32:
-		return int64(d.I32), true
-	case tuple.TypeInt64:
-		return d.I64, true
-	default:
-		return 0, false
-	}
+	return index.DatumToInt64(d)
 }
 
 func datumHashKey(d tuple.Datum) string {

@@ -122,7 +122,7 @@ func (am *AM) InitRootPage() (uint32, error) {
 // tree, the TID is appended to its posting list. Otherwise a new entry
 // and posting page are created.
 func (am *AM) Insert(rootPage uint32, key tuple.Datum, tid slottedpage.ItemID) (uint32, error) {
-	k, ok := datumToInt64(key)
+	k, ok := index.DatumToInt64(key)
 	if !ok {
 		return rootPage, fmt.Errorf("gin: non-indexable datum type %d", key.Type)
 	}
@@ -376,7 +376,7 @@ func (s *scan) Rescan(keys []index.ScanKey) error {
 
 	for _, sk := range keys {
 		if sk.Strategy == index.StrategyEqual {
-			v, ok := datumToInt64(sk.Value)
+			v, ok := index.DatumToInt64(sk.Value)
 			if ok {
 				s.hasKey = true
 				s.key = v
@@ -439,13 +439,3 @@ var _ index.IndexScan = (*scan)(nil)
 // Datum conversion
 // -----------------------------------------------------------------------
 
-func datumToInt64(d tuple.Datum) (int64, bool) {
-	switch d.Type {
-	case tuple.TypeInt64:
-		return d.I64, true
-	case tuple.TypeInt32:
-		return int64(d.I32), true
-	default:
-		return 0, false
-	}
-}

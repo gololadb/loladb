@@ -221,7 +221,7 @@ func (am *AM) InitRootPage() (uint32, error) {
 
 // Insert adds a (key, TID) entry.
 func (am *AM) Insert(rootPage uint32, key tuple.Datum, tid slottedpage.ItemID) (uint32, error) {
-	k, ok := datumToInt64(key)
+	k, ok := index.DatumToInt64(key)
 	if !ok {
 		return rootPage, fmt.Errorf("spgist: non-indexable datum type %d", key.Type)
 	}
@@ -469,7 +469,7 @@ func (s *scan) Rescan(keys []index.ScanKey) error {
 	s.hasHi = false
 
 	for _, sk := range keys {
-		v, ok := datumToInt64(sk.Value)
+		v, ok := index.DatumToInt64(sk.Value)
 		if !ok {
 			continue
 		}
@@ -591,13 +591,3 @@ var _ index.IndexScan = (*scan)(nil)
 // Datum conversion
 // -----------------------------------------------------------------------
 
-func datumToInt64(d tuple.Datum) (int64, bool) {
-	switch d.Type {
-	case tuple.TypeInt64:
-		return d.I64, true
-	case tuple.TypeInt32:
-		return int64(d.I32), true
-	default:
-		return 0, false
-	}
-}

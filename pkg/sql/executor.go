@@ -80,7 +80,11 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	isAnalyze := false
 	if explain, ok := stmt.(*parser.ExplainStmt); ok {
 		isExplain = true
-		_ = isAnalyze // EXPLAIN ANALYZE not yet supported
+		for _, opt := range explain.Options {
+			if strings.EqualFold(opt.Defname, "analyze") {
+				isAnalyze = true
+			}
+		}
 		stmt = explain.Query
 	}
 

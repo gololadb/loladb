@@ -9,9 +9,63 @@
 package index
 
 import (
+	"encoding/binary"
+	"hash/fnv"
+	"math"
+
 	"github.com/jespino/loladb/pkg/slottedpage"
 	"github.com/jespino/loladb/pkg/tuple"
 )
+
+// DatumToInt64 converts any Datum to an int64 key suitable for index
+// storage. For integer types this is lossless. For TEXT, BOOL, and
+// FLOAT64 a deterministic mapping is used:
+//   - TEXT: FNV-1a hash (equality-safe, not order-preserving)
+//   - BOOL: 0 or 1
+//   - FLOAT64: IEEE 754 bits with sign-flip for sort order
+func DatumToInt64(d tuple.Datum) (int64, bool) {
+	switch d.Type {
+	case tuple.TypeInt64:
+		return d.I64, true
+	case tuple.TypeInt32:
+		return int64(d.I32), true
+	case tuple.TypeText:
+		h := fnv.New64a()
+		h.Write([]byte(d.Text))
+		return int64(h.Sum64()), true
+	case tuple.TypeBool:
+		if d.Bool {
+			return 1, true
+		}
+		return 0, true
+	case tuple.TypeFloat64:
+		bits := math.Float64bits(d.F64)
+		// Flip sign bit so negative floats sort before positive.
+		if d.F64 < 0 {
+			bits = ^bits
+		} else {
+			bits ^= 1 << 63
+		}
+		return int64(bits), true
+	default:
+		return 0, false
+	}
+}
+
+// DatumToInt64Sortable is like DatumToInt64 but for TEXT it uses a
+// prefix-based encoding that preserves lexicographic order for the
+// first 8 bytes. This is suitable for btree indexes where ordering
+// matters. Collisions are resolved by heap recheck.
+func DatumToInt64Sortable(d tuple.Datum) (int64, bool) {
+	switch d.Type {
+	case tuple.TypeText:
+		var buf [8]byte
+		copy(buf[:], d.Text)
+		return int64(binary.BigEndian.Uint64(buf[:])), true
+	default:
+		return DatumToInt64(d)
+	}
+}
 
 // -----------------------------------------------------------------------
 // Strategy numbers — mirrors PostgreSQL's access/stratnum.h

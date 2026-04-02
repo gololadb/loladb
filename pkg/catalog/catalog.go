@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/jespino/loladb/pkg/engine"
 	"github.com/jespino/loladb/pkg/index"
@@ -853,6 +854,81 @@ func (c *Catalog) IndexScan(indexName string, key int64) ([]*tuple.Tuple, []slot
 	return c.fetchHeapTuples(scan, snap)
 }
 
+// BitmapIndexScan scans the named index for the given key and returns
+// matching TIDs sorted by (page, slot). The caller is responsible for
+// fetching heap tuples in page order (bitmap heap scan).
+func (c *Catalog) BitmapIndexScan(indexName string, key int64) ([]slottedpage.ItemID, error) {
+	idx, err := c.findIndex(indexName)
+	if err != nil {
+		return nil, err
+	}
+	if idx == nil {
+		return nil, fmt.Errorf("catalog: index %q not found", indexName)
+	}
+
+	am := c.getAM(idx.Method)
+	scan := am.BeginScan(uint32(idx.HeadPage))
+	defer scan.End()
+	scan.Rescan([]index.ScanKey{
+		{AttrNum: 1, Strategy: index.StrategyEqual, Value: tuple.DInt64(key)},
+	})
+
+	var tids []slottedpage.ItemID
+	for {
+		tid, ok, err := scan.Next(index.ForwardScan)
+		if err != nil {
+			return tids, err
+		}
+		if !ok {
+			break
+		}
+		tids = append(tids, tid)
+	}
+
+	// Sort by page then slot for sequential I/O.
+	sort.Slice(tids, func(i, j int) bool {
+		if tids[i].Page != tids[j].Page {
+			return tids[i].Page < tids[j].Page
+		}
+		return tids[i].Slot < tids[j].Slot
+	})
+	return tids, nil
+}
+
+// FetchHeapTuple fetches a single tuple by TID with MVCC visibility check.
+func (c *Catalog) FetchHeapTuple(tid slottedpage.ItemID) (*tuple.Tuple, error) {
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	defer c.Eng.TxMgr.Commit(xid)
+
+	pageBuf, err := c.Eng.Pool.FetchPage(tid.Page)
+	if err != nil {
+		return nil, err
+	}
+	sp, err := slottedpage.FromBytes(pageBuf)
+	if err != nil {
+		c.Eng.Pool.ReleasePage(tid.Page)
+		return nil, err
+	}
+	raw, err := sp.GetTuple(tid.Slot)
+	c.Eng.Pool.ReleasePage(tid.Page)
+	if err != nil {
+		return nil, err
+	}
+	tup, err := tuple.Decode(raw)
+	if err != nil {
+		return nil, err
+	}
+	if !snap.IsVisible(tup.Xmin, tup.Xmax) {
+		return nil, nil // not visible
+	}
+	detoasted, derr := toast.DetoastValues(c.alloc, tup.Columns)
+	if derr == nil {
+		tup.Columns = detoasted
+	}
+	return tup, nil
+}
+
 // ListIndexesForTable returns all indexes for the given table OID.
 func (c *Catalog) ListIndexesForTable(tableOID int32) ([]IndexInfo, error) {
 	return c.getIndexesForTable(tableOID)
@@ -1104,6 +1180,18 @@ type TableStats struct {
 	RelPages   int32
 	TupleCount int64
 	DeadCount  int64
+	// ColumnStats maps column name → per-column statistics.
+	ColumnStats map[string]*ColumnStats
+}
+
+// ColumnStats holds per-column statistics, mirroring pg_statistic.
+type ColumnStats struct {
+	NDistinct float64 // number of distinct values (or -frac if negative)
+	NullFrac  float64 // fraction of null values
+	// MCV (Most Common Values) — the top-N most frequent values and
+	// their frequencies, mirroring pg_statistic's stavalues/stanumbers.
+	MCVals  []string  // string representation of each MCV
+	MCFreqs []float64 // frequency (fraction) of each MCV
 }
 
 // Stats gathers basic statistics for the named table.
@@ -1144,7 +1232,29 @@ func (c *Catalog) Stats(tableName string) (*TableStats, error) {
 		return nil, fmt.Errorf("catalog: table %q not found", tableName)
 	}
 
-	stats := &TableStats{RelPages: rel.Pages}
+	// Get column names for per-column stats.
+	cols, _ := c.GetColumns(rel.OID)
+	colNames := make([]string, len(cols))
+	for i, col := range cols {
+		colNames[i] = col.Name
+	}
+
+	stats := &TableStats{
+		RelPages:    rel.Pages,
+		ColumnStats: make(map[string]*ColumnStats, len(colNames)),
+	}
+
+	// Track distinct values and frequencies per column.
+	// For large tables this is approximate (capped sample), matching
+	// PostgreSQL's ANALYZE which samples rather than scanning everything.
+	const maxDistinctTrack = 10000
+	distinctSets := make([]map[string]struct{}, len(colNames))
+	freqMaps := make([]map[string]int64, len(colNames))
+	nullCounts := make([]int64, len(colNames))
+	for i := range distinctSets {
+		distinctSets[i] = make(map[string]struct{})
+		freqMaps[i] = make(map[string]int64)
+	}
 
 	xid := c.Eng.TxMgr.Begin()
 	snap := c.Eng.TxMgr.Snapshot(xid)
@@ -1176,6 +1286,19 @@ func (c *Catalog) Stats(tableName string) (*TableStats, error) {
 			}
 			if snap.IsVisible(tup.Xmin, tup.Xmax) {
 				stats.TupleCount++
+				// Track per-column distinct values and frequencies.
+				for i := 0; i < len(colNames) && i < len(tup.Columns); i++ {
+					d := tup.Columns[i]
+					if d.Type == tuple.TypeNull {
+						nullCounts[i]++
+						continue
+					}
+					key := datumKey(d)
+					if len(distinctSets[i]) < maxDistinctTrack {
+						distinctSets[i][key] = struct{}{}
+					}
+					freqMaps[i][key]++
+				}
 			} else if tup.Xmax != 0 {
 				stats.DeadCount++
 			}
@@ -1184,7 +1307,72 @@ func (c *Catalog) Stats(tableName string) (*TableStats, error) {
 		c.Eng.Pool.ReleasePage(cur)
 		cur = next
 	}
+
+	// Compute per-column stats including MCVs.
+	const maxMCV = 100 // PostgreSQL default: 100
+	for i, name := range colNames {
+		cs := &ColumnStats{
+			NDistinct: float64(len(distinctSets[i])),
+		}
+		if stats.TupleCount > 0 {
+			cs.NullFrac = float64(nullCounts[i]) / float64(stats.TupleCount)
+		}
+
+		// Extract top-N most common values.
+		type valFreq struct {
+			val  string
+			freq int64
+		}
+		freqs := make([]valFreq, 0, len(freqMaps[i]))
+		for v, f := range freqMaps[i] {
+			freqs = append(freqs, valFreq{v, f})
+		}
+		sort.Slice(freqs, func(a, b int) bool {
+			return freqs[a].freq > freqs[b].freq
+		})
+		n := maxMCV
+		if n > len(freqs) {
+			n = len(freqs)
+		}
+		// Only include values that appear more than average frequency.
+		// This avoids storing MCVs for uniform distributions.
+		avgFreq := float64(stats.TupleCount-nullCounts[i]) / cs.NDistinct
+		if cs.NDistinct == 0 {
+			avgFreq = 0
+		}
+		for j := 0; j < n; j++ {
+			if float64(freqs[j].freq) <= avgFreq {
+				break
+			}
+			cs.MCVals = append(cs.MCVals, freqs[j].val)
+			cs.MCFreqs = append(cs.MCFreqs, float64(freqs[j].freq)/float64(stats.TupleCount))
+		}
+
+		stats.ColumnStats[name] = cs
+	}
+
 	return stats, nil
+}
+
+// datumKey returns a string key for a datum value, used for distinct tracking.
+func datumKey(d tuple.Datum) string {
+	switch d.Type {
+	case tuple.TypeInt32:
+		return fmt.Sprintf("i32:%d", d.I32)
+	case tuple.TypeInt64:
+		return fmt.Sprintf("i64:%d", d.I64)
+	case tuple.TypeText:
+		return "t:" + d.Text
+	case tuple.TypeBool:
+		if d.Bool {
+			return "b:t"
+		}
+		return "b:f"
+	case tuple.TypeFloat64:
+		return fmt.Sprintf("f:%g", d.F64)
+	default:
+		return "null"
+	}
 }
 
 // Vacuum reclaims space from dead tuples in the named table.

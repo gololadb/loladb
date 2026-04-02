@@ -137,7 +137,12 @@ func TestSQL_Explain(t *testing.T) {
 func TestSQL_ExplainWithIndex(t *testing.T) {
 	ex := newTestExecutor(t)
 	ex.Exec(`CREATE TABLE users (id INT, name TEXT)`)
-	ex.Exec(`INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')`)
+	// Insert enough rows across multiple pages so the optimizer prefers
+	// an index scan over a sequential scan for a point lookup.
+	// With few pages a seq scan is cheaper (matching PostgreSQL behavior).
+	for i := 0; i < 1000; i++ {
+		ex.Exec(fmt.Sprintf(`INSERT INTO users VALUES (%d, 'user_%d_padding_to_make_rows_wider_and_span_more_pages')`, i, i))
+	}
 	ex.Exec(`CREATE INDEX idx_users_id ON users (id)`)
 
 	r, err := ex.Exec(`EXPLAIN SELECT * FROM users WHERE id = 1`)
@@ -148,8 +153,8 @@ func TestSQL_ExplainWithIndex(t *testing.T) {
 	for _, row := range r.Rows {
 		planText += row[0].Text + "\n"
 	}
-	if !strings.Contains(planText, "IndexScan") {
-		t.Fatalf("expected IndexScan in plan when index exists, got:\n%s", planText)
+	if !strings.Contains(planText, "IndexScan") && !strings.Contains(planText, "Bitmap") {
+		t.Fatalf("expected IndexScan or BitmapScan in plan when index exists, got:\n%s", planText)
 	}
 }
 

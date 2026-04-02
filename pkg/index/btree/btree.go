@@ -142,7 +142,7 @@ func (am *AM) InitRootPage() (uint32, error) {
 // Insert adds a single (key, TID) entry. Returns the (possibly new)
 // root page number.
 func (am *AM) Insert(rootPage uint32, key tuple.Datum, tid slottedpage.ItemID) (uint32, error) {
-	k, ok := datumToInt64(key)
+	k, ok := index.DatumToInt64Sortable(key)
 	if !ok {
 		return rootPage, fmt.Errorf("btree: non-indexable datum type %d", key.Type)
 	}
@@ -158,7 +158,7 @@ func (am *AM) Build(rootPage uint32, iter func(yield func(key tuple.Datum, tid s
 	bt := &tree{rootPage: rootPage, alloc: am.alloc}
 	var buildErr error
 	iter(func(key tuple.Datum, tid slottedpage.ItemID) bool {
-		k, ok := datumToInt64(key)
+		k, ok := index.DatumToInt64Sortable(key)
 		if !ok {
 			return true // skip non-indexable
 		}
@@ -189,16 +189,6 @@ var _ index.IndexAM = (*AM)(nil)
 // Datum → int64 conversion
 // -----------------------------------------------------------------------
 
-func datumToInt64(d tuple.Datum) (int64, bool) {
-	switch d.Type {
-	case tuple.TypeInt64:
-		return d.I64, true
-	case tuple.TypeInt32:
-		return int64(d.I32), true
-	default:
-		return 0, false
-	}
-}
 
 // -----------------------------------------------------------------------
 // scan — implements index.IndexScan (volcano-style iterator)
@@ -240,7 +230,7 @@ func (s *scan) Rescan(keys []index.ScanKey) error {
 
 	// Derive lo/hi bounds from scan keys.
 	for _, sk := range keys {
-		v, ok := datumToInt64(sk.Value)
+		v, ok := index.DatumToInt64Sortable(sk.Value)
 		if !ok {
 			continue
 		}

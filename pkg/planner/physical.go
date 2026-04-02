@@ -59,6 +59,52 @@ func (n *PhysIndexScan) String() string {
 func (n *PhysIndexScan) Cost() PlanCost       { return n.Estimate }
 func (n *PhysIndexScan) Children() []PhysicalNode { return nil }
 
+// PhysBitmapHeapScan fetches heap tuples identified by a child bitmap
+// index scan, reading pages in physical order to reduce random I/O.
+// Mirrors PostgreSQL's BitmapHeapScan node.
+type PhysBitmapHeapScan struct {
+	Table    string
+	Alias    string
+	Columns  []string
+	HeadPage uint32
+	Recheck  Expr // recheck condition applied to each fetched tuple
+	Child    PhysicalNode // must be a PhysBitmapIndexScan
+	Estimate PlanCost
+}
+
+func (n *PhysBitmapHeapScan) String() string {
+	name := n.Table
+	if n.Alias != "" && n.Alias != n.Table {
+		name = n.Table + " " + n.Alias
+	}
+	if n.Recheck != nil {
+		return fmt.Sprintf("Bitmap Heap Scan on %s (recheck: %s)", name, n.Recheck)
+	}
+	return fmt.Sprintf("Bitmap Heap Scan on %s", name)
+}
+func (n *PhysBitmapHeapScan) Cost() PlanCost       { return n.Estimate }
+func (n *PhysBitmapHeapScan) Children() []PhysicalNode { return []PhysicalNode{n.Child} }
+
+// PhysBitmapIndexScan scans an index and produces a set of TIDs
+// (represented as a sorted list of page+slot pairs). It does not
+// fetch heap tuples itself.
+type PhysBitmapIndexScan struct {
+	Table     string
+	Index     string
+	IndexRoot uint32
+	Key       Expr
+	Estimate  PlanCost
+}
+
+func (n *PhysBitmapIndexScan) String() string {
+	if n.Key != nil {
+		return fmt.Sprintf("Bitmap Index Scan on %s (key=%s)", n.Index, n.Key)
+	}
+	return fmt.Sprintf("Bitmap Index Scan on %s", n.Index)
+}
+func (n *PhysBitmapIndexScan) Cost() PlanCost       { return n.Estimate }
+func (n *PhysBitmapIndexScan) Children() []PhysicalNode { return nil }
+
 // PhysFilter evaluates a predicate per row.
 type PhysFilter struct {
 	Predicate Expr
@@ -87,15 +133,32 @@ func (n *PhysProject) Cost() PlanCost       { return n.Estimate }
 func (n *PhysProject) Children() []PhysicalNode { return []PhysicalNode{n.Child} }
 
 // PhysNestedLoopJoin performs a nested loop join.
+// When InnerParam is set, the inner side is re-executed for each outer
+// row with the parameterized column value substituted. This mirrors
+// PostgreSQL's parameterized path mechanism.
 type PhysNestedLoopJoin struct {
 	Type      JoinType
 	Condition Expr
 	Outer     PhysicalNode
 	Inner     PhysicalNode
 	Estimate  PlanCost
+	// InnerParam, when non-nil, describes a parameterized inner index scan.
+	// The inner PhysIndexScan's Key is replaced at execution time with the
+	// value of OuterCol from each outer row.
+	InnerParam *NestLoopParam
+}
+
+// NestLoopParam describes how to parameterize the inner side of a
+// nested loop join. OuterCol is the column name (table.col) from the
+// outer side whose value is passed as the index key for the inner scan.
+type NestLoopParam struct {
+	OuterCol string // qualified column name from outer side
 }
 
 func (n *PhysNestedLoopJoin) String() string {
+	if n.InnerParam != nil {
+		return fmt.Sprintf("NestedLoop %s Join (param: %s)", n.Type, n.InnerParam.OuterCol)
+	}
 	if n.Condition != nil {
 		return fmt.Sprintf("NestedLoop %s Join (%s)", n.Type, n.Condition)
 	}

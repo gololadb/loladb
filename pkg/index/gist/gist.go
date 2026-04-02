@@ -132,7 +132,7 @@ func writePage(alloc index.PageAllocator, pageNum uint32, page *slottedpage.Page
 // the scan predicates (could contain matching keys).
 func consistent(min, max int64, keys []index.ScanKey) bool {
 	for _, sk := range keys {
-		v, ok := datumToInt64(sk.Value)
+		v, ok := index.DatumToInt64(sk.Value)
 		if !ok {
 			continue
 		}
@@ -208,7 +208,7 @@ func (am *AM) InitRootPage() (uint32, error) {
 
 // Insert adds a (key, TID) entry, splitting nodes as needed.
 func (am *AM) Insert(rootPage uint32, key tuple.Datum, tid slottedpage.ItemID) (uint32, error) {
-	k, ok := datumToInt64(key)
+	k, ok := index.DatumToInt64(key)
 	if !ok {
 		return rootPage, fmt.Errorf("gist: non-indexable datum type %d", key.Type)
 	}
@@ -662,13 +662,3 @@ var _ index.IndexScan = (*scan)(nil)
 // Datum conversion
 // -----------------------------------------------------------------------
 
-func datumToInt64(d tuple.Datum) (int64, bool) {
-	switch d.Type {
-	case tuple.TypeInt64:
-		return d.I64, true
-	case tuple.TypeInt32:
-		return int64(d.I32), true
-	default:
-		return 0, false
-	}
-}
