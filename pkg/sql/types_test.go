@@ -357,5 +357,165 @@ func TestType_IntToNumericCoercion(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// JSON operator tests
+// ---------------------------------------------------------------------------
+
+func TestJSONOp_ArrowObject(t *testing.T) {
+	ex := newTestExecutor(t)
+	// -> with object key returns JSON
+	d := evalExpr(t, ex, `'{"a":1,"b":"hello"}'::jsonb -> 'a'`)
+	if d.Type != tuple.TypeJSON {
+		t.Fatalf("expected TypeJSON, got %d", d.Type)
+	}
+	if d.Text != "1" {
+		t.Fatalf("expected '1', got %q", d.Text)
+	}
+}
+
+func TestJSONOp_ArrowArray(t *testing.T) {
+	ex := newTestExecutor(t)
+	// -> with integer index on array
+	d := evalExpr(t, ex, `'["a","b","c"]'::jsonb -> 1`)
+	if d.Type != tuple.TypeJSON {
+		t.Fatalf("expected TypeJSON, got %d", d.Type)
+	}
+	if d.Text != `"b"` {
+		t.Fatalf("expected '\"b\"', got %q", d.Text)
+	}
+}
+
+func TestJSONOp_ArrowTextObject(t *testing.T) {
+	ex := newTestExecutor(t)
+	// ->> returns text, unquoting strings
+	d := evalExpr(t, ex, `'{"name":"Alice"}'::jsonb ->> 'name'`)
+	if d.Type != tuple.TypeText {
+		t.Fatalf("expected TypeText, got %d", d.Type)
+	}
+	if d.Text != "Alice" {
+		t.Fatalf("expected 'Alice', got %q", d.Text)
+	}
+}
+
+func TestJSONOp_ArrowTextNumber(t *testing.T) {
+	ex := newTestExecutor(t)
+	// ->> with a numeric value returns its text representation
+	d := evalExpr(t, ex, `'{"val":42}'::jsonb ->> 'val'`)
+	if d.Type != tuple.TypeText {
+		t.Fatalf("expected TypeText, got %d", d.Type)
+	}
+	if d.Text != "42" {
+		t.Fatalf("expected '42', got %q", d.Text)
+	}
+}
+
+func TestJSONOp_ArrowMissing(t *testing.T) {
+	ex := newTestExecutor(t)
+	d := evalExpr(t, ex, `'{"a":1}'::jsonb -> 'z'`)
+	if d.Type != tuple.TypeNull {
+		t.Fatalf("expected NULL for missing key, got type %d", d.Type)
+	}
+}
+
+func TestJSONOp_HashArrow(t *testing.T) {
+	ex := newTestExecutor(t)
+	// #> path traversal returns JSON
+	d := evalExpr(t, ex, `'{"a":{"b":{"c":42}}}'::jsonb #> '{a,b,c}'`)
+	if d.Type != tuple.TypeJSON {
+		t.Fatalf("expected TypeJSON, got %d", d.Type)
+	}
+	if d.Text != "42" {
+		t.Fatalf("expected '42', got %q", d.Text)
+	}
+}
+
+func TestJSONOp_HashArrowText(t *testing.T) {
+	ex := newTestExecutor(t)
+	// #>> path traversal returns text
+	d := evalExpr(t, ex, `'{"a":{"b":"deep"}}'::jsonb #>> '{a,b}'`)
+	if d.Type != tuple.TypeText {
+		t.Fatalf("expected TypeText, got %d", d.Type)
+	}
+	if d.Text != "deep" {
+		t.Fatalf("expected 'deep', got %q", d.Text)
+	}
+}
+
+func TestJSONOp_HashArrowMissing(t *testing.T) {
+	ex := newTestExecutor(t)
+	d := evalExpr(t, ex, `'{"a":1}'::jsonb #> '{a,b,c}'`)
+	if d.Type != tuple.TypeNull {
+		t.Fatalf("expected NULL for missing path, got type %d", d.Type)
+	}
+}
+
+func TestJSONOp_Contains(t *testing.T) {
+	ex := newTestExecutor(t)
+	// @> containment: left contains right
+	d := evalExpr(t, ex, `'{"a":1,"b":2}'::jsonb @> '{"a":1}'`)
+	if !d.Bool {
+		t.Fatal("expected true for containment")
+	}
+	// Negative case
+	d = evalExpr(t, ex, `'{"a":1}'::jsonb @> '{"a":1,"b":2}'`)
+	if d.Bool {
+		t.Fatal("expected false: left does not contain right")
+	}
+}
+
+func TestJSONOp_ContainedBy(t *testing.T) {
+	ex := newTestExecutor(t)
+	// <@ is the reverse of @>
+	d := evalExpr(t, ex, `'{"a":1}'::jsonb <@ '{"a":1,"b":2}'`)
+	if !d.Bool {
+		t.Fatal("expected true for contained-by")
+	}
+}
+
+func TestJSONOp_Exists(t *testing.T) {
+	ex := newTestExecutor(t)
+	// ? checks top-level key existence
+	d := evalExpr(t, ex, `'{"a":1,"b":2}'::jsonb ? 'a'`)
+	if !d.Bool {
+		t.Fatal("expected true: key 'a' exists")
+	}
+	d = evalExpr(t, ex, `'{"a":1}'::jsonb ? 'z'`)
+	if d.Bool {
+		t.Fatal("expected false: key 'z' does not exist")
+	}
+}
+
+func TestJSONOp_ColumnArrow(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE events (id INT, data JSONB)`)
+	_, err := ex.Exec(`INSERT INTO events VALUES (1, '{"type":"click","x":100}')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ex.Exec(`SELECT data ->> 'type' FROM events WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Rows) != 1 || r.Rows[0][0].Text != "click" {
+		t.Fatalf("expected 'click', got %v", r.Rows[0])
+	}
+}
+
+func TestJSONOp_ColumnContains(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE docs (id INT, data JSONB)`)
+	ex.Exec(`INSERT INTO docs VALUES (1, '{"type":"click","x":100}')`)
+	ex.Exec(`INSERT INTO docs VALUES (2, '{"type":"view","x":200}')`)
+	ex.Exec(`INSERT INTO docs VALUES (3, '{"type":"click","x":300}')`)
+
+	r, err := ex.Exec(`SELECT id FROM docs WHERE data @> '{"type":"click"}'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(r.Rows))
+	}
+}
+
 // Suppress unused import warning.
 var _ = tuple.DNull

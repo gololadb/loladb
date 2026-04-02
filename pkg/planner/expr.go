@@ -111,6 +111,13 @@ const (
 	OpNotLike                // NOT LIKE
 	OpNotILike               // NOT ILIKE
 	OpConcat                 // ||
+	OpJSONArrow              // ->
+	OpJSONArrowText          // ->>
+	OpJSONHashArrow          // #>
+	OpJSONHashArrowText      // #>>
+	OpJSONContains           // @>
+	OpJSONContainedBy        // <@
+	OpJSONExists             // ?
 )
 
 func (op OpKind) String() string {
@@ -151,6 +158,20 @@ func (op OpKind) String() string {
 		return "NOT ILIKE"
 	case OpConcat:
 		return "||"
+	case OpJSONArrow:
+		return "->"
+	case OpJSONArrowText:
+		return "->>"
+	case OpJSONHashArrow:
+		return "#>"
+	case OpJSONHashArrowText:
+		return "#>>"
+	case OpJSONContains:
+		return "@>"
+	case OpJSONContainedBy:
+		return "<@"
+	case OpJSONExists:
+		return "?"
 	default:
 		return "?"
 	}
@@ -180,7 +201,22 @@ func (e *ExprBinOp) Eval(row *Row) (tuple.Datum, error) {
 	if e.Op == OpConcat {
 		return e.evalConcat(row)
 	}
+	if e.Op >= OpJSONArrow && e.Op <= OpJSONExists {
+		return e.evalJSON(row)
+	}
 	return e.evalComparison(row)
+}
+
+func (e *ExprBinOp) evalJSON(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	return evalJSONOp(e.Op, lv, rv)
 }
 
 func (e *ExprBinOp) evalLogical(row *Row) (tuple.Datum, error) {

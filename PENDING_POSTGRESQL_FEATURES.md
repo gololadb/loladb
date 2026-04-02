@@ -22,7 +22,8 @@ For context, here is what is currently implemented:
 - **Expressions:** Arithmetic (+, -, *, /, %), comparison (=, <>, <, >, <=, >=),
   AND/OR/NOT, IS [NOT] NULL, IS TRUE/FALSE/UNKNOWN, CASE (simple + searched),
   CAST, COALESCE, NULLIF, GREATEST, LEAST, LIKE/ILIKE/NOT LIKE/NOT ILIKE,
-  BETWEEN, IN (value list), IS [NOT] DISTINCT FROM, string concatenation (`||`)
+  BETWEEN, IN (value list), IS [NOT] DISTINCT FROM, string concatenation (`||`),
+  JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`)
 - **Constraints:** PRIMARY KEY, UNIQUE (with auto-index creation and enforcement)
 - **Aggregates:** count, sum, avg, min, max, bool_and, bool_or, every, string_agg, array_agg
 - **Functions:** ~65 scalar functions (math, string, date/time, regex, formatting, encoding)
@@ -101,12 +102,11 @@ CREATE TABLE t (price NUMERIC(10, 2));
 NUMERIC is implemented with arbitrary precision via `math/big.Float`, but
 `NUMERIC(p, s)` precision/scale constraints are not enforced.
 
-### 🟡 JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `?`)
+### 🟡 JSON additional operators (`?|`, `?&`, `-`, `#-`)
 
-JSON/JSONB types are stored natively and functions like `json_extract_path_text`,
-`json_array_length`, `json_typeof`, `json_build_object`, `to_json`/`to_jsonb`
-are available. However, the PostgreSQL operator syntax (`->`, `->>`, `@>`, `?`)
-is not yet supported — only function-call syntax works.
+JSON/JSONB types support `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, and `?` operators.
+Still missing: `?|` (any key exists), `?&` (all keys exist), `-` (delete key),
+and `#-` (delete path).
 
 ### 🟡 BYTEA
 
@@ -389,10 +389,11 @@ SELECT ARRAY[1, 2, 3];
 SELECT array_agg(name) FROM users;  -- returns text, not array
 ```
 
-### 🟡 JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `?`)
+### 🟡 JSON additional operators (`?|`, `?&`, `-`, `#-`)
 
-JSON/JSONB types exist and function-call equivalents work (`json_extract_path_text`,
-etc.), but the operator syntax is not yet supported.
+Core JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`) are implemented.
+Still missing: `?|` (any key exists), `?&` (all keys exist), `-` (delete key/index),
+and `#-` (delete path).
 
 ### 🟡 Pattern matching operators (`~`, `~*`, `!~`, `!~*`)
 
@@ -690,7 +691,7 @@ SELECT pg_advisory_lock(12345);
 | CREATE TABLE AS | DDL |
 | INTERVAL type | Types |
 | NUMERIC precision/scale | Types |
-| JSON operators (`->`, `->>`, `@>`, `?`) | Operators |
+| JSON additional operators (`?|`, `?&`, `-`, `#-`) | Operators |
 | Arrays (native type) | Types |
 | Statistical aggregates | Aggregates |
 | Ordered-set aggregates | Aggregates |

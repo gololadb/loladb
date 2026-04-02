@@ -1,7 +1,9 @@
 package planner
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gololadb/loladb/pkg/tuple"
@@ -525,6 +527,9 @@ func (o *OpExpr) Eval(row *Row) (tuple.Datum, error) {
 		}
 		return tuple.DText(datumToString(lv) + datumToString(rv)), nil
 	}
+	if o.Op >= OpJSONArrow && o.Op <= OpJSONExists {
+		return evalJSONOp(o.Op, lv, rv)
+	}
 	cmp := CompareDatums(lv, rv)
 	switch o.Op {
 	case OpEq:
@@ -856,3 +861,221 @@ func (b *BooleanTestExpr) Eval(row *Row) (tuple.Datum, error) {
 }
 
 func (b *BooleanTestExpr) ResultType() tuple.DatumType { return tuple.TypeBool }
+
+// ---------------------------------------------------------------------------
+// JSON operator evaluation
+// ---------------------------------------------------------------------------
+
+// evalJSONOp evaluates JSON operators: ->, ->>, #>, #>>, @>, <@, ?.
+func evalJSONOp(op OpKind, lv, rv tuple.Datum) (tuple.Datum, error) {
+	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+		return tuple.DNull(), nil
+	}
+
+	switch op {
+	case OpJSONArrow:
+		return jsonArrow(lv.Text, rv, false)
+	case OpJSONArrowText:
+		return jsonArrow(lv.Text, rv, true)
+	case OpJSONHashArrow:
+		return jsonHashArrow(lv.Text, rv.Text, false)
+	case OpJSONHashArrowText:
+		return jsonHashArrow(lv.Text, rv.Text, true)
+	case OpJSONContains:
+		return jsonContains(lv.Text, rv.Text)
+	case OpJSONContainedBy:
+		return jsonContains(rv.Text, lv.Text)
+	case OpJSONExists:
+		return jsonKeyExists(lv.Text, rv.Text)
+	}
+	return tuple.DNull(), nil
+}
+
+// jsonArrow implements -> and ->>. The key can be a string (object lookup)
+// or an integer (array index). If asText is true, the result is returned as
+// TypeText (->>) instead of TypeJSON (->).
+func jsonArrow(jsonStr string, key tuple.Datum, asText bool) (tuple.Datum, error) {
+	var raw json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		return tuple.DNull(), nil
+	}
+
+	// Try integer index for array access.
+	idx := -1
+	switch key.Type {
+	case tuple.TypeInt32:
+		idx = int(key.I32)
+	case tuple.TypeInt64:
+		idx = int(key.I64)
+	case tuple.TypeText:
+		if n, err := strconv.Atoi(key.Text); err == nil {
+			// Only use as array index if the JSON is actually an array.
+			var arr []json.RawMessage
+			if json.Unmarshal(raw, &arr) == nil {
+				idx = n
+			}
+		}
+	}
+
+	if idx >= 0 {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err == nil {
+			if idx < len(arr) {
+				return jsonRawToResult(arr[idx], asText)
+			}
+			return tuple.DNull(), nil
+		}
+	}
+
+	// Object key lookup.
+	keyStr := datumToString(key)
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return tuple.DNull(), nil
+	}
+	val, ok := obj[keyStr]
+	if !ok {
+		return tuple.DNull(), nil
+	}
+	return jsonRawToResult(val, asText)
+}
+
+// jsonHashArrow implements #> and #>>. The path is a PostgreSQL text array
+// literal like '{a,b,c}'.
+func jsonHashArrow(jsonStr, pathStr string, asText bool) (tuple.Datum, error) {
+	path := parseTextArray(pathStr)
+	if len(path) == 0 {
+		return tuple.DNull(), nil
+	}
+
+	current := []byte(jsonStr)
+	for _, key := range path {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(current, &obj); err == nil {
+			val, ok := obj[key]
+			if !ok {
+				return tuple.DNull(), nil
+			}
+			current = val
+			continue
+		}
+		// Try array index.
+		var arr []json.RawMessage
+		if err := json.Unmarshal(current, &arr); err == nil {
+			idx, err := strconv.Atoi(key)
+			if err != nil || idx < 0 || idx >= len(arr) {
+				return tuple.DNull(), nil
+			}
+			current = arr[idx]
+			continue
+		}
+		return tuple.DNull(), nil
+	}
+	return jsonRawToResult(json.RawMessage(current), asText)
+}
+
+// jsonContains implements @>: does the left JSON contain the right JSON?
+func jsonContains(left, right string) (tuple.Datum, error) {
+	var lv, rv interface{}
+	if err := json.Unmarshal([]byte(left), &lv); err != nil {
+		return tuple.DNull(), nil
+	}
+	if err := json.Unmarshal([]byte(right), &rv); err != nil {
+		return tuple.DNull(), nil
+	}
+	return tuple.DBool(jsonValueContains(lv, rv)), nil
+}
+
+// jsonKeyExists implements ?: does the JSON object have the given top-level key?
+func jsonKeyExists(jsonStr, key string) (tuple.Datum, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &obj); err != nil {
+		// For arrays, check if the key matches any element string value.
+		var arr []interface{}
+		if err2 := json.Unmarshal([]byte(jsonStr), &arr); err2 == nil {
+			for _, elem := range arr {
+				if s, ok := elem.(string); ok && s == key {
+					return tuple.DBool(true), nil
+				}
+			}
+		}
+		return tuple.DBool(false), nil
+	}
+	_, ok := obj[key]
+	return tuple.DBool(ok), nil
+}
+
+// jsonRawToResult converts a json.RawMessage to a Datum. If asText is true,
+// strings are unquoted and other values are returned as their JSON text
+// representation (matching ->> / #>> behavior).
+func jsonRawToResult(raw json.RawMessage, asText bool) (tuple.Datum, error) {
+	if asText {
+		// Unquote strings, return others as-is.
+		s := strings.TrimSpace(string(raw))
+		if len(s) > 0 && s[0] == '"' {
+			var unquoted string
+			if err := json.Unmarshal(raw, &unquoted); err == nil {
+				return tuple.DText(unquoted), nil
+			}
+		}
+		if s == "null" {
+			return tuple.DNull(), nil
+		}
+		return tuple.DText(s), nil
+	}
+	return tuple.DJSON(string(raw)), nil
+}
+
+// jsonValueContains checks if a contains b using PostgreSQL @> semantics:
+// - Objects: every key in b must exist in a with a matching value (recursive).
+// - Arrays: every element in b must be contained in some element of a.
+// - Scalars: must be equal.
+func jsonValueContains(a, b interface{}) bool {
+	switch bv := b.(type) {
+	case map[string]interface{}:
+		av, ok := a.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		for k, bval := range bv {
+			aval, exists := av[k]
+			if !exists || !jsonValueContains(aval, bval) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		av, ok := a.([]interface{})
+		if !ok {
+			return false
+		}
+		for _, belem := range bv {
+			found := false
+			for _, aelem := range av {
+				if jsonValueContains(aelem, belem) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	default:
+		return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+	}
+}
+
+// parseTextArray parses a PostgreSQL text array literal like '{a,b,c}'
+// into a slice of strings.
+func parseTextArray(s string) []string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
+		s = s[1 : len(s)-1]
+	}
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}

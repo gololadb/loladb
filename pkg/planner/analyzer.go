@@ -822,6 +822,27 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 	case "||":
 		op = OpConcat
 		resultTyp = tuple.TypeText
+	case "->":
+		op = OpJSONArrow
+		resultTyp = tuple.TypeJSON
+	case "->>":
+		op = OpJSONArrowText
+		resultTyp = tuple.TypeText
+	case "#>":
+		op = OpJSONHashArrow
+		resultTyp = tuple.TypeJSON
+	case "#>>":
+		op = OpJSONHashArrowText
+		resultTyp = tuple.TypeText
+	case "@>":
+		op = OpJSONContains
+		resultTyp = tuple.TypeBool
+	case "<@":
+		op = OpJSONContainedBy
+		resultTyp = tuple.TypeBool
+	case "?":
+		op = OpJSONExists
+		resultTyp = tuple.TypeBool
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported operator %q", opName)
 	}
