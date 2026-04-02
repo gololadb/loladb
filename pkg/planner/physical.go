@@ -671,6 +671,16 @@ func (n *PhysResult) String() string            { return "Result" }
 func (n *PhysResult) Cost() PlanCost            { return PlanCost{Startup: 0.01, Total: 0.01, Rows: 1} }
 func (n *PhysResult) Children() []PhysicalNode  { return nil }
 
+// PhysWindowAgg computes window functions over the child's output.
+type PhysWindowAgg struct {
+	Child    PhysicalNode
+	WinFuncs []WindowFuncDesc
+}
+
+func (n *PhysWindowAgg) String() string            { return "WindowAgg" }
+func (n *PhysWindowAgg) Cost() PlanCost            { return n.Child.Cost() }
+func (n *PhysWindowAgg) Children() []PhysicalNode  { return []PhysicalNode{n.Child} }
+
 // PhysSubqueryScan materializes a child plan and scans the result.
 type PhysSubqueryScan struct {
 	Alias       string

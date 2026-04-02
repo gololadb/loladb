@@ -101,6 +101,11 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 		}
 	}
 
+	// Window functions → WindowAgg node.
+	if len(q.WindowFuncs) > 0 {
+		plan = buildWindowAggPlan(q, plan)
+	}
+
 	// Target list → Project (unless it's SELECT *).
 	if !isSelectStar(q.TargetList, q.RangeTable) {
 		var exprs []Expr
@@ -555,6 +560,14 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 			Arg:  analyzedToExpr(e.Arg, rtes),
 			Test: e.Test,
 		}
+	case *WindowFuncRef:
+		// The WindowAgg node appends computed values to each row.
+		// WinIndex points to the column position in the extended row.
+		return &ExprColumn{
+			Table:  "",
+			Column: fmt.Sprintf("win_%d", e.WinIndex),
+			Index:  e.WinIndex,
+		}
 	case *SubLinkExpr:
 		sl := &ExprSubLink{
 			LinkType: e.LinkType,
@@ -730,6 +743,59 @@ func patchAggExprs(expr Expr, numGroupExprs int) {
 		}
 	case *ExprCast:
 		patchAggExprs(e.Inner, numGroupExprs)
+	}
+}
+
+// buildWindowAggPlan creates a LogicalWindowAgg node from the query's
+// window function references. It also assigns WinIndex values to each
+// WindowFuncRef so the project layer can reference the computed values.
+func buildWindowAggPlan(q *Query, child LogicalNode) LogicalNode {
+	var descs []WindowFuncDesc
+	childCols := child.OutputColumns()
+	baseIndex := len(childCols)
+
+	for i, wf := range q.WindowFuncs {
+		var argExprs []Expr
+		for _, a := range wf.Args {
+			argExprs = append(argExprs, analyzedToExpr(a, q.RangeTable))
+		}
+
+		var partExprs []Expr
+		var orderExprs []SortExpr
+		if wf.WinDef != nil {
+			for _, p := range wf.WinDef.PartitionBy {
+				partExprs = append(partExprs, analyzedToExpr(p, q.RangeTable))
+			}
+			for _, o := range wf.WinDef.OrderBy {
+				orderExprs = append(orderExprs, SortExpr{
+					Expr: analyzedToExpr(o.Expr, q.RangeTable),
+					Desc: o.Desc,
+				})
+			}
+		}
+
+		desc := WindowFuncDesc{
+			FuncName:    wf.FuncName,
+			ArgExprs:    argExprs,
+			Star:        wf.Star,
+			Distinct:    wf.Distinct,
+			PartitionBy: partExprs,
+			OrderBy:     orderExprs,
+		}
+		if wf.WinDef != nil {
+			desc.FrameMode = wf.WinDef.FrameMode
+			desc.FrameStart = wf.WinDef.FrameStart
+			desc.FrameEnd = wf.WinDef.FrameEnd
+		}
+		descs = append(descs, desc)
+
+		// Assign the output column index so WindowFuncRef.Eval can find it.
+		wf.WinIndex = baseIndex + i
+	}
+
+	return &LogicalWindowAgg{
+		Child:    child,
+		WinFuncs: descs,
 	}
 }
 

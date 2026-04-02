@@ -103,7 +103,7 @@ Niche use case. PostgreSQL supports these with operators and GiST indexing.
 
 ## 3. Query Features
 
-### 🔴 Window Functions
+### ✅ Window Functions
 
 ```sql
 SELECT name, salary, rank() OVER (PARTITION BY dept ORDER BY salary DESC)
@@ -113,9 +113,10 @@ SELECT date, amount, sum(amount) OVER (ORDER BY date) AS running_total
 FROM transactions;
 ```
 
-No window function support. This includes `row_number()`, `rank()`,
-`dense_rank()`, `lag()`, `lead()`, `first_value()`, `last_value()`, `ntile()`,
-`percent_rank()`, `cume_dist()`, `nth_value()`, and aggregate-as-window usage.
+Supported window functions: `row_number()`, `rank()`, `dense_rank()`, `lag()`,
+`lead()`, `first_value()`, `last_value()`, `ntile()`, `percent_rank()`,
+`cume_dist()`, `nth_value()`, and aggregate-as-window (`sum`, `count`, `avg`,
+`min`, `max`). Supports `PARTITION BY`, `ORDER BY` (ASC/DESC), and `OVER ()`.
 
 ### 🔴 INSERT ... ON CONFLICT (UPSERT)
 
@@ -611,7 +612,6 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| Window functions | Queries |
 | INSERT ... ON CONFLICT | DML |
 | UPDATE ... FROM | DML |
 | Real transactions (BEGIN/COMMIT/ROLLBACK) | Transactions |

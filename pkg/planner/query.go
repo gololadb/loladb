@@ -121,6 +121,9 @@ type Query struct {
 
 	// CTEs holds analyzed Common Table Expressions from WITH clauses.
 	CTEs []*CTEDef
+
+	// WindowFuncs collects all window function references in the query.
+	WindowFuncs []*WindowFuncRef
 }
 
 // CTEDef holds a single analyzed CTE definition.
@@ -444,6 +447,69 @@ type AggRef struct {
 	AggIndex   int            // index into the aggregate list (set by planner)
 	ReturnTyp  tuple.DatumType
 }
+
+// WindowFuncRef represents a window function call in the target list.
+// It is the analyzed form; the planner converts it to an executable node.
+type WindowFuncRef struct {
+	FuncName  string         // e.g. "row_number", "rank", "sum"
+	Args      []AnalyzedExpr // function arguments (empty for row_number, rank, etc.)
+	Star      bool           // true for count(*) OVER (...)
+	Distinct  bool           // true for count(DISTINCT ...) OVER (...)
+	WinDef    *AnalyzedWindowDef
+	ReturnTyp tuple.DatumType
+	WinIndex  int // index into the query's window function list (set by planner)
+}
+
+func (w *WindowFuncRef) String() string {
+	return w.FuncName + "() OVER (...)"
+}
+
+func (w *WindowFuncRef) Eval(row *Row) (tuple.Datum, error) {
+	// Window functions are not evaluated row-by-row; the executor
+	// pre-computes them and injects the values. This uses the WinIndex
+	// to look up the pre-computed value from the row.
+	if w.WinIndex >= 0 && w.WinIndex < len(row.Columns) {
+		return row.Columns[w.WinIndex], nil
+	}
+	return tuple.DNull(), fmt.Errorf("window function %s: result not available (index %d)", w.FuncName, w.WinIndex)
+}
+
+func (w *WindowFuncRef) ResultType() tuple.DatumType { return w.ReturnTyp }
+
+// AnalyzedWindowDef holds the analyzed OVER clause for a window function.
+type AnalyzedWindowDef struct {
+	PartitionBy []AnalyzedExpr // PARTITION BY expressions
+	OrderBy     []*SortClause
+	FrameMode   WindowFrameMode
+	FrameStart  WindowFrameBound
+	FrameEnd    WindowFrameBound
+}
+
+// WindowFrameMode identifies the frame type.
+type WindowFrameMode int
+
+const (
+	FrameModeRange WindowFrameMode = iota
+	FrameModeRows
+	FrameModeGroups
+)
+
+// WindowFrameBound identifies a frame boundary.
+type WindowFrameBound struct {
+	Type   WindowBoundType
+	Offset AnalyzedExpr // for PRECEDING/FOLLOWING with offset
+}
+
+// WindowBoundType identifies the kind of frame boundary.
+type WindowBoundType int
+
+const (
+	BoundUnboundedPreceding WindowBoundType = iota
+	BoundCurrentRow
+	BoundUnboundedFollowing
+	BoundOffsetPreceding
+	BoundOffsetFollowing
+)
 
 // FuncCallExpr represents a resolved function call.
 type FuncCallExpr struct {

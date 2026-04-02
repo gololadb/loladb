@@ -254,6 +254,11 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		return nil, err
 	}
 
+	// Collect window function references from the target list.
+	for _, te := range q.TargetList {
+		collectWindowFuncs(te.Expr, &q.WindowFuncs)
+	}
+
 	// Step 4: Transform GROUP BY.
 	if len(n.GroupClause) > 0 {
 		for _, g := range n.GroupClause {
@@ -2690,6 +2695,181 @@ func collectAggRefs(expr AnalyzedExpr, refs *[]*AggRef) {
 }
 
 // isAggregateFunc returns true if the function name is a known aggregate.
+// collectWindowFuncs walks an expression tree and collects WindowFuncRef nodes.
+func collectWindowFuncs(ae AnalyzedExpr, out *[]*WindowFuncRef) {
+	if ae == nil {
+		return
+	}
+	switch e := ae.(type) {
+	case *WindowFuncRef:
+		*out = append(*out, e)
+	case *OpExpr:
+		collectWindowFuncs(e.Left, out)
+		collectWindowFuncs(e.Right, out)
+	case *FuncCallExpr:
+		for _, arg := range e.Args {
+			collectWindowFuncs(arg, out)
+		}
+	case *TypeCastExpr:
+		collectWindowFuncs(e.Arg, out)
+	}
+}
+
+// isWindowOnlyFunc returns true for functions that are exclusively window
+// functions (not regular aggregates).
+func isWindowOnlyFunc(name string) bool {
+	switch name {
+	case "row_number", "rank", "dense_rank", "percent_rank", "cume_dist",
+		"ntile", "lag", "lead", "first_value", "last_value", "nth_value":
+		return true
+	}
+	return false
+}
+
+// windowFuncReturnType determines the return type for a window function.
+func windowFuncReturnType(name string, args []AnalyzedExpr) tuple.DatumType {
+	switch name {
+	case "row_number", "rank", "dense_rank", "ntile":
+		return tuple.TypeInt64
+	case "percent_rank", "cume_dist":
+		return tuple.TypeFloat64
+	case "lag", "lead", "first_value", "last_value", "nth_value":
+		if len(args) > 0 {
+			return args[0].ResultType()
+		}
+		return tuple.TypeNull
+	// Aggregate-as-window: inherit from the aggregate.
+	case "count":
+		return tuple.TypeInt64
+	case "sum":
+		if len(args) > 0 {
+			return args[0].ResultType()
+		}
+		return tuple.TypeInt64
+	case "avg":
+		return tuple.TypeFloat64
+	case "min", "max":
+		if len(args) > 0 {
+			return args[0].ResultType()
+		}
+		return tuple.TypeNull
+	default:
+		return tuple.TypeNull
+	}
+}
+
+// transformWindowFunc creates a WindowFuncRef from a FuncCall with OVER.
+func (a *Analyzer) transformWindowFunc(name string, args []AnalyzedExpr, f *parser.FuncCall) (AnalyzedExpr, error) {
+	wd, err := a.analyzeWindowDef(f.Over)
+	if err != nil {
+		return nil, fmt.Errorf("analyzer: window function %s: %w", name, err)
+	}
+
+	retType := windowFuncReturnType(name, args)
+
+	return &WindowFuncRef{
+		FuncName:  name,
+		Args:      args,
+		Star:      f.AggStar,
+		Distinct:  f.AggDistinct,
+		WinDef:    wd,
+		ReturnTyp: retType,
+		WinIndex:  -1, // set later by the planner
+	}, nil
+}
+
+// analyzeWindowDef converts a parser.WindowDef into an AnalyzedWindowDef.
+func (a *Analyzer) analyzeWindowDef(wd *parser.WindowDef) (*AnalyzedWindowDef, error) {
+	result := &AnalyzedWindowDef{}
+
+	// PARTITION BY
+	for _, expr := range wd.PartitionClause {
+		resolved, err := a.transformExpr(expr)
+		if err != nil {
+			return nil, fmt.Errorf("PARTITION BY: %w", err)
+		}
+		result.PartitionBy = append(result.PartitionBy, resolved)
+	}
+
+	// ORDER BY
+	for _, sb := range wd.OrderClause {
+		expr, err := a.transformExpr(sb.Node)
+		if err != nil {
+			return nil, fmt.Errorf("ORDER BY: %w", err)
+		}
+		desc := sb.SortbyDir == parser.SORTBY_DESC
+		_ = sb.SortbyNulls // nulls ordering not yet tracked in SortClause
+		result.OrderBy = append(result.OrderBy, &SortClause{
+			Expr: expr,
+			Desc: desc,
+		})
+	}
+
+	// Frame mode and bounds.
+	opts := wd.FrameOptions
+	if opts&parser.FRAMEOPTION_ROWS != 0 {
+		result.FrameMode = FrameModeRows
+	} else if opts&parser.FRAMEOPTION_GROUPS != 0 {
+		result.FrameMode = FrameModeGroups
+	} else {
+		result.FrameMode = FrameModeRange
+	}
+
+	// Start bound.
+	switch {
+	case opts&parser.FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0:
+		result.FrameStart = WindowFrameBound{Type: BoundUnboundedPreceding}
+	case opts&parser.FRAMEOPTION_START_CURRENT_ROW != 0:
+		result.FrameStart = WindowFrameBound{Type: BoundCurrentRow}
+	case opts&parser.FRAMEOPTION_START_OFFSET_PRECEDING != 0:
+		if wd.StartOffset != nil {
+			off, err := a.transformExpr(wd.StartOffset)
+			if err != nil {
+				return nil, err
+			}
+			result.FrameStart = WindowFrameBound{Type: BoundOffsetPreceding, Offset: off}
+		}
+	case opts&parser.FRAMEOPTION_START_OFFSET_FOLLOWING != 0:
+		if wd.StartOffset != nil {
+			off, err := a.transformExpr(wd.StartOffset)
+			if err != nil {
+				return nil, err
+			}
+			result.FrameStart = WindowFrameBound{Type: BoundOffsetFollowing, Offset: off}
+		}
+	default:
+		result.FrameStart = WindowFrameBound{Type: BoundUnboundedPreceding}
+	}
+
+	// End bound.
+	switch {
+	case opts&parser.FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0:
+		result.FrameEnd = WindowFrameBound{Type: BoundUnboundedFollowing}
+	case opts&parser.FRAMEOPTION_END_CURRENT_ROW != 0:
+		result.FrameEnd = WindowFrameBound{Type: BoundCurrentRow}
+	case opts&parser.FRAMEOPTION_END_OFFSET_PRECEDING != 0:
+		if wd.EndOffset != nil {
+			off, err := a.transformExpr(wd.EndOffset)
+			if err != nil {
+				return nil, err
+			}
+			result.FrameEnd = WindowFrameBound{Type: BoundOffsetPreceding, Offset: off}
+		}
+	case opts&parser.FRAMEOPTION_END_OFFSET_FOLLOWING != 0:
+		if wd.EndOffset != nil {
+			off, err := a.transformExpr(wd.EndOffset)
+			if err != nil {
+				return nil, err
+			}
+			result.FrameEnd = WindowFrameBound{Type: BoundOffsetFollowing, Offset: off}
+		}
+	default:
+		result.FrameEnd = WindowFrameBound{Type: BoundCurrentRow}
+	}
+
+	return result, nil
+}
+
 func isAggregateFunc(name string) bool {
 	switch strings.ToLower(name) {
 	case "count", "sum", "avg", "min", "max",
@@ -2716,6 +2896,11 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 			return nil, err
 		}
 		args = append(args, resolved)
+	}
+
+	// Window functions: FuncCall with an OVER clause.
+	if f.Over != nil {
+		return a.transformWindowFunc(name, args, f)
 	}
 
 	// Aggregate functions produce AggRef nodes.

@@ -601,6 +601,43 @@ type LogicalResult struct {
 func (n *LogicalResult) String() string         { return "Result" }
 func (n *LogicalResult) OutputColumns() []string { return n.Names }
 
+// LogicalWindowAgg computes window functions over the child's output.
+type LogicalWindowAgg struct {
+	Child    LogicalNode
+	WinFuncs []WindowFuncDesc // window function descriptors
+}
+
+// WindowFuncDesc describes a single window function computation.
+type WindowFuncDesc struct {
+	FuncName    string
+	ArgExprs    []Expr
+	Star        bool
+	Distinct    bool
+	PartitionBy []Expr
+	OrderBy     []SortExpr
+	FrameMode   WindowFrameMode
+	FrameStart  WindowFrameBound
+	FrameEnd    WindowFrameBound
+}
+
+// SortExpr is an expression with a sort direction, used in window ORDER BY.
+type SortExpr struct {
+	Expr Expr
+	Desc bool
+}
+
+func (n *LogicalWindowAgg) String() string { return "WindowAgg" }
+func (n *LogicalWindowAgg) OutputColumns() []string {
+	// Window functions append columns to the child's output.
+	childCols := n.Child.OutputColumns()
+	out := make([]string, len(childCols))
+	copy(out, childCols)
+	for i := range n.WinFuncs {
+		out = append(out, fmt.Sprintf("win_%d", i))
+	}
+	return out
+}
+
 // LogicalSubqueryScan materializes a subquery (CTE or inline subquery)
 // and scans the result as if it were a table.
 type LogicalSubqueryScan struct {

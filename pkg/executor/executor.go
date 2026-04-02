@@ -315,6 +315,8 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execDistinct(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
+	case *planner.PhysWindowAgg:
+		return ex.execWindowAgg(n)
 	case *planner.PhysSubqueryScan:
 		return ex.execSubqueryScan(n)
 	default:
@@ -2639,6 +2641,418 @@ func (ex *Executor) execDropColumn(n *planner.PhysDropColumn) (*Result, error) {
 		return nil, err
 	}
 	return &Result{Message: "ALTER TABLE"}, nil
+}
+
+// execWindowAgg evaluates window functions over the child result.
+// For each window function, it partitions the rows, sorts within partitions,
+// and computes the function value for each row.
+func (ex *Executor) execWindowAgg(n *planner.PhysWindowAgg) (*Result, error) {
+	child, err := ex.Execute(n.Child)
+	if err != nil {
+		return nil, err
+	}
+
+	nRows := len(child.Rows)
+	nWinFuncs := len(n.WinFuncs)
+
+	// Pre-allocate extended rows: original columns + one column per window func.
+	extRows := make([][]tuple.Datum, nRows)
+	for i, row := range child.Rows {
+		extRows[i] = make([]tuple.Datum, len(row)+nWinFuncs)
+		copy(extRows[i], row)
+	}
+
+	// Evaluate each window function independently.
+	for wIdx, wf := range n.WinFuncs {
+		colOffset := len(child.Columns) + wIdx
+
+		// Build row indices sorted by partition key then order key.
+		indices := make([]int, nRows)
+		for i := range indices {
+			indices[i] = i
+		}
+
+		// Sort by partition keys, then order keys.
+		sort.SliceStable(indices, func(a, b int) bool {
+			ra := &planner.Row{Columns: child.Rows[indices[a]], Names: child.Columns}
+			rb := &planner.Row{Columns: child.Rows[indices[b]], Names: child.Columns}
+			// Compare partition keys.
+			for _, pk := range wf.PartitionBy {
+				va, _ := pk.Eval(ra)
+				vb, _ := pk.Eval(rb)
+				cmp := planner.CompareDatums(va, vb)
+				if cmp != 0 {
+					return cmp < 0
+				}
+			}
+			// Compare order keys.
+			for _, ok := range wf.OrderBy {
+				va, _ := ok.Expr.Eval(ra)
+				vb, _ := ok.Expr.Eval(rb)
+				cmp := planner.CompareDatums(va, vb)
+				if cmp != 0 {
+					if ok.Desc {
+						return cmp > 0
+					}
+					return cmp < 0
+				}
+			}
+			return false
+		})
+
+		// Identify partition boundaries.
+		partStarts := []int{0}
+		for i := 1; i < nRows; i++ {
+			ra := &planner.Row{Columns: child.Rows[indices[i-1]], Names: child.Columns}
+			rb := &planner.Row{Columns: child.Rows[indices[i]], Names: child.Columns}
+			samePartition := true
+			for _, pk := range wf.PartitionBy {
+				va, _ := pk.Eval(ra)
+				vb, _ := pk.Eval(rb)
+				if planner.CompareDatums(va, vb) != 0 {
+					samePartition = false
+					break
+				}
+			}
+			if !samePartition {
+				partStarts = append(partStarts, i)
+			}
+		}
+		partStarts = append(partStarts, nRows)
+
+		// Evaluate the window function for each partition.
+		for p := 0; p < len(partStarts)-1; p++ {
+			pStart := partStarts[p]
+			pEnd := partStarts[p+1]
+			partIndices := indices[pStart:pEnd]
+			partSize := pEnd - pStart
+
+			ex.evalWindowFunc(wf, partIndices, partSize, child, extRows, colOffset)
+		}
+	}
+
+	// Reorder output rows by the last window function's partition+order keys
+	// (matches PostgreSQL behavior where output order reflects the window sort).
+	if nWinFuncs > 0 {
+		lastWf := n.WinFuncs[nWinFuncs-1]
+		sortedIndices := make([]int, nRows)
+		for i := range sortedIndices {
+			sortedIndices[i] = i
+		}
+		sort.SliceStable(sortedIndices, func(a, b int) bool {
+			ra := &planner.Row{Columns: extRows[sortedIndices[a]][:len(child.Columns)], Names: child.Columns}
+			rb := &planner.Row{Columns: extRows[sortedIndices[b]][:len(child.Columns)], Names: child.Columns}
+			for _, pk := range lastWf.PartitionBy {
+				va, _ := pk.Eval(ra)
+				vb, _ := pk.Eval(rb)
+				cmp := planner.CompareDatums(va, vb)
+				if cmp != 0 {
+					return cmp < 0
+				}
+			}
+			for _, ok := range lastWf.OrderBy {
+				va, _ := ok.Expr.Eval(ra)
+				vb, _ := ok.Expr.Eval(rb)
+				cmp := planner.CompareDatums(va, vb)
+				if cmp != 0 {
+					if ok.Desc {
+						return cmp > 0
+					}
+					return cmp < 0
+				}
+			}
+			return false
+		})
+		reordered := make([][]tuple.Datum, nRows)
+		for i, idx := range sortedIndices {
+			reordered[i] = extRows[idx]
+		}
+		extRows = reordered
+	}
+
+	// Build extended column names.
+	extCols := make([]string, len(child.Columns)+nWinFuncs)
+	copy(extCols, child.Columns)
+	for i := range n.WinFuncs {
+		extCols[len(child.Columns)+i] = fmt.Sprintf("win_%d", i)
+	}
+
+	return &Result{
+		Columns: extCols,
+		Rows:    extRows,
+		Message: fmt.Sprintf("SELECT %d", nRows),
+	}, nil
+}
+
+// evalWindowFunc computes a single window function for one partition.
+func (ex *Executor) evalWindowFunc(
+	wf planner.WindowFuncDesc,
+	partIndices []int,
+	partSize int,
+	child *Result,
+	extRows [][]tuple.Datum,
+	colOffset int,
+) {
+	switch strings.ToLower(wf.FuncName) {
+	case "row_number":
+		for i, idx := range partIndices {
+			extRows[idx][colOffset] = tuple.DInt64(int64(i + 1))
+		}
+
+	case "rank":
+		rank := 1
+		for i, idx := range partIndices {
+			if i > 0 && !windowOrderEqual(wf, child, partIndices[i-1], idx) {
+				rank = i + 1
+			}
+			extRows[idx][colOffset] = tuple.DInt64(int64(rank))
+		}
+
+	case "dense_rank":
+		rank := 1
+		for i, idx := range partIndices {
+			if i > 0 && !windowOrderEqual(wf, child, partIndices[i-1], idx) {
+				rank++
+			}
+			extRows[idx][colOffset] = tuple.DInt64(int64(rank))
+		}
+
+	case "percent_rank":
+		if partSize <= 1 {
+			for _, idx := range partIndices {
+				extRows[idx][colOffset] = tuple.DFloat64(0)
+			}
+		} else {
+			rank := 1
+			for i, idx := range partIndices {
+				if i > 0 && !windowOrderEqual(wf, child, partIndices[i-1], idx) {
+					rank = i + 1
+				}
+				extRows[idx][colOffset] = tuple.DFloat64(float64(rank-1) / float64(partSize-1))
+			}
+		}
+
+	case "cume_dist":
+		for i, idx := range partIndices {
+			// Find the last row with the same order key values.
+			last := i
+			for last+1 < partSize && windowOrderEqual(wf, child, idx, partIndices[last+1]) {
+				last++
+			}
+			extRows[idx][colOffset] = tuple.DFloat64(float64(last+1) / float64(partSize))
+		}
+
+	case "ntile":
+		n := int64(1)
+		if len(wf.ArgExprs) > 0 {
+			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			v, err := wf.ArgExprs[0].Eval(row)
+			if err == nil && v.I64 > 0 {
+				n = v.I64
+			}
+		}
+		for i, idx := range partIndices {
+			bucket := int64(i)*n/int64(partSize) + 1
+			extRows[idx][colOffset] = tuple.DInt64(bucket)
+		}
+
+	case "lag":
+		offset := 1
+		var defaultVal tuple.Datum
+		if len(wf.ArgExprs) >= 2 {
+			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			v, err := wf.ArgExprs[1].Eval(row)
+			if err == nil {
+				offset = int(v.I64)
+			}
+		}
+		if len(wf.ArgExprs) >= 3 {
+			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			v, err := wf.ArgExprs[2].Eval(row)
+			if err == nil {
+				defaultVal = v
+			}
+		}
+		for i, idx := range partIndices {
+			if i-offset >= 0 {
+				prevIdx := partIndices[i-offset]
+				row := &planner.Row{Columns: child.Rows[prevIdx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				extRows[idx][colOffset] = v
+			} else if defaultVal.Type != tuple.TypeNull {
+				extRows[idx][colOffset] = defaultVal
+			} else {
+				extRows[idx][colOffset] = tuple.DNull()
+			}
+		}
+
+	case "lead":
+		offset := 1
+		var defaultVal tuple.Datum
+		if len(wf.ArgExprs) >= 2 {
+			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			v, err := wf.ArgExprs[1].Eval(row)
+			if err == nil {
+				offset = int(v.I64)
+			}
+		}
+		if len(wf.ArgExprs) >= 3 {
+			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			v, err := wf.ArgExprs[2].Eval(row)
+			if err == nil {
+				defaultVal = v
+			}
+		}
+		for i, idx := range partIndices {
+			if i+offset < partSize {
+				nextIdx := partIndices[i+offset]
+				row := &planner.Row{Columns: child.Rows[nextIdx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				extRows[idx][colOffset] = v
+			} else if defaultVal.Type != tuple.TypeNull {
+				extRows[idx][colOffset] = defaultVal
+			} else {
+				extRows[idx][colOffset] = tuple.DNull()
+			}
+		}
+
+	case "first_value":
+		if len(wf.ArgExprs) > 0 && partSize > 0 {
+			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			v, _ := wf.ArgExprs[0].Eval(row)
+			for _, idx := range partIndices {
+				extRows[idx][colOffset] = v
+			}
+		}
+
+	case "last_value":
+		if len(wf.ArgExprs) > 0 && partSize > 0 {
+			// Default frame is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW,
+			// so last_value returns the current row's value.
+			for _, idx := range partIndices {
+				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				extRows[idx][colOffset] = v
+			}
+		}
+
+	case "nth_value":
+		nth := 1
+		if len(wf.ArgExprs) >= 2 {
+			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			v, err := wf.ArgExprs[1].Eval(row)
+			if err == nil {
+				nth = int(v.I64)
+			}
+		}
+		for i, idx := range partIndices {
+			if nth >= 1 && nth <= i+1 && len(wf.ArgExprs) > 0 {
+				nthIdx := partIndices[nth-1]
+				row := &planner.Row{Columns: child.Rows[nthIdx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				extRows[idx][colOffset] = v
+			} else {
+				extRows[idx][colOffset] = tuple.DNull()
+			}
+		}
+
+	// Aggregate-as-window functions: sum, count, avg, min, max.
+	case "count":
+		if wf.Star {
+			// count(*) OVER (...) — running count.
+			for i, idx := range partIndices {
+				extRows[idx][colOffset] = tuple.DInt64(int64(i + 1))
+			}
+		} else if len(wf.ArgExprs) > 0 {
+			count := int64(0)
+			for _, idx := range partIndices {
+				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				if v.Type != tuple.TypeNull {
+					count++
+				}
+				extRows[idx][colOffset] = tuple.DInt64(count)
+			}
+		}
+
+	case "sum":
+		if len(wf.ArgExprs) > 0 {
+			var sumF float64
+			var sumI int64
+			isFloat := false
+			for i, idx := range partIndices {
+				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				if i == 0 && v.Type == tuple.TypeFloat64 {
+					isFloat = true
+				}
+				if isFloat {
+					sumF += datumToFloat64(v)
+					extRows[idx][colOffset] = tuple.DFloat64(sumF)
+				} else {
+					sumI += v.I64
+					extRows[idx][colOffset] = tuple.DInt64(sumI)
+				}
+			}
+		}
+
+	case "avg":
+		if len(wf.ArgExprs) > 0 {
+			var sum float64
+			for i, idx := range partIndices {
+				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				sum += datumToFloat64(v)
+				extRows[idx][colOffset] = tuple.DFloat64(sum / float64(i+1))
+			}
+		}
+
+	case "min":
+		if len(wf.ArgExprs) > 0 {
+			var minVal tuple.Datum
+			for i, idx := range partIndices {
+				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				if i == 0 || planner.CompareDatums(v, minVal) < 0 {
+					minVal = v
+				}
+				extRows[idx][colOffset] = minVal
+			}
+		}
+
+	case "max":
+		if len(wf.ArgExprs) > 0 {
+			var maxVal tuple.Datum
+			for i, idx := range partIndices {
+				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				v, _ := wf.ArgExprs[0].Eval(row)
+				if i == 0 || planner.CompareDatums(v, maxVal) > 0 {
+					maxVal = v
+				}
+				extRows[idx][colOffset] = maxVal
+			}
+		}
+
+	default:
+		// Unknown window function — fill with NULL.
+		for _, idx := range partIndices {
+			extRows[idx][colOffset] = tuple.DNull()
+		}
+	}
+}
+
+// windowOrderEqual checks if two rows have equal ORDER BY key values.
+func windowOrderEqual(wf planner.WindowFuncDesc, child *Result, idxA, idxB int) bool {
+	ra := &planner.Row{Columns: child.Rows[idxA], Names: child.Columns}
+	rb := &planner.Row{Columns: child.Rows[idxB], Names: child.Columns}
+	for _, ok := range wf.OrderBy {
+		va, _ := ok.Expr.Eval(ra)
+		vb, _ := ok.Expr.Eval(rb)
+		if planner.CompareDatums(va, vb) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (ex *Executor) execSubqueryScan(n *planner.PhysSubqueryScan) (*Result, error) {
