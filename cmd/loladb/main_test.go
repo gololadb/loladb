@@ -1032,6 +1032,103 @@ func TestCLI_DropSchemaCascade(t *testing.T) {
 	}
 }
 
+func TestCLI_ColumnNotNull(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "notnull.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	// Create table with NOT NULL constraints.
+	run("CREATE TABLE users (id INTEGER NOT NULL, name TEXT NOT NULL, email TEXT)")
+
+	// Valid insert should succeed.
+	run("INSERT INTO users VALUES (1, 'Alice', 'alice@example.com')")
+
+	// NULL in NOT NULL column should fail.
+	out := runFail("INSERT INTO users VALUES (NULL, 'Bob', 'bob@example.com')")
+	if !strings.Contains(out, "not-null constraint") {
+		t.Fatalf("expected not-null violation for id, got: %s", out)
+	}
+
+	out = runFail("INSERT INTO users VALUES (2, NULL, 'carol@example.com')")
+	if !strings.Contains(out, "not-null constraint") {
+		t.Fatalf("expected not-null violation for name, got: %s", out)
+	}
+
+	// NULL in nullable column should succeed.
+	run("INSERT INTO users VALUES (3, 'Dave', NULL)")
+
+	// Verify data.
+	out = run("SELECT * FROM users")
+	if !strings.Contains(out, "Alice") || !strings.Contains(out, "Dave") {
+		t.Fatalf("expected Alice and Dave in results, got: %s", out)
+	}
+
+	// UPDATE to NULL on NOT NULL column should fail.
+	out = runFail("UPDATE users SET name = NULL WHERE id = 1")
+	if !strings.Contains(out, "not-null constraint") {
+		t.Fatalf("expected not-null violation on UPDATE, got: %s", out)
+	}
+}
+
+func TestCLI_DefaultNotNullParsing(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "defnotnull.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// This is the pattern that previously caused a parse error:
+	// DEFAULT <expr> NOT NULL
+	run(`CREATE TABLE customer (
+		customer_id integer NOT NULL,
+		store_id smallint NOT NULL,
+		first_name text NOT NULL,
+		last_name text NOT NULL,
+		email text,
+		address_id smallint NOT NULL,
+		activebool boolean DEFAULT true NOT NULL,
+		create_date date NOT NULL,
+		last_update timestamp without time zone,
+		active integer
+	)`)
+
+	// Insert a valid row.
+	run("INSERT INTO customer VALUES (1, 1, 'John', 'Doe', 'john@example.com', 1, true, '2024-01-01', '2024-01-01 00:00:00', 1)")
+
+	// Verify it was inserted.
+	out := run("SELECT * FROM customer")
+	if !strings.Contains(out, "John") {
+		t.Fatalf("expected John in results, got: %s", out)
+	}
+
+	// NOT NULL should be enforced on first_name.
+	out2, _ := exec.Command(bin, "exec", dbPath, "INSERT INTO customer VALUES (2, 1, NULL, 'Smith', NULL, 1, true, '2024-01-01', NULL, NULL)").CombinedOutput()
+	if !strings.Contains(string(out2), "not-null constraint") {
+		t.Fatalf("expected not-null violation for first_name, got: %s", out2)
+	}
+}
+
 func TestCLI_SearchPathPersistence(t *testing.T) {
 	bin := buildBinary(t)
 	dbPath := filepath.Join(t.TempDir(), "sp_persist.mcdb")

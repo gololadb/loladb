@@ -828,7 +828,13 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		}
 		sqlType := typeNameToString(colDef.TypeName)
 		dt := a.resolveColumnType(sqlType)
-		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType})
+		notNull := false
+		for _, c := range colDef.Constraints {
+			if c.Contype == parser.CONSTR_NOTNULL {
+				notNull = true
+			}
+		}
+		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, NotNull: notNull})
 	}
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
 		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName, Columns: cols,

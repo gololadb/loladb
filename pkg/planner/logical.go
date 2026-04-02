@@ -180,6 +180,7 @@ type ColDef struct {
 	Name     string
 	Type     tuple.DatumType
 	TypeName string // original SQL type name (for domain/enum validation)
+	NotNull  bool   // column-level NOT NULL constraint
 }
 
 func (n *LogicalCreateTable) String() string        { return fmt.Sprintf("CreateTable(%s)", n.Table) }

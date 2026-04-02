@@ -857,6 +857,11 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 			values = mapToRow(colNames, modifiedNew)
 		}
 
+		// Validate NOT NULL constraints.
+		if err := validateNotNull(tableCols, values); err != nil {
+			return nil, err
+		}
+
 		// Validate domain/enum constraints.
 		if err := ex.validateCustomTypes(tableCols, values); err != nil {
 			return nil, err
@@ -1028,6 +1033,11 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 			newVals = mapToRow(colNames, modifiedNew)
 		}
 
+		// Validate NOT NULL constraints.
+		if err := validateNotNull(tableCols, newVals); err != nil {
+			return nil, err
+		}
+
 		// Validate domain/enum constraints.
 		if err := ex.validateCustomTypes(tableCols, newVals); err != nil {
 			return nil, err
@@ -1056,7 +1066,7 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error) {
 	cols := make([]catalog.ColumnDef, len(n.Columns))
 	for i, c := range n.Columns {
-		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName}
+		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName, NotNull: c.NotNull}
 	}
 	// Set the owner to the current session user.
 	var ownerOID int32
@@ -1506,6 +1516,19 @@ func (ex *Executor) getTableColumns(tableName string) []catalog.Column {
 		return nil
 	}
 	return cols
+}
+
+// validateNotNull checks that NOT NULL columns do not contain NULL values.
+func validateNotNull(cols []catalog.Column, values []tuple.Datum) error {
+	for i, col := range cols {
+		if !col.NotNull {
+			continue
+		}
+		if i >= len(values) || values[i].Type == tuple.TypeNull {
+			return fmt.Errorf("null value in column %q violates not-null constraint", col.Name)
+		}
+	}
+	return nil
 }
 
 // validateCustomTypes checks each value against domain/enum constraints.
