@@ -32,7 +32,8 @@ func evalText(t *testing.T, ex *Executor, expr string) string {
 // datumDisplayText returns the display text for any datum type.
 func datumDisplayText(d tuple.Datum) string {
 	switch d.Type {
-	case tuple.TypeText, tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+	case tuple.TypeText, tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID,
+		tuple.TypeBytea, tuple.TypeArray:
 		return d.Text
 	case tuple.TypeDate:
 		return time.Unix(d.I64*86400, 0).UTC().Format("2006-01-02")
@@ -49,6 +50,15 @@ func datumDisplayText(d tuple.Datum) string {
 			return "true"
 		}
 		return "false"
+	case tuple.TypeInterval:
+		return formatTestInterval(d.I32, d.I64)
+	case tuple.TypeMoney:
+		dollars := d.I64 / 100
+		cents := d.I64 % 100
+		if cents < 0 {
+			cents = -cents
+		}
+		return fmt.Sprintf("$%d.%02d", dollars, cents)
 	default:
 		return ""
 	}
@@ -659,3 +669,34 @@ func TestBuiltin_ArrayLength(t *testing.T) {
 		t.Fatalf("array_length = %d, want 3", v)
 	}
 }
+
+// formatTestInterval formats an interval for test assertions.
+func formatTestInterval(months int32, microseconds int64) string {
+	var parts []string
+	if months != 0 {
+		years := months / 12
+		mons := months % 12
+		if years != 0 {
+			parts = append(parts, fmt.Sprintf("%d years", years))
+		}
+		if mons != 0 {
+			parts = append(parts, fmt.Sprintf("%d mons", mons))
+		}
+	}
+	totalUS := microseconds
+	days := totalUS / (24 * 3600 * 1e6)
+	totalUS -= days * 24 * 3600 * 1e6
+	if days != 0 {
+		parts = append(parts, fmt.Sprintf("%d days", days))
+	}
+	if totalUS != 0 || len(parts) == 0 {
+		hours := totalUS / (3600 * 1e6)
+		totalUS -= hours * 3600 * 1e6
+		mins := totalUS / (60 * 1e6)
+		totalUS -= mins * 60 * 1e6
+		secs := totalUS / 1e6
+		parts = append(parts, fmt.Sprintf("%02d:%02d:%02d", hours, mins, secs))
+	}
+	return strings.Join(parts, " ")
+}
+

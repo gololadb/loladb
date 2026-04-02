@@ -549,6 +549,10 @@ func (o *OpExpr) Eval(row *Row) (tuple.Datum, error) {
 }
 
 func evalArithmeticDatums(op OpKind, lv, rv tuple.Datum) (tuple.Datum, error) {
+	// Date/timestamp ± interval arithmetic.
+	if d, ok := evalDateTimeInterval(op, lv, rv); ok {
+		return d, nil
+	}
 	lint, lisInt := toInt64(lv)
 	rint, risInt := toInt64(rv)
 	if lisInt && risInt {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gololadb/loladb/pkg/planner"
 	loladbsql "github.com/gololadb/loladb/pkg/sql"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -149,6 +150,19 @@ func datumString(d tuple.Datum) string {
 		return time.Unix(0, d.I64*1000).UTC().Format("2006-01-02 15:04:05")
 	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
 		return d.Text
+	case tuple.TypeInterval:
+		return planner.FormatInterval(d.I32, d.I64)
+	case tuple.TypeBytea:
+		return d.Text
+	case tuple.TypeArray:
+		return d.Text
+	case tuple.TypeMoney:
+		dollars := d.I64 / 100
+		cents := d.I64 % 100
+		if cents < 0 {
+			cents = -cents
+		}
+		return fmt.Sprintf("$%d.%02d", dollars, cents)
 	default:
 		return "?"
 	}
@@ -174,6 +188,19 @@ func datumToInterface(d tuple.Datum) interface{} {
 		return time.Unix(0, d.I64*1000).UTC().Format("2006-01-02 15:04:05")
 	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
 		return d.Text
+	case tuple.TypeInterval:
+		return planner.FormatInterval(d.I32, d.I64)
+	case tuple.TypeBytea:
+		return d.Text
+	case tuple.TypeArray:
+		return d.Text
+	case tuple.TypeMoney:
+		dollars := d.I64 / 100
+		cents := d.I64 % 100
+		if cents < 0 {
+			cents = -cents
+		}
+		return fmt.Sprintf("$%d.%02d", dollars, cents)
 	default:
 		return nil
 	}

@@ -1315,6 +1315,10 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 			continue
 		}
 		sqlType := typeNameToString(colDef.TypeName)
+		// Check for array type (TypeName has ArrayBounds set).
+		if colDef.TypeName != nil && len(colDef.TypeName.ArrayBounds) > 0 {
+			sqlType = sqlType + "[]"
+		}
 		dt := a.resolveColumnType(sqlType)
 		notNull := false
 		primaryKey := false
@@ -1335,7 +1339,8 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 				unique = true
 			}
 		}
-		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr})
+		typmod := computeTypmodFromParser(colDef.TypeName, dt)
+		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, Typmod: typmod, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr})
 	}
 
 	// Handle table-level constraints (e.g., PRIMARY KEY (col), UNIQUE (col)).
@@ -1581,7 +1586,7 @@ func MapSQLType(sqlType string) tuple.DatumType {
 	upper := strings.ToUpper(strings.TrimSpace(sqlType))
 
 	if strings.HasSuffix(upper, "[]") {
-		return tuple.TypeText
+		return tuple.TypeArray
 	}
 
 	base := upper
@@ -1617,15 +1622,19 @@ func MapSQLType(sqlType string) tuple.DatumType {
 	case "TIME", "TIMETZ", "TIME WITHOUT TIME ZONE", "TIME WITH TIME ZONE":
 		return tuple.TypeText
 	case "INTERVAL":
-		return tuple.TypeText
+		return tuple.TypeInterval
 	case "JSON", "JSONB":
 		return tuple.TypeJSON
 	case "UUID":
 		return tuple.TypeUUID
 	case "BYTEA":
-		return tuple.TypeText
+		return tuple.TypeBytea
+	case "MONEY":
+		return tuple.TypeMoney
 	case "TSVECTOR", "TSQUERY":
 		return tuple.TypeText
+	case "TEXT[]", "INT[]", "INTEGER[]", "INT4[]", "INT8[]", "FLOAT8[]", "BOOLEAN[]":
+		return tuple.TypeArray
 	}
 
 	switch {
@@ -1648,10 +1657,48 @@ func MapSQLType(sqlType string) tuple.DatumType {
 		strings.Contains(upper, "TIME"):
 		return tuple.TypeText
 	case strings.Contains(upper, "BYTEA"):
-		return tuple.TypeText
+		return tuple.TypeBytea
 	}
 
 	return tuple.TypeText
+}
+
+// computeTypmodFromParser extracts precision/scale from a parser TypeName
+// and encodes it as a PostgreSQL-compatible typmod. Returns -1 if not applicable.
+func computeTypmodFromParser(tn *parser.TypeName, dt tuple.DatumType) int32 {
+	if dt != tuple.TypeNumeric || tn == nil || len(tn.Typmods) == 0 {
+		return -1
+	}
+	// Extract integer constants from Typmods.
+	vals := make([]int, 0, len(tn.Typmods))
+	for _, tm := range tn.Typmods {
+		if c, ok := tm.(*parser.A_Const); ok && c.Val.Type == parser.ValInt {
+			vals = append(vals, int(c.Val.Ival))
+		}
+	}
+	if len(vals) == 0 {
+		return -1
+	}
+	p := vals[0]
+	s := 0
+	if len(vals) >= 2 {
+		s = vals[1]
+	}
+	if p <= 0 {
+		return -1
+	}
+	// PostgreSQL encoding: ((precision << 16) | scale) + VARHDRSZ(4)
+	return int32((p << 16) | s) + 4
+}
+
+// NumericTypmodPrecisionScale extracts precision and scale from a typmod.
+// Returns (0, 0, false) if the typmod is unspecified.
+func NumericTypmodPrecisionScale(typmod int32) (precision, scale int, ok bool) {
+	if typmod < 4 {
+		return 0, 0, false
+	}
+	tm := typmod - 4
+	return int(tm >> 16), int(tm & 0xFFFF), true
 }
 
 func (a *Analyzer) transformCreatePolicyStmt(n *parser.CreatePolicyStmt) (*Query, error) {
@@ -2294,9 +2341,14 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 	// Determine return type based on function name.
 	var retType tuple.DatumType
 	switch name {
+	case "now", "current_timestamp":
+		retType = tuple.TypeTimestamp
+	case "current_date":
+		retType = tuple.TypeDate
+	case "age":
+		retType = tuple.TypeInterval
 	// Date/time → text
-	case "now", "current_timestamp", "current_date",
-		"to_char", "to_date", "to_timestamp", "date_trunc", "age":
+	case "to_char", "to_date", "to_timestamp", "date_trunc":
 		retType = tuple.TypeText
 	// Sequence / integer-returning
 	case "nextval", "currval", "setval":
@@ -2310,7 +2362,7 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 		"replace", "overlay", "left", "right",
 		"lpad", "rpad", "repeat", "reverse", "split_part",
 		"initcap", "translate", "chr",
-		"md5", "gen_random_uuid", "encode", "decode", "format",
+		"md5", "encode", "decode", "format",
 		"regexp_replace", "string_to_array":
 		retType = tuple.TypeText
 	// Float-returning
@@ -2319,6 +2371,8 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 		"random", "pi", "log", "ln", "log10", "exp",
 		"extract", "date_part", "to_number":
 		retType = tuple.TypeFloat64
+	case "gen_random_uuid":
+		retType = tuple.TypeUUID
 	// Bool-returning
 	case "regexp_match":
 		retType = tuple.TypeText // returns matched text or NULL

@@ -22,6 +22,10 @@ const (
 	TypeNumeric      DatumType = 9  // arbitrary-precision decimal (stored as Text)
 	TypeJSON         DatumType = 10 // JSON/JSONB (stored as Text)
 	TypeUUID         DatumType = 11 // UUID (stored as Text, canonical format)
+	TypeInterval     DatumType = 12 // Interval (I64=microseconds, I32=months)
+	TypeBytea        DatumType = 13 // Binary data (stored as Text, hex-encoded)
+	TypeArray        DatumType = 14 // Array (stored as Text, PG array literal format)
+	TypeMoney        DatumType = 15 // Money (stored as I64, value in cents)
 )
 
 // Datum is a single typed column value.
@@ -47,6 +51,12 @@ func DTimestamp(us int64) Datum { return Datum{Type: TypeTimestamp, I64: us} }
 func DNumeric(v string) Datum   { return Datum{Type: TypeNumeric, Text: v} }
 func DJSON(v string) Datum      { return Datum{Type: TypeJSON, Text: v} }
 func DUUID(v string) Datum      { return Datum{Type: TypeUUID, Text: v} }
+func DInterval(months int32, microseconds int64) Datum {
+	return Datum{Type: TypeInterval, I32: months, I64: microseconds}
+}
+func DBytea(v string) Datum  { return Datum{Type: TypeBytea, Text: v} }
+func DArray(v string) Datum  { return Datum{Type: TypeArray, Text: v} }
+func DMoney(cents int64) Datum { return Datum{Type: TypeMoney, I64: cents} }
 
 // EncodeDatum appends the serialized form of a Datum to buf and
 // returns the extended buffer. Format: [type:1B | data:variable].
@@ -91,6 +101,20 @@ func EncodeDatum(buf []byte, d Datum) []byte {
 		binary.LittleEndian.PutUint16(b, uint16(len(d.Text)))
 		buf = append(buf, b...)
 		buf = append(buf, []byte(d.Text)...)
+	case TypeInterval:
+		b := make([]byte, 12)
+		binary.LittleEndian.PutUint32(b[0:4], uint32(d.I32))   // months
+		binary.LittleEndian.PutUint64(b[4:12], uint64(d.I64))  // microseconds
+		buf = append(buf, b...)
+	case TypeBytea, TypeArray:
+		b := make([]byte, 2)
+		binary.LittleEndian.PutUint16(b, uint16(len(d.Text)))
+		buf = append(buf, b...)
+		buf = append(buf, []byte(d.Text)...)
+	case TypeMoney:
+		b := make([]byte, 8)
+		binary.LittleEndian.PutUint64(b, uint64(d.I64))
+		buf = append(buf, b...)
 	}
 	return buf
 }
@@ -193,6 +217,41 @@ func DecodeDatum(buf []byte, offset int) (Datum, int, error) {
 		}
 		s := string(buf[pos : pos+length])
 		return DUUID(s), pos + length - offset, nil
+	case TypeInterval:
+		if pos+12 > len(buf) {
+			return Datum{}, 0, fmt.Errorf("tuple: interval truncated at offset %d", offset)
+		}
+		months := int32(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+		us := int64(binary.LittleEndian.Uint64(buf[pos+4 : pos+12]))
+		return DInterval(months, us), pos + 12 - offset, nil
+	case TypeBytea:
+		if pos+2 > len(buf) {
+			return Datum{}, 0, fmt.Errorf("tuple: bytea length truncated at offset %d", offset)
+		}
+		length := int(binary.LittleEndian.Uint16(buf[pos:]))
+		pos += 2
+		if pos+length > len(buf) {
+			return Datum{}, 0, fmt.Errorf("tuple: bytea data truncated at offset %d", offset)
+		}
+		s := string(buf[pos : pos+length])
+		return DBytea(s), pos + length - offset, nil
+	case TypeArray:
+		if pos+2 > len(buf) {
+			return Datum{}, 0, fmt.Errorf("tuple: array length truncated at offset %d", offset)
+		}
+		length := int(binary.LittleEndian.Uint16(buf[pos:]))
+		pos += 2
+		if pos+length > len(buf) {
+			return Datum{}, 0, fmt.Errorf("tuple: array data truncated at offset %d", offset)
+		}
+		s := string(buf[pos : pos+length])
+		return DArray(s), pos + length - offset, nil
+	case TypeMoney:
+		if pos+8 > len(buf) {
+			return Datum{}, 0, fmt.Errorf("tuple: money truncated at offset %d", offset)
+		}
+		v := int64(binary.LittleEndian.Uint64(buf[pos:]))
+		return DMoney(v), pos + 8 - offset, nil
 	default:
 		return Datum{}, 0, fmt.Errorf("tuple: unknown datum type %d at offset %d", typ, offset)
 	}

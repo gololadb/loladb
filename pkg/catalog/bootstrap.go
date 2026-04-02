@@ -153,7 +153,7 @@ func pgClassRow(oid int32, name string, namespace int32, kind string,
 }
 
 // pgAttributeRow builds a pg_attribute tuple.
-func pgAttributeRow(relid int32, name string, typid, typlen int32, num int16, notNull bool, defaultExpr string) []tuple.Datum {
+func pgAttributeRow(relid int32, name string, typid, typlen int32, num int16, notNull bool, defaultExpr string, typmods ...int32) []tuple.Datum {
 	var nn int32
 	if notNull {
 		nn = 1
@@ -162,13 +162,17 @@ func pgAttributeRow(relid int32, name string, typid, typlen int32, num int16, no
 	if defaultExpr != "" {
 		hasDef = 1
 	}
+	typmod := int32(-1)
+	if len(typmods) > 0 {
+		typmod = typmods[0]
+	}
 	return []tuple.Datum{
 		tuple.DInt32(relid),        // attrelid
 		tuple.DText(name),          // attname
 		tuple.DInt32(typid),        // atttypid
 		tuple.DInt32(typlen),       // attlen
 		tuple.DInt32(int32(num)),   // attnum
-		tuple.DInt32(-1),           // atttypmod
+		tuple.DInt32(typmod),       // atttypmod
 		tuple.DInt32(nn),           // attnotnull
 		tuple.DInt32(0),            // attisdropped
 		tuple.DInt32(hasDef),       // atthasdef
@@ -194,6 +198,16 @@ func builtinTypes() [][]tuple.Datum {
 		{OIDOid, "oid", 4},
 		{OIDChar, "char", 1},
 		{OIDInt2Vec, "int2vector", -1},
+		{OIDDate, "date", 4},
+		{OIDTimestamp, "timestamp", 8},
+		{OIDNumeric, "numeric", -1},
+		{OIDJSON, "json", -1},
+		{OIDJSONB, "jsonb", -1},
+		{OIDUUID, "uuid", 16},
+		{OIDInterval, "interval", 16},
+		{OIDBytea, "bytea", -1},
+		{OIDMoney, "money", 8},
+		{OIDTextArray, "_text", -1},
 	}
 	var rows [][]tuple.Datum
 	for _, t := range types {

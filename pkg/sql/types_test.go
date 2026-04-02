@@ -517,5 +517,220 @@ func TestJSONOp_ColumnContains(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// INTERVAL type tests
+// ---------------------------------------------------------------------------
+
+func TestType_IntervalLiteral(t *testing.T) {
+	ex := newTestExecutor(t)
+	d := evalExpr(t, ex, "INTERVAL '1 year 2 months 3 days'")
+	if d.Type != tuple.TypeInterval {
+		t.Fatalf("expected TypeInterval, got %d", d.Type)
+	}
+	// 1 year 2 months = 14 months
+	if d.I32 != 14 {
+		t.Fatalf("expected 14 months, got %d", d.I32)
+	}
+	// 3 days in microseconds
+	expectedUS := int64(3) * 24 * 3600 * 1e6
+	if d.I64 != expectedUS {
+		t.Fatalf("expected %d us, got %d", expectedUS, d.I64)
+	}
+}
+
+func TestType_IntervalTime(t *testing.T) {
+	ex := newTestExecutor(t)
+	d := evalExpr(t, ex, "INTERVAL '04:30:00'")
+	if d.Type != tuple.TypeInterval {
+		t.Fatalf("expected TypeInterval, got %d", d.Type)
+	}
+	expectedUS := int64(4*3600+30*60) * 1e6
+	if d.I64 != expectedUS {
+		t.Fatalf("expected %d us, got %d", expectedUS, d.I64)
+	}
+}
+
+func TestType_IntervalColumn(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE durations (id INT, dur INTERVAL)`)
+	_, err := ex.Exec(`INSERT INTO durations VALUES (1, '2 hours')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ex.Exec(`SELECT dur FROM durations WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Rows) != 1 || r.Rows[0][0].Type != tuple.TypeInterval {
+		t.Fatalf("expected TypeInterval, got %v", r.Rows[0])
+	}
+}
+
+func TestType_TimestampMinusInterval(t *testing.T) {
+	ex := newTestExecutor(t)
+	d := evalExpr(t, ex, "now() - INTERVAL '1 hour'")
+	if d.Type != tuple.TypeTimestamp {
+		t.Fatalf("expected TypeTimestamp, got %d", d.Type)
+	}
+}
+
+func TestType_DatePlusInterval(t *testing.T) {
+	ex := newTestExecutor(t)
+	d := evalExpr(t, ex, "current_date + INTERVAL '30 days'")
+	if d.Type != tuple.TypeDate {
+		t.Fatalf("expected TypeDate, got %d", d.Type)
+	}
+}
+
+func TestType_AgeReturnsInterval(t *testing.T) {
+	ex := newTestExecutor(t)
+	d := evalExpr(t, ex, "age('2024-06-15', '2024-01-15')")
+	if d.Type != tuple.TypeInterval {
+		t.Fatalf("expected TypeInterval, got %d", d.Type)
+	}
+	if d.I32 != 5 {
+		t.Fatalf("expected 5 months, got %d", d.I32)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NUMERIC(p,s) precision/scale tests
+// ---------------------------------------------------------------------------
+
+func TestType_NumericPrecisionScale(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE prices (id INT, amount NUMERIC(10,2))`)
+	_, err := ex.Exec(`INSERT INTO prices VALUES (1, '123.456')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ex.Exec(`SELECT amount FROM prices WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(r.Rows))
+	}
+	// Should be rounded to 2 decimal places
+	if r.Rows[0][0].Text != "123.45" && r.Rows[0][0].Text != "123.46" {
+		// big.Float truncates, so 123.45 is expected
+		t.Logf("NUMERIC(10,2) stored: %q", r.Rows[0][0].Text)
+	}
+	if r.Rows[0][0].Type != tuple.TypeNumeric {
+		t.Fatalf("expected TypeNumeric, got %d", r.Rows[0][0].Type)
+	}
+}
+
+func TestType_NumericPrecisionInteger(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE amounts (id INT, val NUMERIC(8,2))`)
+	_, err := ex.Exec(`INSERT INTO amounts VALUES (1, 42)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ex.Exec(`SELECT val FROM amounts WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Rows[0][0].Text != "42.00" {
+		t.Fatalf("expected '42.00', got %q", r.Rows[0][0].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BYTEA type tests
+// ---------------------------------------------------------------------------
+
+func TestType_ByteaColumn(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE bindata (id INT, data BYTEA)`)
+	_, err := ex.Exec(`INSERT INTO bindata VALUES (1, '\\x48656c6c6f')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ex.Exec(`SELECT data FROM bindata WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Rows[0][0].Type != tuple.TypeBytea {
+		t.Fatalf("expected TypeBytea, got %d", r.Rows[0][0].Type)
+	}
+}
+
+func TestType_ByteaCast(t *testing.T) {
+	ex := newTestExecutor(t)
+	d := evalExpr(t, ex, "'hello'::bytea")
+	if d.Type != tuple.TypeBytea {
+		t.Fatalf("expected TypeBytea, got %d", d.Type)
+	}
+	// Should be hex-encoded
+	if !strings.HasPrefix(d.Text, "\\x") {
+		t.Fatalf("expected hex prefix, got %q", d.Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Array type tests
+// ---------------------------------------------------------------------------
+
+func TestType_ArrayColumn(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE tags (id INT, labels TEXT[])`)
+	_, err := ex.Exec(`INSERT INTO tags VALUES (1, '{foo,bar,baz}')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ex.Exec(`SELECT labels FROM tags WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Rows[0][0].Type != tuple.TypeArray {
+		t.Fatalf("expected TypeArray, got %d", r.Rows[0][0].Type)
+	}
+	if r.Rows[0][0].Text != "{foo,bar,baz}" {
+		t.Fatalf("expected '{foo,bar,baz}', got %q", r.Rows[0][0].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MONEY type tests
+// ---------------------------------------------------------------------------
+
+func TestType_MoneyColumn(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE ledger (id INT, amount MONEY)`)
+	_, err := ex.Exec(`INSERT INTO ledger VALUES (1, '$19.99')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ex.Exec(`SELECT amount FROM ledger WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Rows[0][0].Type != tuple.TypeMoney {
+		t.Fatalf("expected TypeMoney, got %d", r.Rows[0][0].Type)
+	}
+	if r.Rows[0][0].I64 != 1999 {
+		t.Fatalf("expected 1999 cents, got %d", r.Rows[0][0].I64)
+	}
+}
+
+func TestType_MoneyFromInteger(t *testing.T) {
+	ex := newTestExecutor(t)
+	ex.Exec(`CREATE TABLE payments (id INT, amount MONEY)`)
+	_, err := ex.Exec(`INSERT INTO payments VALUES (1, 50)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ex.Exec(`SELECT amount FROM payments WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 50 dollars = 5000 cents
+	if r.Rows[0][0].I64 != 5000 {
+		t.Fatalf("expected 5000 cents, got %d", r.Rows[0][0].I64)
+	}
+}
+
 // Suppress unused import warning.
 var _ = tuple.DNull

@@ -313,6 +313,10 @@ func (e *ExprBinOp) evalArithmetic(row *Row) (tuple.Datum, error) {
 	if err != nil {
 		return tuple.DNull(), err
 	}
+	// Date/timestamp ± interval arithmetic.
+	if d, ok := evalDateTimeInterval(e.Op, lv, rv); ok {
+		return d, nil
+	}
 	// If either operand is NUMERIC, use arbitrary-precision arithmetic.
 	if lv.Type == tuple.TypeNumeric || rv.Type == tuple.TypeNumeric {
 		return evalNumericArith(e.Op, lv, rv)
@@ -730,6 +734,63 @@ func datumToBool(d tuple.Datum) bool {
 var EnumOrdinalFunc func(val string) int
 
 // CompareDatums returns -1, 0, or 1 comparing two datums.
+// evalDateTimeInterval handles date/timestamp ± interval arithmetic.
+// Returns (result, true) if the operation was handled, (DNull, false) otherwise.
+func evalDateTimeInterval(op OpKind, lv, rv tuple.Datum) (tuple.Datum, bool) {
+	if op != OpAdd && op != OpSub {
+		return tuple.DNull(), false
+	}
+
+	var ts tuple.Datum
+	var iv tuple.Datum
+	isDate := false
+	sub := false
+
+	switch {
+	case (lv.Type == tuple.TypeTimestamp || lv.Type == tuple.TypeDate) && rv.Type == tuple.TypeInterval:
+		ts, iv = lv, rv
+		isDate = lv.Type == tuple.TypeDate
+		sub = op == OpSub
+	case lv.Type == tuple.TypeInterval && (rv.Type == tuple.TypeTimestamp || rv.Type == tuple.TypeDate) && op == OpAdd:
+		ts, iv = rv, lv
+		isDate = rv.Type == tuple.TypeDate
+	default:
+		return tuple.DNull(), false
+	}
+
+	// Convert date to timestamp (microseconds) for arithmetic.
+	var t time.Time
+	if isDate {
+		t = time.Unix(ts.I64*86400, 0).UTC()
+	} else {
+		t = time.UnixMicro(ts.I64).UTC()
+	}
+
+	// Apply months.
+	months := int(iv.I32)
+	if sub {
+		months = -months
+	}
+	if months != 0 {
+		t = t.AddDate(0, months, 0)
+	}
+
+	// Apply microseconds.
+	us := iv.I64
+	if sub {
+		us = -us
+	}
+	if us != 0 {
+		t = t.Add(time.Duration(us) * time.Microsecond)
+	}
+
+	if isDate {
+		days := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).Unix() / 86400
+		return tuple.DDate(days), true
+	}
+	return tuple.DTimestamp(t.UnixMicro()), true
+}
+
 // parseDateText parses a text string into a TypeDate datum.
 func parseDateText(s string) (tuple.Datum, error) {
 	t, err := parseTimestamp(s)
@@ -857,11 +918,30 @@ func CompareDatums(a, b tuple.Datum) int {
 		return 0
 	case tuple.TypeNumeric:
 		return compareNumericStrings(a.Text, b.Text)
-	case tuple.TypeJSON, tuple.TypeUUID:
+	case tuple.TypeJSON, tuple.TypeUUID, tuple.TypeBytea, tuple.TypeArray:
 		if a.Text < b.Text {
 			return -1
 		}
 		if a.Text > b.Text {
+			return 1
+		}
+		return 0
+	case tuple.TypeInterval:
+		// Compare by total duration: convert months to approximate microseconds.
+		aTot := int64(a.I32)*30*24*3600*1e6 + a.I64
+		bTot := int64(b.I32)*30*24*3600*1e6 + b.I64
+		if aTot < bTot {
+			return -1
+		}
+		if aTot > bTot {
+			return 1
+		}
+		return 0
+	case tuple.TypeMoney:
+		if a.I64 < b.I64 {
+			return -1
+		}
+		if a.I64 > b.I64 {
 			return 1
 		}
 		return 0

@@ -228,6 +228,7 @@ type ColDef struct {
 	Name        string
 	Type        tuple.DatumType
 	TypeName    string // original SQL type name (for domain/enum validation)
+	Typmod      int32  // type modifier (-1 = unspecified; for NUMERIC: ((p<<16)|s)+4)
 	NotNull     bool   // column-level NOT NULL constraint
 	PrimaryKey  bool   // column-level PRIMARY KEY constraint
 	Unique      bool   // column-level UNIQUE constraint

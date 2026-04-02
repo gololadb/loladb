@@ -30,10 +30,11 @@ const (
 
 // ColumnDef describes a column in a table.
 type ColumnDef struct {
-	Name       string
-	Type       tuple.DatumType
-	TypeName   string // original SQL type name (for domain/enum validation)
-	NotNull    bool   // column-level NOT NULL constraint
+	Name        string
+	Type        tuple.DatumType
+	TypeName    string // original SQL type name (for domain/enum validation)
+	Typmod      int32  // type modifier (-1 = unspecified; for NUMERIC: ((p<<16)|s)+4)
+	NotNull     bool   // column-level NOT NULL constraint
 	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
 }
 
@@ -55,6 +56,7 @@ type Column struct {
 	Num         int32  // 1-based
 	Type        int32  // maps to tuple.DatumType
 	TypeOID     int32  // raw pg_type OID (for custom type lookup)
+	Typmod      int32  // atttypmod (-1 = unspecified; for NUMERIC: ((precision<<16)|scale)+4)
 	NotNull     bool   // attnotnull
 	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
 }
@@ -231,7 +233,7 @@ func (c *Catalog) CreateTableInSchema(name string, cols []ColumnDef, ownerOID in
 			}
 		}
 		_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, pgAttributeRow(
-			oid, col.Name, typeOID, -1, int16(i+1), col.NotNull, col.DefaultExpr,
+			oid, col.Name, typeOID, -1, int16(i+1), col.NotNull, col.DefaultExpr, col.Typmod,
 		))
 		if err != nil {
 			c.Eng.TxMgr.Abort(xid)
@@ -551,6 +553,14 @@ func pgTypeOIDToDatumType(oid int32) int32 {
 		return int32(tuple.TypeJSON)
 	case OIDUUID:
 		return int32(tuple.TypeUUID)
+	case OIDInterval:
+		return int32(tuple.TypeInterval)
+	case OIDBytea:
+		return int32(tuple.TypeBytea)
+	case OIDMoney:
+		return int32(tuple.TypeMoney)
+	case OIDTextArray:
+		return int32(tuple.TypeArray)
 	default:
 		return int32(tuple.TypeText) // fallback
 	}
@@ -579,6 +589,14 @@ func datumTypeToPgTypeOID(dt tuple.DatumType) int32 {
 		return OIDJSON
 	case tuple.TypeUUID:
 		return OIDUUID
+	case tuple.TypeInterval:
+		return OIDInterval
+	case tuple.TypeBytea:
+		return OIDBytea
+	case tuple.TypeMoney:
+		return OIDMoney
+	case tuple.TypeArray:
+		return OIDTextArray
 	default:
 		return OIDText
 	}
@@ -704,12 +722,17 @@ func (c *Catalog) getColumnsWithSnapshot(oid int32, snap *mvcc.Snapshot) ([]Colu
 		if ct := c.Types.findByOID(rawOID); ct != nil {
 			dt = int32(ct.BaseType)
 		}
+		typmod := int32(-1)
+		if len(tup.Columns) > PgAttrAtttypmod {
+			typmod = tup.Columns[PgAttrAtttypmod].I32
+		}
 		col := Column{
 			RelID:   tup.Columns[0].I32,
 			Name:    tup.Columns[1].Text,
 			Num:     tup.Columns[4].I32,
 			Type:    dt,
 			TypeOID: rawOID,
+			Typmod:  typmod,
 			NotNull: tup.Columns[PgAttrAttnotnull].I32 != 0,
 		}
 		// Read default expression if present (10-column format).

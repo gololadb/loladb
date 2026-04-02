@@ -27,7 +27,8 @@ For context, here is what is currently implemented:
 - **Constraints:** PRIMARY KEY, UNIQUE (with auto-index creation and enforcement)
 - **Aggregates:** count, sum, avg, min, max, bool_and, bool_or, every, string_agg, array_agg
 - **Functions:** ~65 scalar functions (math, string, date/time, regex, formatting, encoding)
-- **Types:** int32, int64, float64, text, bool, date, timestamp, numeric, json/jsonb, uuid (+ domains, enums)
+- **Types:** int32, int64, float64, text, bool, date, timestamp, numeric (with precision/scale),
+  json/jsonb, uuid, interval, bytea, money, arrays (+ domains, enums)
 - **Indexes:** B+Tree, Hash, BRIN, GIN, GiST, SP-GiST
 - **Storage:** Slotted pages, TOAST, WAL, buffer pool (clock-sweep), freelist
 - **Concurrency:** MVCC with snapshot isolation, transaction manager
@@ -83,45 +84,17 @@ Not applicable until native array types are added.
 
 ## 2. Data Types
 
-### 🟡 INTERVAL type
-
-```sql
-SELECT now() - INTERVAL '30 days';
-SELECT age('2024-01-01'::date, '2023-01-01'::date);
-```
-
-DATE, TIMESTAMP, NUMERIC, JSON/JSONB, and UUID are now native types. INTERVAL
-is still missing — needed for date arithmetic and `age()` return values.
-
-### 🟡 NUMERIC precision and scale
-
-```sql
-CREATE TABLE t (price NUMERIC(10, 2));
-```
-
-NUMERIC is implemented with arbitrary precision via `math/big.Float`, but
-`NUMERIC(p, s)` precision/scale constraints are not enforced.
-
 ### 🟡 JSON additional operators (`?|`, `?&`, `-`, `#-`)
 
 JSON/JSONB types support `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, and `?` operators.
 Still missing: `?|` (any key exists), `?&` (all keys exist), `-` (delete key),
 and `#-` (delete path).
 
-### 🟡 BYTEA
+### 🟡 Array operators and indexing
 
-Declared in the type system but no real binary data handling. Encode/decode
-functions work on text representations.
-
-### 🟡 Arrays
-
-No native array datum type. `string_to_array()` and `array_length()` use text
-`{a,b,c}` representations. PG arrays support indexing, slicing, containment
-operators, and GIN indexing.
-
-### 🟡 MONEY
-
-Fixed-point currency type.
+Arrays have a native datum type and `TEXT[]` column syntax works. Missing:
+`ARRAY[...]` constructor, array indexing (`arr[1]`), slicing, containment
+operators (`@>`, `<@`, `&&`), and `unnest()`.
 
 ### 🟢 Geometric types (point, line, box, circle, polygon, path)
 
@@ -386,8 +359,11 @@ CAST(x AS type) works, but the `::` shorthand syntax support depends on the pars
 
 ```sql
 SELECT ARRAY[1, 2, 3];
-SELECT array_agg(name) FROM users;  -- returns text, not array
+SELECT arr[1] FROM t;
 ```
+
+Arrays have a native datum type but `ARRAY[...]` constructor syntax, indexing,
+and array-specific operators are not yet supported.
 
 ### 🟡 JSON additional operators (`?|`, `?&`, `-`, `#-`)
 
@@ -689,10 +665,8 @@ SELECT pg_advisory_lock(12345);
 | TEMPORARY tables | DDL |
 | Table partitioning | DDL |
 | CREATE TABLE AS | DDL |
-| INTERVAL type | Types |
-| NUMERIC precision/scale | Types |
 | JSON additional operators (`?|`, `?&`, `-`, `#-`) | Operators |
-| Arrays (native type) | Types |
+| Array operators and indexing | Types |
 | Statistical aggregates | Aggregates |
 | Ordered-set aggregates | Aggregates |
 | Cursors | Queries |

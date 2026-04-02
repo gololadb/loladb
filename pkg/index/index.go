@@ -49,10 +49,15 @@ func DatumToInt64(d tuple.Datum) (int64, bool) {
 		return int64(bits), true
 	case tuple.TypeDate, tuple.TypeTimestamp:
 		return d.I64, true
-	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID, tuple.TypeBytea, tuple.TypeArray:
 		h := fnv.New64a()
 		h.Write([]byte(d.Text))
 		return int64(h.Sum64()), true
+	case tuple.TypeInterval:
+		// Combine months and microseconds for hashing.
+		return int64(d.I32)*30*24*3600*1e6 + d.I64, true
+	case tuple.TypeMoney:
+		return d.I64, true
 	default:
 		return 0, false
 	}
@@ -68,7 +73,7 @@ func DatumToInt64Sortable(d tuple.Datum) (int64, bool) {
 		var buf [8]byte
 		copy(buf[:], d.Text)
 		return int64(binary.BigEndian.Uint64(buf[:])), true
-	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID, tuple.TypeBytea, tuple.TypeArray:
 		var buf [8]byte
 		copy(buf[:], d.Text)
 		return int64(binary.BigEndian.Uint64(buf[:])), true

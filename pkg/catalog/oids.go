@@ -24,6 +24,10 @@ const (
 	OIDJSON      = 114  // JSON
 	OIDJSONB     = 3802 // JSONB
 	OIDUUID      = 2950 // UUID
+	OIDInterval  = 1186 // INTERVAL
+	OIDBytea     = 17   // BYTEA
+	OIDMoney     = 790  // MONEY
+	OIDTextArray = 1009 // TEXT[]
 
 	// Relation OIDs for catalog tables.
 	OIDPgNamespace   = 2615

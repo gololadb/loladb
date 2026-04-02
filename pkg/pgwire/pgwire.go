@@ -757,9 +757,59 @@ func datumToText(d tuple.Datum) string {
 		return time.Unix(0, d.I64*1000).UTC().Format("2006-01-02 15:04:05")
 	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
 		return d.Text
+	case tuple.TypeInterval:
+		return formatIntervalPgwire(d.I32, d.I64)
+	case tuple.TypeBytea:
+		return d.Text
+	case tuple.TypeArray:
+		return d.Text
+	case tuple.TypeMoney:
+		dollars := d.I64 / 100
+		cents := d.I64 % 100
+		if cents < 0 {
+			cents = -cents
+		}
+		return fmt.Sprintf("$%d.%02d", dollars, cents)
 	default:
 		return fmt.Sprintf("%v", d)
 	}
+}
+
+func formatIntervalPgwire(months int32, microseconds int64) string {
+	var parts []string
+	if months != 0 {
+		years := months / 12
+		mons := months % 12
+		if years != 0 {
+			parts = append(parts, fmt.Sprintf("%d years", years))
+		}
+		if mons != 0 {
+			parts = append(parts, fmt.Sprintf("%d mons", mons))
+		}
+	}
+	totalUS := microseconds
+	days := totalUS / (24 * 3600 * 1e6)
+	totalUS -= days * 24 * 3600 * 1e6
+	if days != 0 {
+		parts = append(parts, fmt.Sprintf("%d days", days))
+	}
+	if totalUS != 0 || len(parts) == 0 {
+		negative := totalUS < 0
+		if negative {
+			totalUS = -totalUS
+		}
+		hours := totalUS / (3600 * 1e6)
+		totalUS -= hours * 3600 * 1e6
+		mins := totalUS / (60 * 1e6)
+		totalUS -= mins * 60 * 1e6
+		secs := totalUS / 1e6
+		timeStr := fmt.Sprintf("%02d:%02d:%02d", hours, mins, secs)
+		if negative {
+			timeStr = "-" + timeStr
+		}
+		parts = append(parts, timeStr)
+	}
+	return strings.Join(parts, " ")
 }
 
 // splitStatements splits a SQL string on semicolons.

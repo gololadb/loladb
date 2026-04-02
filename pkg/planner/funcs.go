@@ -10,6 +10,7 @@ import (
 	"math"
 	"math/rand"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -786,7 +787,7 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 			t2 = t1
 			t1 = time.Now().UTC()
 		}
-		return tuple.DText(formatAge(t1, t2)), nil
+		return ageToInterval(t1, t2), nil
 
 	case "regexp_replace":
 		// regexp_replace(source, pattern, replacement [, flags])
@@ -1570,8 +1571,17 @@ func datumToString(d tuple.Datum) string {
 		return time.Unix(d.I64*86400, 0).UTC().Format("2006-01-02")
 	case tuple.TypeTimestamp:
 		return time.Unix(0, d.I64*1000).UTC().Format("2006-01-02 15:04:05")
-	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID, tuple.TypeBytea, tuple.TypeArray:
 		return d.Text
+	case tuple.TypeInterval:
+		return FormatInterval(d.I32, d.I64)
+	case tuple.TypeMoney:
+		dollars := d.I64 / 100
+		cents := d.I64 % 100
+		if cents < 0 {
+			cents = -cents
+		}
+		return fmt.Sprintf("$%d.%02d", dollars, cents)
 	default:
 		return ""
 	}
@@ -1696,6 +1706,46 @@ func castDatum(val tuple.Datum, targetType tuple.DatumType, typeName string) (tu
 	case tuple.TypeUUID:
 		s := strings.TrimSpace(datumToString(val))
 		return tuple.DUUID(s), nil
+	case tuple.TypeInterval:
+		if val.Type == tuple.TypeInterval {
+			return val, nil
+		}
+		s := datumToString(val)
+		months, us, err := parseInterval(s)
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("invalid input syntax for interval: %q", s)
+		}
+		return tuple.DInterval(months, us), nil
+	case tuple.TypeBytea:
+		if val.Type == tuple.TypeBytea {
+			return val, nil
+		}
+		s := datumToString(val)
+		// Accept \x hex format or raw text.
+		if strings.HasPrefix(s, "\\x") {
+			return tuple.DBytea(s), nil
+		}
+		// Encode raw text as hex.
+		return tuple.DBytea("\\x" + hex.EncodeToString([]byte(s))), nil
+	case tuple.TypeArray:
+		if val.Type == tuple.TypeArray {
+			return val, nil
+		}
+		return tuple.DArray(datumToString(val)), nil
+	case tuple.TypeMoney:
+		if val.Type == tuple.TypeMoney {
+			return val, nil
+		}
+		s := strings.TrimSpace(datumToString(val))
+		// Strip currency symbol and commas.
+		s = strings.TrimPrefix(s, "$")
+		s = strings.ReplaceAll(s, ",", "")
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("invalid input syntax for money: %q", s)
+		}
+		cents := int64(math.Round(f * 100))
+		return tuple.DMoney(cents), nil
 	}
 
 	// Fallback: return as-is.
@@ -1907,6 +1957,33 @@ func formatAge(t1, t2 time.Time) string {
 	return strings.Join(parts, " ")
 }
 
+// ageToInterval computes the difference between two timestamps as a native interval.
+func ageToInterval(t1, t2 time.Time) tuple.Datum {
+	negative := t1.Before(t2)
+	if negative {
+		t1, t2 = t2, t1
+	}
+	years := t1.Year() - t2.Year()
+	months := int(t1.Month()) - int(t2.Month())
+	days := t1.Day() - t2.Day()
+	if days < 0 {
+		months--
+		prev := time.Date(t1.Year(), t1.Month(), 0, 0, 0, 0, 0, t1.Location())
+		days += prev.Day()
+	}
+	if months < 0 {
+		years--
+		months += 12
+	}
+	totalMonths := int32(years*12 + months)
+	us := int64(days) * 24 * 3600 * 1e6
+	if negative {
+		totalMonths = -totalMonths
+		us = -us
+	}
+	return tuple.DInterval(totalMonths, us)
+}
+
 // pgDateFormatToGo converts a PG date format string to a Go time layout.
 func pgDateFormatToGo(pgFmt string) string {
 	r := strings.NewReplacer(
@@ -2063,3 +2140,160 @@ func evalMinMax(args []AnalyzedExpr, row *Row, least bool) (tuple.Datum, error) 
 	}
 	return best, nil
 }
+
+// ---------------------------------------------------------------------------
+// Interval parsing and formatting
+// ---------------------------------------------------------------------------
+
+// parseInterval parses a PostgreSQL interval string like '1 year 2 months 3 days 04:05:06'
+// into months (int32) and microseconds (int64).
+func parseInterval(s string) (months int32, microseconds int64, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, fmt.Errorf("empty interval string")
+	}
+
+	// Try HH:MM:SS or HH:MM:SS.ffffff format first (standalone time).
+	if us, ok := tryParseIntervalTime(s); ok {
+		return 0, us, nil
+	}
+
+	// Parse "N unit" pairs, with optional trailing time component.
+	parts := strings.Fields(s)
+	i := 0
+	for i < len(parts) {
+		// Check if this part is a time component (contains ':').
+		if strings.Contains(parts[i], ":") {
+			us, ok := tryParseIntervalTime(parts[i])
+			if !ok {
+				return 0, 0, fmt.Errorf("invalid interval time component: %q", parts[i])
+			}
+			microseconds += us
+			i++
+			continue
+		}
+
+		// Expect a number followed by a unit.
+		if i+1 >= len(parts) {
+			return 0, 0, fmt.Errorf("interval: missing unit for value %q", parts[i])
+		}
+		val, ferr := strconv.ParseFloat(parts[i], 64)
+		if ferr != nil {
+			return 0, 0, fmt.Errorf("interval: invalid number %q", parts[i])
+		}
+		unit := strings.ToLower(strings.TrimSuffix(parts[i+1], ","))
+		i += 2
+
+		switch {
+		case strings.HasPrefix(unit, "year"):
+			months += int32(val) * 12
+		case strings.HasPrefix(unit, "mon"):
+			months += int32(val)
+		case strings.HasPrefix(unit, "week"):
+			microseconds += int64(val * 7 * 24 * 3600 * 1e6)
+		case strings.HasPrefix(unit, "day"):
+			microseconds += int64(val * 24 * 3600 * 1e6)
+		case strings.HasPrefix(unit, "hour"):
+			microseconds += int64(val * 3600 * 1e6)
+		case strings.HasPrefix(unit, "min"):
+			microseconds += int64(val * 60 * 1e6)
+		case strings.HasPrefix(unit, "sec"):
+			microseconds += int64(val * 1e6)
+		case strings.HasPrefix(unit, "millisec"):
+			microseconds += int64(val * 1e3)
+		case strings.HasPrefix(unit, "microsec"):
+			microseconds += int64(val)
+		default:
+			return 0, 0, fmt.Errorf("interval: unknown unit %q", unit)
+		}
+	}
+	return months, microseconds, nil
+}
+
+// tryParseIntervalTime tries to parse a time component like "04:05:06" or "04:05:06.123456".
+func tryParseIntervalTime(s string) (int64, bool) {
+	if !strings.Contains(s, ":") {
+		return 0, false
+	}
+	negative := false
+	if strings.HasPrefix(s, "-") {
+		negative = true
+		s = s[1:]
+	}
+	timeParts := strings.Split(s, ":")
+	if len(timeParts) < 2 || len(timeParts) > 3 {
+		return 0, false
+	}
+	hours, err := strconv.Atoi(timeParts[0])
+	if err != nil {
+		return 0, false
+	}
+	mins, err := strconv.Atoi(timeParts[1])
+	if err != nil {
+		return 0, false
+	}
+	var secs float64
+	if len(timeParts) == 3 {
+		secs, err = strconv.ParseFloat(timeParts[2], 64)
+		if err != nil {
+			return 0, false
+		}
+	}
+	us := int64(hours)*3600*1e6 + int64(mins)*60*1e6 + int64(secs*1e6)
+	if negative {
+		us = -us
+	}
+	return us, true
+}
+
+// FormatInterval formats an interval (months, microseconds) as a PostgreSQL-style string.
+func FormatInterval(months int32, microseconds int64) string {
+	var parts []string
+	if months != 0 {
+		years := months / 12
+		mons := months % 12
+		if years != 0 {
+			parts = append(parts, fmt.Sprintf("%d years", years))
+		}
+		if mons != 0 {
+			parts = append(parts, fmt.Sprintf("%d mons", mons))
+		}
+	}
+
+	// Break microseconds into days + time.
+	totalUS := microseconds
+	days := totalUS / (24 * 3600 * 1e6)
+	totalUS -= days * 24 * 3600 * 1e6
+	if days != 0 {
+		parts = append(parts, fmt.Sprintf("%d days", days))
+	}
+
+	if totalUS != 0 || len(parts) == 0 {
+		negative := totalUS < 0
+		if negative {
+			totalUS = -totalUS
+		}
+		hours := totalUS / (3600 * 1e6)
+		totalUS -= hours * 3600 * 1e6
+		mins := totalUS / (60 * 1e6)
+		totalUS -= mins * 60 * 1e6
+		secs := totalUS / 1e6
+		totalUS -= secs * 1e6
+
+		timeStr := ""
+		if totalUS > 0 {
+			timeStr = fmt.Sprintf("%02d:%02d:%02d.%06d", hours, mins, secs, totalUS)
+			// Trim trailing zeros from fractional seconds.
+			timeStr = strings.TrimRight(timeStr, "0")
+		} else {
+			timeStr = fmt.Sprintf("%02d:%02d:%02d", hours, mins, secs)
+		}
+		if negative {
+			timeStr = "-" + timeStr
+		}
+		parts = append(parts, timeStr)
+	}
+
+	return strings.Join(parts, " ")
+}
+

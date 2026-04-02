@@ -1,9 +1,13 @@
 package executor
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1617,7 +1621,7 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error) {
 	cols := make([]catalog.ColumnDef, len(n.Columns))
 	for i, c := range n.Columns {
-		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName, NotNull: c.NotNull, DefaultExpr: c.DefaultExpr}
+		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName, Typmod: c.Typmod, NotNull: c.NotNull, DefaultExpr: c.DefaultExpr}
 	}
 	// Set the owner to the current session user.
 	var ownerOID int32
@@ -2150,6 +2154,10 @@ func coerceInsertValues(cols []catalog.Column, values []tuple.Datum) {
 				values[i].Type == tuple.TypeInt64 || values[i].Type == tuple.TypeFloat64 {
 				values[i] = tuple.DNumeric(datumToStringForCoerce(values[i]))
 			}
+			// Enforce NUMERIC(p,s) precision/scale if specified.
+			if values[i].Type == tuple.TypeNumeric && col.Typmod >= 4 {
+				values[i] = enforceNumericPrecision(values[i], col.Typmod)
+			}
 		case tuple.TypeJSON:
 			if values[i].Type == tuple.TypeText {
 				s := values[i].Text
@@ -2161,6 +2169,45 @@ func coerceInsertValues(cols []catalog.Column, values []tuple.Datum) {
 		case tuple.TypeUUID:
 			if values[i].Type == tuple.TypeText {
 				values[i] = tuple.DUUID(strings.TrimSpace(values[i].Text))
+			}
+		case tuple.TypeInterval:
+			if values[i].Type == tuple.TypeText {
+				months, us, err := parseIntervalForCoerce(values[i].Text)
+				if err == nil {
+					values[i] = tuple.DInterval(months, us)
+				}
+			}
+		case tuple.TypeBytea:
+			if values[i].Type == tuple.TypeText {
+				s := values[i].Text
+				if strings.HasPrefix(s, "\\x") {
+					values[i] = tuple.DBytea(s)
+				} else {
+					values[i] = tuple.DBytea("\\x" + hex.EncodeToString([]byte(s)))
+				}
+			}
+		case tuple.TypeMoney:
+			if values[i].Type == tuple.TypeText {
+				s := strings.TrimSpace(values[i].Text)
+				s = strings.TrimPrefix(s, "$")
+				s = strings.ReplaceAll(s, ",", "")
+				if f, err := strconv.ParseFloat(s, 64); err == nil {
+					values[i] = tuple.DMoney(int64(math.Round(f * 100)))
+				}
+			} else if values[i].Type == tuple.TypeInt64 || values[i].Type == tuple.TypeInt32 {
+				var v int64
+				if values[i].Type == tuple.TypeInt32 {
+					v = int64(values[i].I32)
+				} else {
+					v = values[i].I64
+				}
+				values[i] = tuple.DMoney(v * 100)
+			} else if values[i].Type == tuple.TypeFloat64 {
+				values[i] = tuple.DMoney(int64(values[i].F64 * 100))
+			}
+		case tuple.TypeArray:
+			if values[i].Type == tuple.TypeText {
+				values[i] = tuple.DArray(values[i].Text)
 			}
 		}
 	}
@@ -2200,6 +2247,88 @@ func datumToStringForCoerce(d tuple.Datum) string {
 	default:
 		return ""
 	}
+}
+
+// enforceNumericPrecision rounds a NUMERIC datum to the specified precision/scale
+// encoded in the typmod. If the value exceeds the precision, it is truncated.
+func enforceNumericPrecision(d tuple.Datum, typmod int32) tuple.Datum {
+	if d.Type != tuple.TypeNumeric || typmod < 4 {
+		return d
+	}
+	tm := typmod - 4
+	scale := int(tm & 0xFFFF)
+
+	// Parse the numeric string and round to the specified scale.
+	f, _, err := new(big.Float).SetPrec(128).Parse(d.Text, 10)
+	if err != nil {
+		return d
+	}
+
+	// Multiply by 10^scale, round, divide back.
+	pow := new(big.Float).SetPrec(128).SetInt64(1)
+	for i := 0; i < scale; i++ {
+		pow.Mul(pow, new(big.Float).SetInt64(10))
+	}
+	f.Mul(f, pow)
+
+	// Round to integer.
+	intVal, _ := f.Int(nil)
+	f.SetInt(intVal)
+	f.Quo(f, pow)
+
+	// Format with exact scale digits.
+	result := f.Text('f', scale)
+	return tuple.DNumeric(result)
+}
+
+// parseIntervalForCoerce parses a PostgreSQL interval string for INSERT coercion.
+func parseIntervalForCoerce(s string) (int32, int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, fmt.Errorf("empty interval")
+	}
+	// Try time-only format.
+	if strings.Contains(s, ":") && !strings.Contains(s, " ") {
+		parts := strings.Split(s, ":")
+		if len(parts) >= 2 {
+			h, _ := strconv.Atoi(parts[0])
+			m, _ := strconv.Atoi(parts[1])
+			var sec float64
+			if len(parts) == 3 {
+				sec, _ = strconv.ParseFloat(parts[2], 64)
+			}
+			us := int64(h)*3600*1e6 + int64(m)*60*1e6 + int64(sec*1e6)
+			return 0, us, nil
+		}
+	}
+	// Parse "N unit" pairs.
+	var months int32
+	var us int64
+	fields := strings.Fields(s)
+	for i := 0; i+1 < len(fields); i += 2 {
+		val, err := strconv.ParseFloat(fields[i], 64)
+		if err != nil {
+			return 0, 0, err
+		}
+		unit := strings.ToLower(strings.TrimSuffix(fields[i+1], ","))
+		switch {
+		case strings.HasPrefix(unit, "year"):
+			months += int32(val) * 12
+		case strings.HasPrefix(unit, "mon"):
+			months += int32(val)
+		case strings.HasPrefix(unit, "week"):
+			us += int64(val * 7 * 24 * 3600 * 1e6)
+		case strings.HasPrefix(unit, "day"):
+			us += int64(val * 24 * 3600 * 1e6)
+		case strings.HasPrefix(unit, "hour"):
+			us += int64(val * 3600 * 1e6)
+		case strings.HasPrefix(unit, "min"):
+			us += int64(val * 60 * 1e6)
+		case strings.HasPrefix(unit, "sec"):
+			us += int64(val * 1e6)
+		}
+	}
+	return months, us, nil
 }
 
 func validateNotNull(cols []catalog.Column, values []tuple.Datum) error {
