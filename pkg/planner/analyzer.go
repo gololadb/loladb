@@ -507,6 +507,10 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 			return &Const{Value: tuple.DText(schema), ConstType: tuple.TypeText}, nil
 		case parser.SVFOP_CURRENT_CATALOG:
 			return &Const{Value: tuple.DText("loladb"), ConstType: tuple.TypeText}, nil
+		case parser.SVFOP_CURRENT_DATE:
+			return &FuncCallExpr{FuncName: "current_date", Args: nil, ReturnType: tuple.TypeDate}, nil
+		case parser.SVFOP_CURRENT_TIMESTAMP:
+			return &FuncCallExpr{FuncName: "current_timestamp", Args: nil, ReturnType: tuple.TypeTimestamp}, nil
 		default:
 			return nil, fmt.Errorf("analyzer: unsupported SQL value function (op %d)", e.Op)
 		}
@@ -1578,7 +1582,7 @@ func MapSQLType(sqlType string) tuple.DatumType {
 	case "FLOAT8", "DOUBLE PRECISION", "DOUBLE":
 		return tuple.TypeFloat64
 	case "NUMERIC", "DECIMAL":
-		return tuple.TypeFloat64
+		return tuple.TypeNumeric
 	case "BOOL", "BOOLEAN":
 		return tuple.TypeBool
 	case "TEXT", "VARCHAR", "CHAR", "CHARACTER", "CHARACTER VARYING",
@@ -1586,13 +1590,17 @@ func MapSQLType(sqlType string) tuple.DatumType {
 		return tuple.TypeText
 	case "TIMESTAMP", "TIMESTAMPTZ",
 		"TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP WITH TIME ZONE":
-		return tuple.TypeText
+		return tuple.TypeTimestamp
 	case "DATE":
-		return tuple.TypeText
+		return tuple.TypeDate
 	case "TIME", "TIMETZ", "TIME WITHOUT TIME ZONE", "TIME WITH TIME ZONE":
 		return tuple.TypeText
 	case "INTERVAL":
 		return tuple.TypeText
+	case "JSON", "JSONB":
+		return tuple.TypeJSON
+	case "UUID":
+		return tuple.TypeUUID
 	case "BYTEA":
 		return tuple.TypeText
 	case "TSVECTOR", "TSQUERY":

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -1336,6 +1337,9 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 			values = mapToRow(colNames, modifiedNew)
 		}
 
+		// Coerce values to match column types (e.g., text → date, text → json).
+		coerceInsertValues(tableCols, values)
+
 		// Validate NOT NULL constraints.
 		if err := validateNotNull(tableCols, values); err != nil {
 			return nil, err
@@ -2109,6 +2113,95 @@ func (ex *Executor) evalDefault(col catalog.Column) tuple.Datum {
 }
 
 // validateNotNull checks that NOT NULL columns do not contain NULL values.
+// coerceInsertValues converts text values to the target column type
+// when the column expects a typed datum (date, timestamp, numeric, json, uuid).
+func coerceInsertValues(cols []catalog.Column, values []tuple.Datum) {
+	for i, col := range cols {
+		if i >= len(values) || values[i].Type == tuple.TypeNull {
+			continue
+		}
+		colType := tuple.DatumType(col.Type)
+		if values[i].Type == colType {
+			continue // already correct type
+		}
+		switch colType {
+		case tuple.TypeDate:
+			if values[i].Type == tuple.TypeText {
+				t, err := parseTimestampForCoerce(values[i].Text)
+				if err == nil {
+					values[i] = tuple.DDate(t.Unix() / 86400)
+				}
+			} else if values[i].Type == tuple.TypeTimestamp {
+				// Truncate timestamp to date (days since epoch).
+				values[i] = tuple.DDate(values[i].I64 / 1_000_000 / 86400)
+			}
+		case tuple.TypeTimestamp:
+			if values[i].Type == tuple.TypeText {
+				t, err := parseTimestampForCoerce(values[i].Text)
+				if err == nil {
+					values[i] = tuple.DTimestamp(t.UnixMicro())
+				}
+			} else if values[i].Type == tuple.TypeDate {
+				// Promote date to timestamp (midnight).
+				values[i] = tuple.DTimestamp(values[i].I64 * 86400 * 1_000_000)
+			}
+		case tuple.TypeNumeric:
+			if values[i].Type == tuple.TypeText || values[i].Type == tuple.TypeInt32 ||
+				values[i].Type == tuple.TypeInt64 || values[i].Type == tuple.TypeFloat64 {
+				values[i] = tuple.DNumeric(datumToStringForCoerce(values[i]))
+			}
+		case tuple.TypeJSON:
+			if values[i].Type == tuple.TypeText {
+				s := values[i].Text
+				if !json.Valid([]byte(s)) {
+					continue // leave as text; catalog type check will catch it
+				}
+				values[i] = tuple.DJSON(s)
+			}
+		case tuple.TypeUUID:
+			if values[i].Type == tuple.TypeText {
+				values[i] = tuple.DUUID(strings.TrimSpace(values[i].Text))
+			}
+		}
+	}
+}
+
+// parseTimestampForCoerce parses common date/timestamp formats.
+func parseTimestampForCoerce(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	formats := []string{
+		"2006-01-02 15:04:05.999999-07",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+		"01/02/2006",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognized timestamp format: %q", s)
+}
+
+// datumToStringForCoerce converts a datum to its string representation for NUMERIC coercion.
+func datumToStringForCoerce(d tuple.Datum) string {
+	switch d.Type {
+	case tuple.TypeInt32:
+		return fmt.Sprintf("%d", d.I32)
+	case tuple.TypeInt64:
+		return fmt.Sprintf("%d", d.I64)
+	case tuple.TypeFloat64:
+		return fmt.Sprintf("%g", d.F64)
+	case tuple.TypeText:
+		return d.Text
+	default:
+		return ""
+	}
+}
+
 func validateNotNull(cols []catalog.Column, values []tuple.Datum) error {
 	for i, col := range cols {
 		if !col.NotNull {

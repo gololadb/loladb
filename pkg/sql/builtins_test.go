@@ -1,9 +1,11 @@
 package sql
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -24,7 +26,32 @@ func evalExpr(t *testing.T, ex *Executor, expr string) tuple.Datum {
 func evalText(t *testing.T, ex *Executor, expr string) string {
 	t.Helper()
 	d := evalExpr(t, ex, expr)
-	return d.Text
+	return datumDisplayText(d)
+}
+
+// datumDisplayText returns the display text for any datum type.
+func datumDisplayText(d tuple.Datum) string {
+	switch d.Type {
+	case tuple.TypeText, tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+		return d.Text
+	case tuple.TypeDate:
+		return time.Unix(d.I64*86400, 0).UTC().Format("2006-01-02")
+	case tuple.TypeTimestamp:
+		return time.Unix(0, d.I64*1000).UTC().Format("2006-01-02 15:04:05")
+	case tuple.TypeInt32:
+		return fmt.Sprintf("%d", d.I32)
+	case tuple.TypeInt64:
+		return fmt.Sprintf("%d", d.I64)
+	case tuple.TypeFloat64:
+		return fmt.Sprintf("%g", d.F64)
+	case tuple.TypeBool:
+		if d.Bool {
+			return "true"
+		}
+		return "false"
+	default:
+		return ""
+	}
 }
 
 func evalInt(t *testing.T, ex *Executor, expr string) int64 {

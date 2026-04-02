@@ -370,6 +370,27 @@ func handleCatalogQuery(primaryFrom, upper string, provider CatalogProvider) (*Q
 					typName = "bigint"
 					attLen = 8
 					attAlign = "d"
+				} else if c.TypeOID == 1082 { // date
+					typName = "date"
+					attLen = 4
+					attAlign = "i"
+				} else if c.TypeOID == 1114 { // timestamp
+					typName = "timestamp without time zone"
+					attLen = 8
+					attAlign = "d"
+				} else if c.TypeOID == 1700 { // numeric
+					typName = "numeric"
+					attLen = -1
+					attAlign = "i"
+				} else if c.TypeOID == 114 || c.TypeOID == 3802 { // json/jsonb
+					typName = "jsonb"
+					storage = "x"
+					attLen = -1
+					attAlign = "i"
+				} else if c.TypeOID == 2950 { // uuid
+					typName = "uuid"
+					attLen = 16
+					attAlign = "c"
 				}
 				rows = append(rows, []tuple.Datum{
 					tuple.DInt32(t.OID),          // attrelid

@@ -2,7 +2,9 @@ package planner
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
+	"time"
 
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -275,6 +277,10 @@ func (e *ExprBinOp) evalArithmetic(row *Row) (tuple.Datum, error) {
 	if err != nil {
 		return tuple.DNull(), err
 	}
+	// If either operand is NUMERIC, use arbitrary-precision arithmetic.
+	if lv.Type == tuple.TypeNumeric || rv.Type == tuple.TypeNumeric {
+		return evalNumericArith(e.Op, lv, rv)
+	}
 	lf, lok := datumToFloat(lv)
 	rf, rok := datumToFloat(rv)
 	if !lok || !rok {
@@ -324,6 +330,63 @@ func (e *ExprBinOp) evalArithmetic(row *Row) (tuple.Datum, error) {
 		return tuple.DInt64(li % ri), nil
 	}
 	return tuple.DNull(), nil
+}
+
+// evalNumericArith performs arbitrary-precision arithmetic on NUMERIC values.
+func evalNumericArith(op OpKind, lv, rv tuple.Datum) (tuple.Datum, error) {
+	ls := numericToString(lv)
+	rs := numericToString(rv)
+	lf, _, err := new(big.Float).SetPrec(128).Parse(ls, 10)
+	if err != nil {
+		return tuple.DNull(), fmt.Errorf("invalid numeric: %q", ls)
+	}
+	rf, _, err := new(big.Float).SetPrec(128).Parse(rs, 10)
+	if err != nil {
+		return tuple.DNull(), fmt.Errorf("invalid numeric: %q", rs)
+	}
+	var result *big.Float
+	switch op {
+	case OpAdd:
+		result = new(big.Float).SetPrec(128).Add(lf, rf)
+	case OpSub:
+		result = new(big.Float).SetPrec(128).Sub(lf, rf)
+	case OpMul:
+		result = new(big.Float).SetPrec(128).Mul(lf, rf)
+	case OpDiv:
+		if rf.Sign() == 0 {
+			return tuple.DNull(), fmt.Errorf("division by zero")
+		}
+		result = new(big.Float).SetPrec(128).Quo(lf, rf)
+	case OpMod:
+		if rf.Sign() == 0 {
+			return tuple.DNull(), fmt.Errorf("division by zero")
+		}
+		// big.Float doesn't have Mod; use integer truncation.
+		q := new(big.Float).SetPrec(128).Quo(lf, rf)
+		qi, _ := q.Int(nil)
+		qf := new(big.Float).SetPrec(128).SetInt(qi)
+		result = new(big.Float).SetPrec(128).Sub(lf, new(big.Float).SetPrec(128).Mul(qf, rf))
+	default:
+		return tuple.DNull(), fmt.Errorf("unsupported numeric operation")
+	}
+	return tuple.DNumeric(result.Text('f', -1)), nil
+}
+
+func numericToString(d tuple.Datum) string {
+	switch d.Type {
+	case tuple.TypeNumeric:
+		return d.Text
+	case tuple.TypeInt32:
+		return fmt.Sprintf("%d", d.I32)
+	case tuple.TypeInt64:
+		return fmt.Sprintf("%d", d.I64)
+	case tuple.TypeFloat64:
+		return fmt.Sprintf("%g", d.F64)
+	case tuple.TypeText:
+		return d.Text
+	default:
+		return "0"
+	}
 }
 
 // ExprNot negates a boolean expression.
@@ -631,6 +694,25 @@ func datumToBool(d tuple.Datum) bool {
 var EnumOrdinalFunc func(val string) int
 
 // CompareDatums returns -1, 0, or 1 comparing two datums.
+// parseDateText parses a text string into a TypeDate datum.
+func parseDateText(s string) (tuple.Datum, error) {
+	t, err := parseTimestamp(s)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	days := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).Unix() / 86400
+	return tuple.DDate(days), nil
+}
+
+// parseTimestampText parses a text string into a TypeTimestamp datum.
+func parseTimestampText(s string) (tuple.Datum, error) {
+	t, err := parseTimestamp(s)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	return tuple.DTimestamp(t.UnixMicro()), nil
+}
+
 func CompareDatums(a, b tuple.Datum) int {
 	// Coerce int32/int64
 	ai, aok := toInt64(a)
@@ -656,6 +738,32 @@ func CompareDatums(a, b tuple.Datum) int {
 			return 1
 		}
 		return 0
+	}
+
+	// Coerce text to DATE/TIMESTAMP for cross-type comparisons.
+	if a.Type == tuple.TypeDate && b.Type == tuple.TypeText {
+		if parsed, err := parseDateText(b.Text); err == nil {
+			b = parsed
+		}
+	} else if a.Type == tuple.TypeText && b.Type == tuple.TypeDate {
+		if parsed, err := parseDateText(a.Text); err == nil {
+			a = parsed
+		}
+	} else if a.Type == tuple.TypeTimestamp && b.Type == tuple.TypeText {
+		if parsed, err := parseTimestampText(b.Text); err == nil {
+			b = parsed
+		}
+	} else if a.Type == tuple.TypeText && b.Type == tuple.TypeTimestamp {
+		if parsed, err := parseTimestampText(a.Text); err == nil {
+			a = parsed
+		}
+	}
+
+	// Coerce text to NUMERIC for cross-type comparisons.
+	if a.Type == tuple.TypeNumeric && b.Type == tuple.TypeText {
+		b = tuple.DNumeric(b.Text)
+	} else if a.Type == tuple.TypeText && b.Type == tuple.TypeNumeric {
+		a = tuple.DNumeric(a.Text)
 	}
 
 	if a.Type != b.Type {
@@ -702,9 +810,45 @@ func CompareDatums(a, b tuple.Datum) int {
 			return -1
 		}
 		return 1
+	case tuple.TypeDate, tuple.TypeTimestamp:
+		// Both stored as I64 (days or microseconds since epoch).
+		if a.I64 < b.I64 {
+			return -1
+		}
+		if a.I64 > b.I64 {
+			return 1
+		}
+		return 0
+	case tuple.TypeNumeric:
+		return compareNumericStrings(a.Text, b.Text)
+	case tuple.TypeJSON, tuple.TypeUUID:
+		if a.Text < b.Text {
+			return -1
+		}
+		if a.Text > b.Text {
+			return 1
+		}
+		return 0
 	default:
 		return 0
 	}
+}
+
+// compareNumericStrings compares two decimal number strings.
+func compareNumericStrings(a, b string) int {
+	af, _, erra := new(big.Float).Parse(a, 10)
+	bf, _, errb := new(big.Float).Parse(b, 10)
+	if erra != nil || errb != nil {
+		// Fallback to string comparison.
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+		return 0
+	}
+	return af.Cmp(bf)
 }
 
 func toFloat64(d tuple.Datum) (float64, bool) {
@@ -715,6 +859,13 @@ func toFloat64(d tuple.Datum) (float64, bool) {
 		return float64(d.I32), true
 	case tuple.TypeInt64:
 		return float64(d.I64), true
+	case tuple.TypeNumeric:
+		f, _, err := new(big.Float).Parse(d.Text, 10)
+		if err != nil {
+			return 0, false
+		}
+		v, _ := f.Float64()
+		return v, true
 	default:
 		return 0, false
 	}

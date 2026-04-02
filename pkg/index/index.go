@@ -47,6 +47,12 @@ func DatumToInt64(d tuple.Datum) (int64, bool) {
 			bits ^= 1 << 63
 		}
 		return int64(bits), true
+	case tuple.TypeDate, tuple.TypeTimestamp:
+		return d.I64, true
+	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+		h := fnv.New64a()
+		h.Write([]byte(d.Text))
+		return int64(h.Sum64()), true
 	default:
 		return 0, false
 	}
@@ -59,6 +65,10 @@ func DatumToInt64(d tuple.Datum) (int64, bool) {
 func DatumToInt64Sortable(d tuple.Datum) (int64, bool) {
 	switch d.Type {
 	case tuple.TypeText:
+		var buf [8]byte
+		copy(buf[:], d.Text)
+		return int64(binary.BigEndian.Uint64(buf[:])), true
+	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
 		var buf [8]byte
 		copy(buf[:], d.Text)
 		return int64(binary.BigEndian.Uint64(buf[:])), true

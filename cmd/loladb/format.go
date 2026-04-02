@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	loladbsql "github.com/gololadb/loladb/pkg/sql"
 	"github.com/gololadb/loladb/pkg/tuple"
@@ -142,6 +143,12 @@ func datumString(d tuple.Datum) string {
 		return "false"
 	case tuple.TypeFloat64:
 		return fmt.Sprintf("%g", d.F64)
+	case tuple.TypeDate:
+		return time.Unix(d.I64*86400, 0).UTC().Format("2006-01-02")
+	case tuple.TypeTimestamp:
+		return time.Unix(0, d.I64*1000).UTC().Format("2006-01-02 15:04:05")
+	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+		return d.Text
 	default:
 		return "?"
 	}
@@ -161,6 +168,12 @@ func datumToInterface(d tuple.Datum) interface{} {
 		return d.Bool
 	case tuple.TypeFloat64:
 		return d.F64
+	case tuple.TypeDate:
+		return time.Unix(d.I64*86400, 0).UTC().Format("2006-01-02")
+	case tuple.TypeTimestamp:
+		return time.Unix(0, d.I64*1000).UTC().Format("2006-01-02 15:04:05")
+	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+		return d.Text
 	default:
 		return nil
 	}

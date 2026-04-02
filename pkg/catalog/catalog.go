@@ -541,6 +541,16 @@ func pgTypeOIDToDatumType(oid int32) int32 {
 		return int32(tuple.TypeFloat64)
 	case OIDText, OIDName, OIDChar:
 		return int32(tuple.TypeText)
+	case OIDDate:
+		return int32(tuple.TypeDate)
+	case OIDTimestamp:
+		return int32(tuple.TypeTimestamp)
+	case OIDNumeric:
+		return int32(tuple.TypeNumeric)
+	case OIDJSON, OIDJSONB:
+		return int32(tuple.TypeJSON)
+	case OIDUUID:
+		return int32(tuple.TypeUUID)
 	default:
 		return int32(tuple.TypeText) // fallback
 	}
@@ -559,6 +569,16 @@ func datumTypeToPgTypeOID(dt tuple.DatumType) int32 {
 		return OIDFloat8
 	case tuple.TypeText:
 		return OIDText
+	case tuple.TypeDate:
+		return OIDDate
+	case tuple.TypeTimestamp:
+		return OIDTimestamp
+	case tuple.TypeNumeric:
+		return OIDNumeric
+	case tuple.TypeJSON:
+		return OIDJSON
+	case tuple.TypeUUID:
+		return OIDUUID
 	default:
 		return OIDText
 	}

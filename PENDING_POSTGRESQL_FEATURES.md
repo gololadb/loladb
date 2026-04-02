@@ -26,7 +26,7 @@ For context, here is what is currently implemented:
 - **Constraints:** PRIMARY KEY, UNIQUE (with auto-index creation and enforcement)
 - **Aggregates:** count, sum, avg, min, max, bool_and, bool_or, every, string_agg, array_agg
 - **Functions:** ~65 scalar functions (math, string, date/time, regex, formatting, encoding)
-- **Types:** int32, int64, float64, text, bool (+ domains, enums)
+- **Types:** int32, int64, float64, text, bool, date, timestamp, numeric, json/jsonb, uuid (+ domains, enums)
 - **Indexes:** B+Tree, Hash, BRIN, GIN, GiST, SP-GiST
 - **Storage:** Slotted pages, TOAST, WAL, buffer pool (clock-sweep), freelist
 - **Concurrency:** MVCC with snapshot isolation, transaction manager
@@ -82,29 +82,31 @@ Not applicable until native array types are added.
 
 ## 2. Data Types
 
-### 🔴 DATE / TIME / TIMESTAMP / INTERVAL (native)
-
-Currently stored as text strings. There are no native date/time datum types.
-Functions like `extract()`, `date_trunc()`, and `age()` parse text on every call.
-A native representation would enable proper comparison, indexing, and arithmetic.
-
-### 🔴 NUMERIC / DECIMAL (arbitrary precision)
-
-No arbitrary-precision numeric type. Only int32, int64, and float64 are available.
-Financial and scientific applications need exact decimal arithmetic.
-
-### 🔴 JSON / JSONB
+### 🟡 INTERVAL type
 
 ```sql
-SELECT data->>'name' FROM events WHERE data @> '{"type": "click"}';
+SELECT now() - INTERVAL '30 days';
+SELECT age('2024-01-01'::date, '2023-01-01'::date);
 ```
 
-No JSON support. This is one of PostgreSQL's most popular features.
+DATE, TIMESTAMP, NUMERIC, JSON/JSONB, and UUID are now native types. INTERVAL
+is still missing — needed for date arithmetic and `age()` return values.
 
-### 🔴 UUID (native type)
+### 🟡 NUMERIC precision and scale
 
-`gen_random_uuid()` returns text. A native UUID type would enable proper storage
-(16 bytes vs 36 bytes as text) and indexing.
+```sql
+CREATE TABLE t (price NUMERIC(10, 2));
+```
+
+NUMERIC is implemented with arbitrary precision via `math/big.Float`, but
+`NUMERIC(p, s)` precision/scale constraints are not enforced.
+
+### 🟡 JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `?`)
+
+JSON/JSONB types are stored natively and functions like `json_extract_path_text`,
+`json_array_length`, `json_typeof`, `json_build_object`, `to_json`/`to_jsonb`
+are available. However, the PostgreSQL operator syntax (`->`, `->>`, `@>`, `?`)
+is not yet supported — only function-call syntax works.
 
 ### 🟡 BYTEA
 
@@ -389,7 +391,8 @@ SELECT array_agg(name) FROM users;  -- returns text, not array
 
 ### 🟡 JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `?`)
 
-Blocked on JSON/JSONB type support.
+JSON/JSONB types exist and function-call equivalents work (`json_extract_path_text`,
+etc.), but the operator syntax is not yet supported.
 
 ### 🟡 Pattern matching operators (`~`, `~*`, `!~`, `!~*`)
 
@@ -664,9 +667,6 @@ SELECT pg_advisory_lock(12345);
 | Real transactions (BEGIN/COMMIT/ROLLBACK) | Transactions |
 | FOREIGN KEY | Constraints |
 | CHECK constraints | Constraints |
-| Native DATE/TIMESTAMP types | Types |
-| NUMERIC (arbitrary precision) | Types |
-| JSON/JSONB | Types |
 | Type casting with `::` | Operators |
 | COPY | Bulk I/O |
 | VACUUM | Maintenance |
@@ -688,6 +688,9 @@ SELECT pg_advisory_lock(12345);
 | TEMPORARY tables | DDL |
 | Table partitioning | DDL |
 | CREATE TABLE AS | DDL |
+| INTERVAL type | Types |
+| NUMERIC precision/scale | Types |
+| JSON operators (`->`, `->>`, `@>`, `?`) | Operators |
 | Arrays (native type) | Types |
 | Statistical aggregates | Aggregates |
 | Ordered-set aggregates | Aggregates |

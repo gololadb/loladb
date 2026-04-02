@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
@@ -20,9 +21,11 @@ import (
 func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, error) {
 	switch strings.ToLower(name) {
 	case "now", "current_timestamp":
-		return tuple.DText(time.Now().UTC().Format("2006-01-02 15:04:05")), nil
+		return tuple.DTimestamp(time.Now().UTC().UnixMicro()), nil
 	case "current_date":
-		return tuple.DText(time.Now().UTC().Format("2006-01-02")), nil
+		now := time.Now().UTC()
+		days := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Unix() / 86400
+		return tuple.DDate(days), nil
 	case "nextval":
 		if len(args) < 1 {
 			return tuple.DNull(), fmt.Errorf("nextval requires 1 argument")
@@ -654,7 +657,7 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		cryptoRand.Read(uuid[:])
 		uuid[6] = (uuid[6] & 0x0f) | 0x40 // version 4
 		uuid[8] = (uuid[8] & 0x3f) | 0x80 // variant 10
-		return tuple.DText(fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		return tuple.DUUID(fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 			uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])), nil
 
 	case "overlay":
@@ -948,7 +951,7 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		if err != nil {
 			return tuple.DNull(), fmt.Errorf("to_date: cannot parse %q with format %q: %v", datumToString(val), datumToString(fmtVal), err)
 		}
-		return tuple.DText(t.Format("2006-01-02")), nil
+		return tuple.DDate(t.Unix() / 86400), nil
 
 	case "to_timestamp":
 		if len(args) < 1 {
@@ -970,7 +973,7 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 			sec := int64(f)
 			nsec := int64((f - float64(sec)) * 1e9)
 			t := time.Unix(sec, nsec).UTC()
-			return tuple.DText(t.Format("2006-01-02 15:04:05")), nil
+			return tuple.DTimestamp(t.UnixMicro()), nil
 		}
 		// Two-arg: string + format
 		fmtVal, err := args[1].Eval(row)
@@ -982,7 +985,7 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		if err != nil {
 			return tuple.DNull(), fmt.Errorf("to_timestamp: cannot parse %q with format %q: %v", datumToString(val), datumToString(fmtVal), err)
 		}
-		return tuple.DText(t.Format("2006-01-02 15:04:05")), nil
+		return tuple.DTimestamp(t.UnixMicro()), nil
 
 	case "encode":
 		if len(args) < 2 {
@@ -1124,6 +1127,140 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 			return tuple.DInt64(0), nil
 		}
 		return tuple.DInt64(int64(len(strings.Split(s, ",")))), nil
+
+	// --- JSON functions ---
+	case "json_extract_path_text", "jsonb_extract_path_text":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("%s requires at least 2 arguments", name)
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		jsonStr := datumToString(val)
+		var obj interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &obj); err != nil {
+			return tuple.DNull(), fmt.Errorf("%s: invalid JSON: %v", name, err)
+		}
+		// Walk the path.
+		current := obj
+		for i := 1; i < len(args); i++ {
+			keyVal, err := args[i].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			key := datumToString(keyVal)
+			m, ok := current.(map[string]interface{})
+			if !ok {
+				return tuple.DNull(), nil
+			}
+			current, ok = m[key]
+			if !ok {
+				return tuple.DNull(), nil
+			}
+		}
+		if current == nil {
+			return tuple.DNull(), nil
+		}
+		return tuple.DText(fmt.Sprintf("%v", current)), nil
+
+	case "json_array_length", "jsonb_array_length":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("%s requires 1 argument", name)
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		var arr []interface{}
+		if err := json.Unmarshal([]byte(datumToString(val)), &arr); err != nil {
+			return tuple.DNull(), fmt.Errorf("%s: not a JSON array", name)
+		}
+		return tuple.DInt64(int64(len(arr))), nil
+
+	case "json_typeof", "jsonb_typeof":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("%s requires 1 argument", name)
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		var obj interface{}
+		if err := json.Unmarshal([]byte(datumToString(val)), &obj); err != nil {
+			return tuple.DNull(), fmt.Errorf("%s: invalid JSON", name)
+		}
+		switch obj.(type) {
+		case map[string]interface{}:
+			return tuple.DText("object"), nil
+		case []interface{}:
+			return tuple.DText("array"), nil
+		case string:
+			return tuple.DText("string"), nil
+		case float64:
+			return tuple.DText("number"), nil
+		case bool:
+			return tuple.DText("boolean"), nil
+		case nil:
+			return tuple.DText("null"), nil
+		default:
+			return tuple.DText("unknown"), nil
+		}
+
+	case "json_build_object", "jsonb_build_object":
+		if len(args)%2 != 0 {
+			return tuple.DNull(), fmt.Errorf("%s requires an even number of arguments", name)
+		}
+		m := make(map[string]interface{})
+		for i := 0; i < len(args); i += 2 {
+			kv, err := args[i].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			vv, err := args[i+1].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			key := datumToString(kv)
+			m[key] = datumToJSONValue(vv)
+		}
+		b, _ := json.Marshal(m)
+		return tuple.DJSON(string(b)), nil
+
+	case "row_to_json":
+		// Simplified: convert a text representation to JSON.
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("row_to_json requires 1 argument")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		return tuple.DJSON(datumToString(val)), nil
+
+	case "to_json", "to_jsonb":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("%s requires 1 argument", name)
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DJSON("null"), nil
+		}
+		v := datumToJSONValue(val)
+		b, _ := json.Marshal(v)
+		return tuple.DJSON(string(b)), nil
 
 	// --- Math functions ---
 	case "abs":
@@ -1429,6 +1566,12 @@ func datumToString(d tuple.Datum) string {
 			return "true"
 		}
 		return "false"
+	case tuple.TypeDate:
+		return time.Unix(d.I64*86400, 0).UTC().Format("2006-01-02")
+	case tuple.TypeTimestamp:
+		return time.Unix(0, d.I64*1000).UTC().Format("2006-01-02 15:04:05")
+	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
+		return d.Text
 	default:
 		return ""
 	}
@@ -1523,6 +1666,36 @@ func castDatum(val tuple.Datum, targetType tuple.DatumType, typeName string) (tu
 		}
 	case tuple.TypeText:
 		return tuple.DText(datumToString(val)), nil
+	case tuple.TypeDate:
+		s := datumToString(val)
+		t, err := parseTimestamp(s)
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("invalid input syntax for date: %q", s)
+		}
+		days := t.Unix() / 86400
+		return tuple.DDate(days), nil
+	case tuple.TypeTimestamp:
+		s := datumToString(val)
+		t, err := parseTimestamp(s)
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("invalid input syntax for timestamp: %q", s)
+		}
+		us := t.UnixMicro()
+		return tuple.DTimestamp(us), nil
+	case tuple.TypeNumeric:
+		s := datumToString(val)
+		// Validate it's a valid number.
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return tuple.DNull(), fmt.Errorf("invalid input syntax for numeric: %q", s)
+		}
+		return tuple.DNumeric(s), nil
+	case tuple.TypeJSON:
+		s := datumToString(val)
+		return tuple.DJSON(s), nil
+	case tuple.TypeUUID:
+		s := strings.TrimSpace(datumToString(val))
+		return tuple.DUUID(s), nil
 	}
 
 	// Fallback: return as-is.
@@ -1581,6 +1754,30 @@ func numericResult(f float64, origType tuple.DatumType) tuple.Datum {
 		return tuple.DInt64(int64(f))
 	default:
 		return tuple.DFloat64(f)
+	}
+}
+
+// datumToJSONValue converts a datum to a Go value suitable for json.Marshal.
+func datumToJSONValue(d tuple.Datum) interface{} {
+	switch d.Type {
+	case tuple.TypeNull:
+		return nil
+	case tuple.TypeBool:
+		return d.Bool
+	case tuple.TypeInt32:
+		return d.I32
+	case tuple.TypeInt64:
+		return d.I64
+	case tuple.TypeFloat64:
+		return d.F64
+	case tuple.TypeJSON:
+		var v interface{}
+		if err := json.Unmarshal([]byte(d.Text), &v); err == nil {
+			return v
+		}
+		return d.Text
+	default:
+		return datumToString(d)
 	}
 }
 
@@ -1673,7 +1870,7 @@ func truncTimestamp(field string, t time.Time) (tuple.Datum, error) {
 	default:
 		return tuple.DNull(), fmt.Errorf("date_trunc: unsupported field %q", field)
 	}
-	return tuple.DText(result.Format("2006-01-02 15:04:05")), nil
+	return tuple.DTimestamp(result.UnixMicro()), nil
 }
 
 // formatAge formats the difference between two timestamps as a PG-style interval string.

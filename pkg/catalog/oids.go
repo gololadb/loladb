@@ -8,16 +8,22 @@ const (
 	OIDPublic    = 2200 // public schema
 
 	// Type OIDs (matching PostgreSQL).
-	OIDInt4    = 23  // INT / INT4
-	OIDInt8    = 20  // BIGINT / INT8
-	OIDText    = 25  // TEXT
-	OIDBool    = 16  // BOOL
-	OIDFloat8  = 701 // FLOAT8 / DOUBLE PRECISION
-	OIDName    = 19  // NAME (we treat as TEXT internally)
-	OIDOid     = 26  // OID type (we treat as INT4 internally)
-	OIDInt2    = 21  // SMALLINT / INT2
-	OIDChar    = 18  // "char" (single-byte type, we treat as TEXT)
-	OIDInt2Vec = 22  // INT2VECTOR (we treat as TEXT)
+	OIDInt4      = 23   // INT / INT4
+	OIDInt8      = 20   // BIGINT / INT8
+	OIDText      = 25   // TEXT
+	OIDBool      = 16   // BOOL
+	OIDFloat8    = 701  // FLOAT8 / DOUBLE PRECISION
+	OIDName      = 19   // NAME (we treat as TEXT internally)
+	OIDOid       = 26   // OID type (we treat as INT4 internally)
+	OIDInt2      = 21   // SMALLINT / INT2
+	OIDChar      = 18   // "char" (single-byte type, we treat as TEXT)
+	OIDInt2Vec   = 22   // INT2VECTOR (we treat as TEXT)
+	OIDDate      = 1082 // DATE
+	OIDTimestamp = 1114 // TIMESTAMP WITHOUT TIME ZONE
+	OIDNumeric   = 1700 // NUMERIC / DECIMAL
+	OIDJSON      = 114  // JSON
+	OIDJSONB     = 3802 // JSONB
+	OIDUUID      = 2950 // UUID
 
 	// Relation OIDs for catalog tables.
 	OIDPgNamespace   = 2615
