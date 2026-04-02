@@ -787,6 +787,40 @@ func (c *Catalog) InsertInto(tableName string, values []tuple.Datum) (slottedpag
 		return slottedpage.ItemID{}, fmt.Errorf("catalog: toast %q: %w", tableName, err)
 	}
 
+	// Check unique constraints before inserting.
+	indexes, err := c.getIndexesForTable(rel.OID)
+	if err != nil {
+		indexes = nil // non-fatal: skip uniqueness check
+	}
+	for _, idx := range indexes {
+		if !c.isUniqueIndex(idx) {
+			continue
+		}
+		colIdx := idx.ColNum - 1
+		if int(colIdx) >= len(values) {
+			continue
+		}
+		val := values[colIdx]
+		if val.Type == tuple.TypeNull {
+			continue // NULLs are not considered duplicates
+		}
+		key := datumToInt64Key(val)
+		am := c.getAM(idx.Method)
+		scan := am.BeginScan(uint32(idx.HeadPage))
+		scan.Rescan([]index.ScanKey{
+			{AttrNum: 1, Strategy: index.StrategyEqual, Value: tuple.DInt64(key)},
+		})
+		if _, ok, _ := scan.Next(index.ForwardScan); ok {
+			scan.End()
+			colName := ""
+			if int(colIdx) < len(cols) {
+				colName = cols[colIdx].Name
+			}
+			return slottedpage.ItemID{}, fmt.Errorf("duplicate key value violates unique constraint %q (column %q)", idx.Name, colName)
+		}
+		scan.End()
+	}
+
 	xid := c.Eng.TxMgr.Begin()
 	id, err := c.Eng.Insert(xid, uint32(rel.HeadPage), values)
 	if err != nil {
@@ -797,12 +831,6 @@ func (c *Catalog) InsertInto(tableName string, values []tuple.Datum) (slottedpag
 
 	// Update relpages if a new page was allocated.
 	c.updateRelPages(rel)
-
-	// Update all indexes on this table.
-	indexes, err := c.getIndexesForTable(rel.OID)
-	if err != nil {
-		return id, nil // non-fatal: data was inserted
-	}
 	for _, idx := range indexes {
 		colIdx := idx.ColNum - 1 // 0-based
 		if int(colIdx) >= len(values) {
@@ -862,6 +890,240 @@ func (c *Catalog) Delete(tableName string, id slottedpage.ItemID) error {
 		return err
 	}
 	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
+
+// TruncateTable removes all rows from a table by reinitializing its
+// head page and freeing any overflow pages.
+func (c *Catalog) TruncateTable(name string) error {
+	rel, err := c.FindRelation(name)
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		return fmt.Errorf("catalog: table %q not found", name)
+	}
+	if rel.Kind != RelKindTable {
+		return fmt.Errorf("catalog: %q is not a table", name)
+	}
+
+	headPage := uint32(rel.HeadPage)
+
+	// Free overflow pages (all pages after the head).
+	buf, err := c.Eng.Pool.FetchPage(headPage)
+	if err != nil {
+		return err
+	}
+	sp, err := slottedpage.FromBytes(buf)
+	if err != nil {
+		c.Eng.Pool.ReleasePage(headPage)
+		return err
+	}
+	next := sp.NextPage()
+	c.Eng.Pool.ReleasePage(headPage)
+
+	for next != 0 {
+		nbuf, err := c.Eng.Pool.FetchPage(next)
+		if err != nil {
+			break
+		}
+		nsp, err := slottedpage.FromBytes(nbuf)
+		if err != nil {
+			c.Eng.Pool.ReleasePage(next)
+			break
+		}
+		following := nsp.NextPage()
+		c.Eng.Pool.ReleasePage(next)
+		_ = c.Eng.FreePage(next)
+		next = following
+	}
+
+	// Reinitialize the head page as an empty heap page.
+	buf, err = c.Eng.Pool.FetchPage(headPage)
+	if err != nil {
+		return err
+	}
+	fresh := slottedpage.Init(slottedpage.PageTypeHeap, headPage, 0)
+	copy(buf, fresh.Bytes())
+	c.Eng.Pool.MarkDirty(headPage)
+	c.Eng.Pool.ReleasePage(headPage)
+
+	c.cache.invalidate()
+	return nil
+}
+
+// DropIndex removes an index by name from pg_class.
+func (c *Catalog) DropIndex(name string, missingOk bool) error {
+	idx, err := c.findIndex(name)
+	if err != nil {
+		return err
+	}
+	if idx == nil {
+		if missingOk {
+			return nil
+		}
+		return fmt.Errorf("catalog: index %q does not exist", name)
+	}
+
+	// Delete the pg_class row for this index.
+	if err := c.deleteRelationByOID(idx.OID); err != nil {
+		return err
+	}
+	c.cache.invalidate()
+	return nil
+}
+
+// DropView removes a view by name from pg_class and its _RETURN rule.
+func (c *Catalog) DropView(name string, missingOk bool) error {
+	rel, err := c.FindRelation(name)
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		if missingOk {
+			return nil
+		}
+		return fmt.Errorf("catalog: view %q does not exist", name)
+	}
+	if rel.Kind != RelKindView {
+		return fmt.Errorf("catalog: %q is not a view", name)
+	}
+
+	// Remove the _RETURN rewrite rule.
+	if c.Rules != nil {
+		c.Rules.RemoveRules(rel.OID)
+	}
+
+	// Delete the pg_class row.
+	if err := c.deleteRelationByOID(rel.OID); err != nil {
+		return err
+	}
+	c.cache.invalidate()
+	return nil
+}
+
+// deleteRelationByOID soft-deletes the pg_class tuple with the given OID.
+func (c *Catalog) deleteRelationByOID(oid int32) error {
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+
+	var targetID slottedpage.ItemID
+	found := false
+	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		r := tupleToRelation(tup)
+		if r != nil && r.OID == oid {
+			targetID = id
+			found = true
+			return false
+		}
+		return true
+	})
+	if !found {
+		c.Eng.TxMgr.Commit(xid)
+		return fmt.Errorf("catalog: relation OID %d not found in pg_class", oid)
+	}
+
+	if err := c.Eng.Delete(xid, targetID); err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
+
+// AddColumn adds a new column to an existing table by inserting a
+// pg_attribute row with the next attnum.
+func (c *Catalog) AddColumn(tableName string, colName string, datumType tuple.DatumType, typeName string, notNull bool, defaultExpr string, ifNotExists bool) error {
+	rel, err := c.FindRelation(tableName)
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		return fmt.Errorf("catalog: table %q not found", tableName)
+	}
+
+	// Get existing columns to determine next attnum and check for duplicates.
+	cols, err := c.GetColumns(rel.OID)
+	if err != nil {
+		return err
+	}
+	maxNum := int16(0)
+	for _, col := range cols {
+		if col.Name == colName {
+			if ifNotExists {
+				return nil
+			}
+			return fmt.Errorf("catalog: column %q of relation %q already exists", colName, tableName)
+		}
+		if int16(col.Num) > maxNum {
+			maxNum = int16(col.Num)
+		}
+	}
+	nextNum := maxNum + 1
+
+	typeOID := datumTypeToPgTypeOID(datumType)
+	// If the column uses a custom type (domain/enum), store its OID instead.
+	if typeName != "" {
+		if ct := c.Types.findByName(typeName); ct != nil {
+			typeOID = ct.OID
+		}
+	}
+
+	xid := c.Eng.TxMgr.Begin()
+	_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, pgAttributeRow(
+		rel.OID, colName, typeOID, -1, nextNum, notNull, defaultExpr,
+	))
+	if err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return fmt.Errorf("catalog: add column %q: %w", colName, err)
+	}
+	c.Eng.TxMgr.Commit(xid)
+	c.cache.invalidate()
+	return nil
+}
+
+// DropColumn removes a column from a table by soft-deleting its
+// pg_attribute row.
+func (c *Catalog) DropColumn(tableName string, colName string, ifExists bool) error {
+	rel, err := c.FindRelation(tableName)
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		return fmt.Errorf("catalog: table %q not found", tableName)
+	}
+
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+
+	var targetID slottedpage.ItemID
+	found := false
+	c.Eng.SeqScan(c.Eng.Super.PgAttrPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) < 8 {
+			return true
+		}
+		if tup.Columns[0].I32 == rel.OID && tup.Columns[1].Text == colName {
+			targetID = id
+			found = true
+			return false
+		}
+		return true
+	})
+
+	if !found {
+		c.Eng.TxMgr.Commit(xid)
+		if ifExists {
+			return nil
+		}
+		return fmt.Errorf("catalog: column %q of relation %q does not exist", colName, tableName)
+	}
+
+	if err := c.Eng.Delete(xid, targetID); err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+	c.Eng.TxMgr.Commit(xid)
+	c.cache.invalidate()
 	return nil
 }
 
@@ -1530,6 +1792,19 @@ func (c *Catalog) Vacuum(tableName string) (*engine.VacuumResult, error) {
 	c.updateRelPages(rel)
 
 	return result, nil
+}
+
+// isUniqueIndex returns true if the index name indicates a primary key
+// or unique constraint index (convention: _pkey or _key suffix).
+func (c *Catalog) isUniqueIndex(idx IndexInfo) bool {
+	return strings.HasSuffix(idx.Name, "_pkey") || strings.HasSuffix(idx.Name, "_key")
+}
+
+// datumToInt64Key converts a datum to an int64 key for index lookup,
+// using the same encoding as the index AM.
+func datumToInt64Key(d tuple.Datum) int64 {
+	k, _ := index.DatumToInt64Sortable(d)
+	return k
 }
 
 // updateRelPages counts the actual heap pages for a relation and

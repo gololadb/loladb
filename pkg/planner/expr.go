@@ -91,19 +91,24 @@ func (e *ExprLiteral) Eval(row *Row) (tuple.Datum, error) {
 type OpKind int
 
 const (
-	OpEq   OpKind = iota // =
-	OpNeq                // <>
-	OpLt                 // <
-	OpLte                // <=
-	OpGt                 // >
-	OpGte                // >=
-	OpAnd                // AND
-	OpOr                 // OR
-	OpAdd                // +
-	OpSub                // -
-	OpMul                // *
-	OpDiv                // /
-	OpMod                // %
+	OpEq       OpKind = iota // =
+	OpNeq                    // <>
+	OpLt                     // <
+	OpLte                    // <=
+	OpGt                     // >
+	OpGte                    // >=
+	OpAnd                    // AND
+	OpOr                     // OR
+	OpAdd                    // +
+	OpSub                    // -
+	OpMul                    // *
+	OpDiv                    // /
+	OpMod                    // %
+	OpLike                   // LIKE
+	OpILike                  // ILIKE
+	OpNotLike                // NOT LIKE
+	OpNotILike               // NOT ILIKE
+	OpConcat                 // ||
 )
 
 func (op OpKind) String() string {
@@ -134,6 +139,16 @@ func (op OpKind) String() string {
 		return "/"
 	case OpMod:
 		return "%"
+	case OpLike:
+		return "LIKE"
+	case OpILike:
+		return "ILIKE"
+	case OpNotLike:
+		return "NOT LIKE"
+	case OpNotILike:
+		return "NOT ILIKE"
+	case OpConcat:
+		return "||"
 	default:
 		return "?"
 	}
@@ -156,6 +171,12 @@ func (e *ExprBinOp) Eval(row *Row) (tuple.Datum, error) {
 	}
 	if e.Op >= OpAdd && e.Op <= OpMod {
 		return e.evalArithmetic(row)
+	}
+	if e.Op >= OpLike && e.Op <= OpNotILike {
+		return e.evalLike(row)
+	}
+	if e.Op == OpConcat {
+		return e.evalConcat(row)
 	}
 	return e.evalComparison(row)
 }
@@ -205,6 +226,44 @@ func (e *ExprBinOp) evalComparison(row *Row) (tuple.Datum, error) {
 		return tuple.DBool(cmp >= 0), nil
 	}
 	return tuple.DNull(), nil
+}
+
+func (e *ExprBinOp) evalLike(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+		return tuple.DNull(), nil
+	}
+	s := datumToString(lv)
+	pattern := datumToString(rv)
+	icase := e.Op == OpILike || e.Op == OpNotILike
+	matched := matchLikePattern(s, pattern, icase)
+	if e.Op == OpNotLike || e.Op == OpNotILike {
+		matched = !matched
+	}
+	return tuple.DBool(matched), nil
+}
+
+func (e *ExprBinOp) evalConcat(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	// PG: NULL || 'x' = NULL
+	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+		return tuple.DNull(), nil
+	}
+	return tuple.DText(datumToString(lv) + datumToString(rv)), nil
 }
 
 func (e *ExprBinOp) evalArithmetic(row *Row) (tuple.Datum, error) {
@@ -493,6 +552,63 @@ func (e *ExprBoolTest) Eval(row *Row) (tuple.Datum, error) {
 }
 
 // --- Helpers ---
+
+// matchLikePattern implements SQL LIKE pattern matching.
+// '%' matches any sequence of characters, '_' matches any single character.
+func matchLikePattern(s, pattern string, icase bool) bool {
+	if icase {
+		s = strings.ToLower(s)
+		pattern = strings.ToLower(pattern)
+	}
+	sr := []rune(s)
+	pr := []rune(pattern)
+	return likeMatch(sr, 0, pr, 0)
+}
+
+func likeMatch(s []rune, si int, p []rune, pi int) bool {
+	for pi < len(p) {
+		switch p[pi] {
+		case '%':
+			// Skip consecutive %
+			for pi < len(p) && p[pi] == '%' {
+				pi++
+			}
+			if pi == len(p) {
+				return true // trailing % matches everything
+			}
+			for i := si; i <= len(s); i++ {
+				if likeMatch(s, i, p, pi) {
+					return true
+				}
+			}
+			return false
+		case '_':
+			if si >= len(s) {
+				return false
+			}
+			si++
+			pi++
+		case '\\':
+			// Escape: next char is literal
+			pi++
+			if pi >= len(p) {
+				return false
+			}
+			if si >= len(s) || s[si] != p[pi] {
+				return false
+			}
+			si++
+			pi++
+		default:
+			if si >= len(s) || s[si] != p[pi] {
+				return false
+			}
+			si++
+			pi++
+		}
+	}
+	return si == len(s)
+}
 
 func datumToBool(d tuple.Datum) bool {
 	switch d.Type {

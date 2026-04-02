@@ -203,6 +203,8 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execAggregate(n)
 	case *planner.PhysSort:
 		return ex.execSort(n)
+	case *planner.PhysInsertSelect:
+		return ex.execInsertSelect(n)
 	case *planner.PhysInsert:
 		return ex.execInsert(n)
 	case *planner.PhysDelete:
@@ -263,6 +265,20 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execCreateSchema(n)
 	case *planner.PhysDropSchema:
 		return ex.execDropSchema(n)
+	case *planner.PhysTruncate:
+		return ex.execTruncate(n)
+	case *planner.PhysDropIndex:
+		return ex.execDropIndex(n)
+	case *planner.PhysDropView:
+		return ex.execDropView(n)
+	case *planner.PhysAddColumn:
+		return ex.execAddColumn(n)
+	case *planner.PhysDropColumn:
+		return ex.execDropColumn(n)
+	case *planner.PhysSetOp:
+		return ex.execSetOp(n)
+	case *planner.PhysDistinct:
+		return ex.execDistinct(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
 	default:
@@ -1095,7 +1111,145 @@ func (ex *Executor) execSort(n *planner.PhysSort) (*Result, error) {
 	return result, nil
 }
 
+func (ex *Executor) execSetOp(n *planner.PhysSetOp) (*Result, error) {
+	left, err := ex.Execute(n.Left)
+	if err != nil {
+		return nil, err
+	}
+	right, err := ex.Execute(n.Right)
+	if err != nil {
+		return nil, err
+	}
+	result := &Result{Columns: left.Columns}
+
+	switch n.Op {
+	case planner.SetOpUnion:
+		result.Rows = append(result.Rows, left.Rows...)
+		result.Rows = append(result.Rows, right.Rows...)
+		if !n.All {
+			result.Rows = deduplicateRows(result.Rows)
+		}
+	case planner.SetOpIntersect:
+		rightSet := make(map[string]int)
+		for _, row := range right.Rows {
+			rightSet[rowKey(row)]++
+		}
+		for _, row := range left.Rows {
+			key := rowKey(row)
+			if rightSet[key] > 0 {
+				result.Rows = append(result.Rows, row)
+				if !n.All {
+					rightSet[key] = 0 // only once
+				} else {
+					rightSet[key]--
+				}
+			}
+		}
+	case planner.SetOpExcept:
+		rightSet := make(map[string]int)
+		for _, row := range right.Rows {
+			rightSet[rowKey(row)]++
+		}
+		for _, row := range left.Rows {
+			key := rowKey(row)
+			if rightSet[key] > 0 {
+				if n.All {
+					rightSet[key]--
+				}
+				if !n.All {
+					rightSet[key] = 0
+				}
+				continue
+			}
+			result.Rows = append(result.Rows, row)
+		}
+	}
+	return result, nil
+}
+
+func deduplicateRows(rows [][]tuple.Datum) [][]tuple.Datum {
+	seen := make(map[string]bool)
+	var result [][]tuple.Datum
+	for _, row := range rows {
+		key := rowKey(row)
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, row)
+		}
+	}
+	return result
+}
+
+func (ex *Executor) execDistinct(n *planner.PhysDistinct) (*Result, error) {
+	child, err := ex.Execute(n.Child)
+	if err != nil {
+		return nil, err
+	}
+	result := &Result{Columns: child.Columns}
+	seen := make(map[string]bool)
+	for _, row := range child.Rows {
+		key := rowKey(row)
+		if !seen[key] {
+			seen[key] = true
+			result.Rows = append(result.Rows, row)
+		}
+	}
+	return result, nil
+}
+
+func rowKey(row []tuple.Datum) string {
+	var sb strings.Builder
+	for i, d := range row {
+		if i > 0 {
+			sb.WriteByte(0)
+		}
+		sb.WriteString(fmt.Sprintf("%d:%v", d.Type, datumKeyVal(d)))
+	}
+	return sb.String()
+}
+
+func datumKeyVal(d tuple.Datum) interface{} {
+	switch d.Type {
+	case tuple.TypeNull:
+		return nil
+	case tuple.TypeBool:
+		return d.Bool
+	case tuple.TypeInt32:
+		return d.I32
+	case tuple.TypeInt64:
+		return d.I64
+	case tuple.TypeFloat64:
+		return d.F64
+	case tuple.TypeText:
+		return d.Text
+	default:
+		return d.Text
+	}
+}
+
 // --- DML executors ---
+
+func (ex *Executor) execInsertSelect(n *planner.PhysInsertSelect) (*Result, error) {
+	// Execute the SELECT to get source rows.
+	selectResult, err := ex.Execute(n.Child)
+	if err != nil {
+		return nil, err
+	}
+	// Convert to VALUES-style PhysInsert and delegate.
+	var values [][]planner.Expr
+	for _, row := range selectResult.Rows {
+		var rowExprs []planner.Expr
+		for _, d := range row {
+			rowExprs = append(rowExprs, &planner.ExprLiteral{Value: d})
+		}
+		values = append(values, rowExprs)
+	}
+	return ex.execInsert(&planner.PhysInsert{
+		Table:   n.Table,
+		Columns: n.Columns,
+		Values:  values,
+	})
+}
 
 func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 	if err := ex.checkTablePrivilege(n.Table, catalog.PrivInsert); err != nil {
@@ -1135,6 +1289,7 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 	}
 
 	var count int64
+	var returningRows [][]tuple.Datum
 	for _, rowExprs := range n.Values {
 		// Evaluate provided expressions.
 		provided := make([]tuple.Datum, len(rowExprs))
@@ -1197,6 +1352,20 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		}
 		count++
 
+		// Evaluate RETURNING expressions against the inserted row.
+		if len(n.ReturningExprs) > 0 {
+			row := &planner.Row{Columns: values, Names: colNames}
+			retRow := make([]tuple.Datum, len(n.ReturningExprs))
+			for i, expr := range n.ReturningExprs {
+				val, err := expr.Eval(row)
+				if err != nil {
+					return nil, fmt.Errorf("executor: RETURNING eval: %w", err)
+				}
+				retRow[i] = val
+			}
+			returningRows = append(returningRows, retRow)
+		}
+
 		if hasTriggers {
 			// AFTER ROW INSERT triggers.
 			newMap := rowToMap(colNames, values)
@@ -1212,6 +1381,14 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		}
 	}
 
+	if len(n.ReturningExprs) > 0 {
+		return &Result{
+			Columns:      n.ReturningNames,
+			Rows:         returningRows,
+			RowsAffected: count,
+			Message:      fmt.Sprintf("INSERT 0 %d", count),
+		}, nil
+	}
 	return &Result{RowsAffected: count, Message: fmt.Sprintf("INSERT 0 %d", count)}, nil
 }
 
@@ -1256,12 +1433,27 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 		return true
 	})
 
+	var returningRows [][]tuple.Datum
 	for _, dt := range toDelete {
 		if hasTriggers {
 			oldMap := rowToMap(colNames, dt.row)
 			if _, err := ex.fireTriggers(n.Table, catalog.TrigBefore, catalog.TrigDelete, colNames, nil, oldMap); err != nil {
 				return nil, err
 			}
+		}
+
+		// Evaluate RETURNING before delete (row still visible).
+		if len(n.ReturningExprs) > 0 {
+			row := &planner.Row{Columns: dt.row, Names: colNames}
+			retRow := make([]tuple.Datum, len(n.ReturningExprs))
+			for i, expr := range n.ReturningExprs {
+				val, err := expr.Eval(row)
+				if err != nil {
+					return nil, fmt.Errorf("executor: RETURNING eval: %w", err)
+				}
+				retRow[i] = val
+			}
+			returningRows = append(returningRows, retRow)
 		}
 
 		ex.Cat.Delete(n.Table, dt.id)
@@ -1280,6 +1472,14 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 		}
 	}
 
+	if len(n.ReturningExprs) > 0 {
+		return &Result{
+			Columns:      n.ReturningNames,
+			Rows:         returningRows,
+			RowsAffected: int64(len(toDelete)),
+			Message:      fmt.Sprintf("DELETE %d", len(toDelete)),
+		}, nil
+	}
 	return &Result{RowsAffected: int64(len(toDelete)), Message: fmt.Sprintf("DELETE %d", len(toDelete))}, nil
 }
 
@@ -1326,6 +1526,7 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 		return true
 	})
 
+	var returningRows [][]tuple.Datum
 	childCols := child.Columns
 	for _, t := range targets {
 		newVals := make([]tuple.Datum, len(t.row))
@@ -1369,6 +1570,20 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 
 		ex.Cat.Update(n.Table, t.id, newVals)
 
+		// Evaluate RETURNING against the new row values.
+		if len(n.ReturningExprs) > 0 {
+			row := &planner.Row{Columns: newVals, Names: colNames}
+			retRow := make([]tuple.Datum, len(n.ReturningExprs))
+			for i, expr := range n.ReturningExprs {
+				val, err := expr.Eval(row)
+				if err != nil {
+					return nil, fmt.Errorf("executor: RETURNING eval: %w", err)
+				}
+				retRow[i] = val
+			}
+			returningRows = append(returningRows, retRow)
+		}
+
 		if hasTriggers {
 			oldMap := rowToMap(colNames, t.row)
 			newMap := rowToMap(colNames, newVals)
@@ -1384,6 +1599,14 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 		}
 	}
 
+	if len(n.ReturningExprs) > 0 {
+		return &Result{
+			Columns:      n.ReturningNames,
+			Rows:         returningRows,
+			RowsAffected: int64(len(targets)),
+			Message:      fmt.Sprintf("UPDATE %d", len(targets)),
+		}, nil
+	}
 	return &Result{RowsAffected: int64(len(targets)), Message: fmt.Sprintf("UPDATE %d", len(targets))}, nil
 }
 
@@ -1404,6 +1627,18 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 	if err != nil {
 		return nil, err
 	}
+
+	// Auto-create unique btree indexes for PRIMARY KEY and UNIQUE columns.
+	for _, c := range n.Columns {
+		if c.PrimaryKey {
+			idxName := fmt.Sprintf("%s_pkey", n.Table)
+			ex.Cat.CreateIndex(idxName, n.Table, c.Name, "btree")
+		} else if c.Unique {
+			idxName := fmt.Sprintf("%s_%s_key", n.Table, c.Name)
+			ex.Cat.CreateIndex(idxName, n.Table, c.Name, "btree")
+		}
+	}
+
 	return &Result{Message: fmt.Sprintf("CREATE TABLE %s", n.Table)}, nil
 }
 
@@ -2080,6 +2315,41 @@ func (ex *Executor) execDropTrigger(n *planner.PhysDropTrigger) (*Result, error)
 		return nil, err
 	}
 	return &Result{Message: "DROP TRIGGER"}, nil
+}
+
+func (ex *Executor) execTruncate(n *planner.PhysTruncate) (*Result, error) {
+	if err := ex.Cat.TruncateTable(n.Table); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "TRUNCATE TABLE"}, nil
+}
+
+func (ex *Executor) execDropIndex(n *planner.PhysDropIndex) (*Result, error) {
+	if err := ex.Cat.DropIndex(n.Name, n.MissingOk); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "DROP INDEX"}, nil
+}
+
+func (ex *Executor) execDropView(n *planner.PhysDropView) (*Result, error) {
+	if err := ex.Cat.DropView(n.Name, n.MissingOk); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "DROP VIEW"}, nil
+}
+
+func (ex *Executor) execAddColumn(n *planner.PhysAddColumn) (*Result, error) {
+	if err := ex.Cat.AddColumn(n.Table, n.Col.Name, n.Col.Type, n.Col.TypeName, n.Col.NotNull, n.Col.DefaultExpr, n.IfNotExists); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "ALTER TABLE"}, nil
+}
+
+func (ex *Executor) execDropColumn(n *planner.PhysDropColumn) (*Result, error) {
+	if err := ex.Cat.DropColumn(n.Table, n.ColName, n.IfExists); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "ALTER TABLE"}, nil
 }
 
 func (ex *Executor) execResult(n *planner.PhysResult) (*Result, error) {

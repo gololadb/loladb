@@ -1369,6 +1369,46 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 	case "least":
 		return evalMinMax(args, row, true)
 
+	case "is_distinct_from":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("is_distinct_from requires 2 arguments")
+		}
+		lv, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		rv, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if lv.Type == tuple.TypeNull && rv.Type == tuple.TypeNull {
+			return tuple.DBool(false), nil
+		}
+		if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+			return tuple.DBool(true), nil
+		}
+		return tuple.DBool(CompareDatums(lv, rv) != 0), nil
+
+	case "is_not_distinct_from":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("is_not_distinct_from requires 2 arguments")
+		}
+		lv, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		rv, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if lv.Type == tuple.TypeNull && rv.Type == tuple.TypeNull {
+			return tuple.DBool(true), nil
+		}
+		if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+			return tuple.DBool(false), nil
+		}
+		return tuple.DBool(CompareDatums(lv, rv) == 0), nil
+
 	default:
 		return tuple.DNull(), fmt.Errorf("function %s is not supported", name)
 	}

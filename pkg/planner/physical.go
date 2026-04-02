@@ -207,23 +207,74 @@ func (n *PhysSort) String() string            { return "Sort" }
 func (n *PhysSort) Cost() PlanCost            { return n.Estimate }
 func (n *PhysSort) Children() []PhysicalNode  { return []PhysicalNode{n.Child} }
 
+// PhysSetOp represents UNION / INTERSECT / EXCEPT.
+type PhysSetOp struct {
+	Op       SetOpKind
+	All      bool
+	Left     PhysicalNode
+	Right    PhysicalNode
+	Estimate PlanCost
+}
+
+func (n *PhysSetOp) String() string {
+	op := "Union"
+	switch n.Op {
+	case SetOpIntersect:
+		op = "Intersect"
+	case SetOpExcept:
+		op = "Except"
+	}
+	if n.All {
+		op += " All"
+	}
+	return op
+}
+func (n *PhysSetOp) Cost() PlanCost            { return n.Estimate }
+func (n *PhysSetOp) Children() []PhysicalNode  { return []PhysicalNode{n.Left, n.Right} }
+
+// PhysDistinct removes duplicate rows.
+type PhysDistinct struct {
+	Child    PhysicalNode
+	Estimate PlanCost
+}
+
+func (n *PhysDistinct) String() string            { return "Distinct" }
+func (n *PhysDistinct) Cost() PlanCost            { return n.Estimate }
+func (n *PhysDistinct) Children() []PhysicalNode  { return []PhysicalNode{n.Child} }
+
 // --- DML physical nodes ---
 
 type PhysInsert struct {
-	Table    string
-	Columns  []string // explicit column list (nil = all columns in order)
-	Values   [][]Expr
-	Estimate PlanCost
+	Table          string
+	Columns        []string // explicit column list (nil = all columns in order)
+	Values         [][]Expr
+	ReturningExprs []Expr
+	ReturningNames []string
+	Estimate       PlanCost
 }
 
 func (n *PhysInsert) String() string            { return fmt.Sprintf("Insert on %s", n.Table) }
 func (n *PhysInsert) Cost() PlanCost            { return n.Estimate }
 func (n *PhysInsert) Children() []PhysicalNode  { return nil }
 
-type PhysDelete struct {
+// PhysInsertSelect represents INSERT ... SELECT.
+type PhysInsertSelect struct {
 	Table    string
-	Child    PhysicalNode
+	Columns  []string
+	Child    PhysicalNode // the SELECT plan
 	Estimate PlanCost
+}
+
+func (n *PhysInsertSelect) String() string            { return fmt.Sprintf("Insert on %s (from select)", n.Table) }
+func (n *PhysInsertSelect) Cost() PlanCost            { return n.Estimate }
+func (n *PhysInsertSelect) Children() []PhysicalNode  { return []PhysicalNode{n.Child} }
+
+type PhysDelete struct {
+	Table          string
+	Child          PhysicalNode
+	ReturningExprs []Expr
+	ReturningNames []string
+	Estimate       PlanCost
 }
 
 func (n *PhysDelete) String() string            { return fmt.Sprintf("Delete on %s", n.Table) }
@@ -231,12 +282,14 @@ func (n *PhysDelete) Cost() PlanCost            { return n.Estimate }
 func (n *PhysDelete) Children() []PhysicalNode  { return []PhysicalNode{n.Child} }
 
 type PhysUpdate struct {
-	Table       string
-	Assignments []Assignment
-	Columns     []string
-	ColTypes    []DatumType
-	Child       PhysicalNode
-	Estimate    PlanCost
+	Table          string
+	Assignments    []Assignment
+	Columns        []string
+	ColTypes       []DatumType
+	Child          PhysicalNode
+	ReturningExprs []Expr
+	ReturningNames []string
+	Estimate       PlanCost
 }
 
 type DatumType = uint8
@@ -554,6 +607,59 @@ type PhysDropSchema struct {
 func (n *PhysDropSchema) String() string            { return fmt.Sprintf("DropSchema %s", n.Name) }
 func (n *PhysDropSchema) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysDropSchema) Children() []PhysicalNode  { return nil }
+
+// PhysTruncate represents TRUNCATE TABLE.
+type PhysTruncate struct {
+	Table string
+}
+
+func (n *PhysTruncate) String() string            { return fmt.Sprintf("Truncate %s", n.Table) }
+func (n *PhysTruncate) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysTruncate) Children() []PhysicalNode  { return nil }
+
+// PhysDropIndex represents DROP INDEX.
+type PhysDropIndex struct {
+	Name      string
+	MissingOk bool
+	Cascade   bool
+}
+
+func (n *PhysDropIndex) String() string            { return fmt.Sprintf("DropIndex %s", n.Name) }
+func (n *PhysDropIndex) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropIndex) Children() []PhysicalNode  { return nil }
+
+// PhysDropView represents DROP VIEW.
+type PhysDropView struct {
+	Name      string
+	MissingOk bool
+	Cascade   bool
+}
+
+func (n *PhysDropView) String() string            { return fmt.Sprintf("DropView %s", n.Name) }
+func (n *PhysDropView) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropView) Children() []PhysicalNode  { return nil }
+
+// PhysAddColumn represents ALTER TABLE ... ADD COLUMN.
+type PhysAddColumn struct {
+	Table       string
+	Col         ColDef
+	IfNotExists bool
+}
+
+func (n *PhysAddColumn) String() string            { return fmt.Sprintf("AddColumn %s.%s", n.Table, n.Col.Name) }
+func (n *PhysAddColumn) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysAddColumn) Children() []PhysicalNode  { return nil }
+
+// PhysDropColumn represents ALTER TABLE ... DROP COLUMN.
+type PhysDropColumn struct {
+	Table    string
+	ColName  string
+	IfExists bool
+}
+
+func (n *PhysDropColumn) String() string            { return fmt.Sprintf("DropColumn %s.%s", n.Table, n.ColName) }
+func (n *PhysDropColumn) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropColumn) Children() []PhysicalNode  { return nil }
 
 // PhysResult produces a single row by evaluating expressions (SELECT without FROM).
 type PhysResult struct {

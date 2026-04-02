@@ -134,6 +134,37 @@ type SortKey struct {
 func (n *LogicalSort) String() string { return fmt.Sprintf("Sort(%s)", n.Child) }
 func (n *LogicalSort) OutputColumns() []string { return n.Child.OutputColumns() }
 
+// LogicalSetOp represents UNION / INTERSECT / EXCEPT.
+type LogicalSetOp struct {
+	Op    SetOpKind
+	All   bool
+	Left  LogicalNode
+	Right LogicalNode
+}
+
+func (n *LogicalSetOp) String() string {
+	op := "Union"
+	switch n.Op {
+	case SetOpIntersect:
+		op = "Intersect"
+	case SetOpExcept:
+		op = "Except"
+	}
+	if n.All {
+		op += " All"
+	}
+	return fmt.Sprintf("%s(%s, %s)", op, n.Left, n.Right)
+}
+func (n *LogicalSetOp) OutputColumns() []string { return n.Left.OutputColumns() }
+
+// LogicalDistinct removes duplicate rows.
+type LogicalDistinct struct {
+	Child LogicalNode
+}
+
+func (n *LogicalDistinct) String() string        { return fmt.Sprintf("Distinct(%s)", n.Child) }
+func (n *LogicalDistinct) OutputColumns() []string { return n.Child.OutputColumns() }
+
 // --- DML nodes ---
 
 type Assignment struct {
@@ -142,34 +173,50 @@ type Assignment struct {
 }
 
 type LogicalInsert struct {
-	Table   string
-	Columns []string // explicit column list (nil = all columns in order)
-	Values  [][]Expr // each inner slice is a row
+	Table          string
+	Columns        []string // explicit column list (nil = all columns in order)
+	Values         [][]Expr // each inner slice is a row
+	ReturningExprs []Expr
+	ReturningNames []string
 }
 
 func (n *LogicalInsert) String() string        { return fmt.Sprintf("Insert(%s)", n.Table) }
-func (n *LogicalInsert) OutputColumns() []string { return nil }
+func (n *LogicalInsert) OutputColumns() []string { return n.ReturningNames }
+
+// LogicalInsertSelect represents INSERT ... SELECT.
+type LogicalInsertSelect struct {
+	Table      string
+	Columns    []string
+	SelectPlan LogicalNode
+}
+
+func (n *LogicalInsertSelect) String() string        { return fmt.Sprintf("InsertSelect(%s)", n.Table) }
+func (n *LogicalInsertSelect) OutputColumns() []string { return nil }
 
 type LogicalDelete struct {
-	Table     string
-	Predicate Expr // nil = delete all
-	Child     LogicalNode
+	Table          string
+	Predicate      Expr // nil = delete all
+	Child          LogicalNode
+	ReturningExprs []Expr
+	ReturningNames []string
 }
 
 func (n *LogicalDelete) String() string        { return fmt.Sprintf("Delete(%s)", n.Table) }
-func (n *LogicalDelete) OutputColumns() []string { return nil }
+func (n *LogicalDelete) OutputColumns() []string { return n.ReturningNames }
 
 type LogicalUpdate struct {
-	Table       string
-	Assignments []Assignment
-	Predicate   Expr // nil = update all
-	Child       LogicalNode
-	Columns     []string // schema column names
-	ColTypes    []tuple.DatumType
+	Table          string
+	Assignments    []Assignment
+	Predicate      Expr // nil = update all
+	Child          LogicalNode
+	Columns        []string // schema column names
+	ColTypes       []tuple.DatumType
+	ReturningExprs []Expr
+	ReturningNames []string
 }
 
 func (n *LogicalUpdate) String() string        { return fmt.Sprintf("Update(%s)", n.Table) }
-func (n *LogicalUpdate) OutputColumns() []string { return nil }
+func (n *LogicalUpdate) OutputColumns() []string { return n.ReturningNames }
 
 type LogicalCreateTable struct {
 	Table   string
@@ -182,6 +229,8 @@ type ColDef struct {
 	Type        tuple.DatumType
 	TypeName    string // original SQL type name (for domain/enum validation)
 	NotNull     bool   // column-level NOT NULL constraint
+	PrimaryKey  bool   // column-level PRIMARY KEY constraint
+	Unique      bool   // column-level UNIQUE constraint
 	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
 }
 
@@ -460,6 +509,54 @@ type LogicalDropSchema struct {
 
 func (n *LogicalDropSchema) String() string         { return fmt.Sprintf("DropSchema(%s)", n.Name) }
 func (n *LogicalDropSchema) OutputColumns() []string { return nil }
+
+// LogicalTruncate represents TRUNCATE TABLE.
+type LogicalTruncate struct {
+	Table string
+}
+
+func (n *LogicalTruncate) String() string         { return fmt.Sprintf("Truncate(%s)", n.Table) }
+func (n *LogicalTruncate) OutputColumns() []string { return nil }
+
+// LogicalDropIndex represents DROP INDEX.
+type LogicalDropIndex struct {
+	Name      string
+	MissingOk bool
+	Cascade   bool
+}
+
+func (n *LogicalDropIndex) String() string         { return fmt.Sprintf("DropIndex(%s)", n.Name) }
+func (n *LogicalDropIndex) OutputColumns() []string { return nil }
+
+// LogicalDropView represents DROP VIEW.
+type LogicalDropView struct {
+	Name      string
+	MissingOk bool
+	Cascade   bool
+}
+
+func (n *LogicalDropView) String() string         { return fmt.Sprintf("DropView(%s)", n.Name) }
+func (n *LogicalDropView) OutputColumns() []string { return nil }
+
+// LogicalAddColumn represents ALTER TABLE ... ADD COLUMN.
+type LogicalAddColumn struct {
+	Table        string
+	Col          ColDef
+	IfNotExists  bool
+}
+
+func (n *LogicalAddColumn) String() string         { return fmt.Sprintf("AddColumn(%s.%s)", n.Table, n.Col.Name) }
+func (n *LogicalAddColumn) OutputColumns() []string { return nil }
+
+// LogicalDropColumn represents ALTER TABLE ... DROP COLUMN.
+type LogicalDropColumn struct {
+	Table    string
+	ColName  string
+	IfExists bool
+}
+
+func (n *LogicalDropColumn) String() string         { return fmt.Sprintf("DropColumn(%s.%s)", n.Table, n.ColName) }
+func (n *LogicalDropColumn) OutputColumns() []string { return nil }
 
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
 // LogicalAggregate groups input rows and computes aggregate functions.

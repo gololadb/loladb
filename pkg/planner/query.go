@@ -96,8 +96,23 @@ type Query struct {
 	// in order. The planner uses this to build the aggregate node.
 	AggRefs []*AggRef
 
+	// Distinct is true when SELECT DISTINCT is used.
+	Distinct bool
+
+	// SetOp describes a UNION/INTERSECT/EXCEPT operation.
+	SetOp    SetOpKind
+	SetAll   bool
+	SetLeft  *Query
+	SetRight *Query
+
+	// SelectSource holds the analyzed SELECT query for INSERT ... SELECT.
+	SelectSource *Query
+
 	// Assignments holds SET col = expr for UPDATE.
 	Assignments []*UpdateAssignment
+
+	// ReturningList holds the RETURNING clause expressions and names.
+	ReturningList []*TargetEntry
 
 	// Utility holds DDL/utility statement info when CommandType == CmdUtility.
 	Utility *UtilityStmt
@@ -283,9 +298,25 @@ type UtilityStmt struct {
 	SchemaName      string
 	SchemaIfNotExists bool
 	SchemaAuthRole  string
+
+	// ALTER TABLE ADD/DROP COLUMN fields
+	AlterColName    string // column name for ADD/DROP COLUMN
+	AlterColDef     *ColDef // column definition for ADD COLUMN
+	AlterIfNotExists bool  // IF NOT EXISTS for ADD COLUMN
+	AlterIfExists   bool   // IF EXISTS for DROP COLUMN
 }
 
 type UtilityType int
+
+// SetOpKind identifies the set operation type.
+type SetOpKind int
+
+const (
+	SetOpNone      SetOpKind = iota
+	SetOpUnion
+	SetOpIntersect
+	SetOpExcept
+)
 
 const (
 	UtilCreateTable UtilityType = iota
@@ -313,7 +344,12 @@ const (
 	UtilDropType
 	UtilAlterEnum
 	UtilCreateSchema
+	UtilTruncate
+	UtilDropIndex
+	UtilDropView
 	UtilDropSchema
+	UtilAddColumn
+	UtilDropColumn
 	UtilNoOp
 )
 
@@ -469,6 +505,25 @@ func (o *OpExpr) Eval(row *Row) (tuple.Datum, error) {
 	}
 	if o.Op >= OpAdd && o.Op <= OpMod {
 		return evalArithmeticDatums(o.Op, lv, rv)
+	}
+	if o.Op >= OpLike && o.Op <= OpNotILike {
+		if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		s := datumToString(lv)
+		pattern := datumToString(rv)
+		icase := o.Op == OpILike || o.Op == OpNotILike
+		matched := matchLikePattern(s, pattern, icase)
+		if o.Op == OpNotLike || o.Op == OpNotILike {
+			matched = !matched
+		}
+		return tuple.DBool(matched), nil
+	}
+	if o.Op == OpConcat {
+		if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		return tuple.DText(datumToString(lv) + datumToString(rv)), nil
 	}
 	cmp := CompareDatums(lv, rv)
 	switch o.Op {

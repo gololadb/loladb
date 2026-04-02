@@ -32,6 +32,10 @@ func QueryToLogicalPlan(q *Query) (LogicalNode, error) {
 }
 
 func queryToSelectPlan(q *Query) (LogicalNode, error) {
+	// Handle set operations.
+	if q.SetOp != SetOpNone {
+		return queryToSetOpPlan(q)
+	}
 	if q.JoinTree == nil || len(q.JoinTree.FromList) == 0 {
 		// SELECT without FROM → Result node (single virtual row).
 		if len(q.TargetList) > 0 {
@@ -118,6 +122,11 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 		plan = &LogicalProject{Exprs: exprs, Names: names, Child: plan}
 	}
 
+	// DISTINCT → Distinct node.
+	if q.Distinct {
+		plan = &LogicalDistinct{Child: plan}
+	}
+
 	// ORDER BY → Sort.
 	if len(q.SortClause) > 0 {
 		outCols := plan.OutputColumns()
@@ -155,8 +164,68 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 	return plan, nil
 }
 
+func queryToSetOpPlan(q *Query) (LogicalNode, error) {
+	left, err := queryToSelectPlan(q.SetLeft)
+	if err != nil {
+		return nil, err
+	}
+	right, err := queryToSelectPlan(q.SetRight)
+	if err != nil {
+		return nil, err
+	}
+	var plan LogicalNode = &LogicalSetOp{
+		Op:    q.SetOp,
+		All:   q.SetAll,
+		Left:  left,
+		Right: right,
+	}
+
+	// ORDER BY on the combined result.
+	if len(q.SortClause) > 0 {
+		var keys []SortKey
+		for _, sc := range q.SortClause {
+			expr := analyzedToExpr(sc.Expr, q.RangeTable)
+			keys = append(keys, SortKey{Expr: expr, Desc: sc.Desc})
+		}
+		plan = &LogicalSort{Keys: keys, Child: plan}
+	}
+
+	// LIMIT / OFFSET.
+	if q.LimitCount != nil || q.LimitOffset != nil {
+		limit := &LogicalLimit{Count: -1, Child: plan}
+		if q.LimitCount != nil {
+			if c, ok := q.LimitCount.(*Const); ok {
+				limit.Count = constToInt64(c)
+			}
+		}
+		if q.LimitOffset != nil {
+			if c, ok := q.LimitOffset.(*Const); ok {
+				limit.Offset = constToInt64(c)
+			}
+		}
+		plan = limit
+	}
+
+	return plan, nil
+}
+
 func queryToInsertPlan(q *Query) (LogicalNode, error) {
 	rte := q.RangeTable[q.ResultRelation-1]
+
+	// INSERT ... SELECT
+	if q.SelectSource != nil {
+		selectPlan, err := queryToSelectPlan(q.SelectSource)
+		if err != nil {
+			return nil, err
+		}
+		return &LogicalInsertSelect{
+			Table:      rte.RelName,
+			Columns:    q.InsertColumns,
+			SelectPlan: selectPlan,
+		}, nil
+	}
+
+	// INSERT ... VALUES
 	var values [][]Expr
 	for _, row := range q.Values {
 		var rowExprs []Expr
@@ -165,7 +234,8 @@ func queryToInsertPlan(q *Query) (LogicalNode, error) {
 		}
 		values = append(values, rowExprs)
 	}
-	return &LogicalInsert{Table: rte.RelName, Columns: q.InsertColumns, Values: values}, nil
+	retExprs, retNames := convertReturning(q.ReturningList, q.RangeTable)
+	return &LogicalInsert{Table: rte.RelName, Columns: q.InsertColumns, Values: values, ReturningExprs: retExprs, ReturningNames: retNames}, nil
 }
 
 func queryToDeletePlan(q *Query) (LogicalNode, error) {
@@ -185,7 +255,8 @@ func queryToDeletePlan(q *Query) (LogicalNode, error) {
 		}
 	}
 
-	return &LogicalDelete{Table: rte.RelName, Child: child}, nil
+	retExprs, retNames := convertReturning(q.ReturningList, q.RangeTable)
+	return &LogicalDelete{Table: rte.RelName, Child: child, ReturningExprs: retExprs, ReturningNames: retNames}, nil
 }
 
 func queryToUpdatePlan(q *Query) (LogicalNode, error) {
@@ -215,13 +286,30 @@ func queryToUpdatePlan(q *Query) (LogicalNode, error) {
 		})
 	}
 
+	retExprs, retNames := convertReturning(q.ReturningList, q.RangeTable)
 	return &LogicalUpdate{
-		Table:       rte.RelName,
-		Assignments: assignments,
-		Child:       child,
-		Columns:     colNames,
-		ColTypes:    colTypes,
+		Table:          rte.RelName,
+		Assignments:    assignments,
+		Child:          child,
+		Columns:        colNames,
+		ColTypes:       colTypes,
+		ReturningExprs: retExprs,
+		ReturningNames: retNames,
 	}, nil
+}
+
+// convertReturning converts analyzed RETURNING target entries to Expr slices.
+func convertReturning(list []*TargetEntry, rtes []*RangeTblEntry) ([]Expr, []string) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	exprs := make([]Expr, len(list))
+	names := make([]string, len(list))
+	for i, te := range list {
+		exprs[i] = analyzedToExpr(te.Expr, rtes)
+		names[i] = te.Name
+	}
+	return exprs, names
 }
 
 func queryToUtilityPlan(q *Query) (LogicalNode, error) {
@@ -294,6 +382,16 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 		return &LogicalCreateSchema{Name: u.SchemaName, IfNotExists: u.SchemaIfNotExists, AuthRole: u.SchemaAuthRole}, nil
 	case UtilDropSchema:
 		return &LogicalDropSchema{Name: u.SchemaName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
+	case UtilTruncate:
+		return &LogicalTruncate{Table: u.TableName}, nil
+	case UtilDropIndex:
+		return &LogicalDropIndex{Name: u.IndexName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
+	case UtilDropView:
+		return &LogicalDropView{Name: u.ViewName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
+	case UtilAddColumn:
+		return &LogicalAddColumn{Table: u.TableName, Col: *u.AlterColDef, IfNotExists: u.AlterIfNotExists}, nil
+	case UtilDropColumn:
+		return &LogicalDropColumn{Table: u.TableName, ColName: u.AlterColName, IfExists: u.AlterIfExists}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

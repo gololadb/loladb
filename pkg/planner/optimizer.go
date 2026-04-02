@@ -53,12 +53,18 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return o.optimizeProject(n)
 	case *LogicalJoin:
 		return o.optimizeJoin(n)
+	case *LogicalSetOp:
+		return o.optimizeSetOp(n)
+	case *LogicalDistinct:
+		return o.optimizeDistinct(n)
 	case *LogicalLimit:
 		return o.optimizeLimit(n)
 	case *LogicalSort:
 		return o.optimizeSort(n)
 	case *LogicalAggregate:
 		return o.optimizeAggregate(n)
+	case *LogicalInsertSelect:
+		return o.optimizeInsertSelect(n)
 	case *LogicalInsert:
 		return o.optimizeInsert(n)
 	case *LogicalDelete:
@@ -125,6 +131,16 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysCreateSchema{Name: n.Name, IfNotExists: n.IfNotExists, AuthRole: n.AuthRole}, nil
 	case *LogicalDropSchema:
 		return &PhysDropSchema{Name: n.Name, MissingOk: n.MissingOk, Cascade: n.Cascade}, nil
+	case *LogicalTruncate:
+		return &PhysTruncate{Table: n.Table}, nil
+	case *LogicalDropIndex:
+		return &PhysDropIndex{Name: n.Name, MissingOk: n.MissingOk, Cascade: n.Cascade}, nil
+	case *LogicalDropView:
+		return &PhysDropView{Name: n.Name, MissingOk: n.MissingOk, Cascade: n.Cascade}, nil
+	case *LogicalAddColumn:
+		return &PhysAddColumn{Table: n.Table, Col: n.Col, IfNotExists: n.IfNotExists}, nil
+	case *LogicalDropColumn:
+		return &PhysDropColumn{Table: n.Table, ColName: n.ColName, IfExists: n.IfExists}, nil
 	case *LogicalResult:
 		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
 	default:
@@ -1044,6 +1060,40 @@ func popcount(x uint) int {
 	return count
 }
 
+func (o *Optimizer) optimizeSetOp(n *LogicalSetOp) (PhysicalNode, error) {
+	left, err := o.optimize(n.Left)
+	if err != nil {
+		return nil, err
+	}
+	right, err := o.optimize(n.Right)
+	if err != nil {
+		return nil, err
+	}
+	lc := left.Cost()
+	rc := right.Cost()
+	return &PhysSetOp{
+		Op: n.Op, All: n.All, Left: left, Right: right,
+		Estimate: PlanCost{
+			Startup: lc.Startup + rc.Startup,
+			Total:   lc.Total + rc.Total,
+			Rows:    lc.Rows + rc.Rows,
+			Width:   lc.Width,
+		},
+	}, nil
+}
+
+func (o *Optimizer) optimizeDistinct(n *LogicalDistinct) (PhysicalNode, error) {
+	child, err := o.optimize(n.Child)
+	if err != nil {
+		return nil, err
+	}
+	childCost := child.Cost()
+	return &PhysDistinct{
+		Child:    child,
+		Estimate: PlanCost{Startup: childCost.Startup, Total: childCost.Total, Rows: childCost.Rows, Width: childCost.Width},
+	}, nil
+}
+
 func (o *Optimizer) optimizeLimit(n *LogicalLimit) (PhysicalNode, error) {
 	child, err := o.optimize(n.Child)
 	if err != nil {
@@ -1087,10 +1137,26 @@ func (o *Optimizer) optimizeAggregate(n *LogicalAggregate) (PhysicalNode, error)
 	}, nil
 }
 
+func (o *Optimizer) optimizeInsertSelect(n *LogicalInsertSelect) (PhysicalNode, error) {
+	child, err := o.optimize(n.SelectPlan)
+	if err != nil {
+		return nil, err
+	}
+	return &PhysInsertSelect{
+		Table:    n.Table,
+		Columns:  n.Columns,
+		Child:    child,
+		Estimate: child.Cost(),
+	}, nil
+}
+
 func (o *Optimizer) optimizeInsert(n *LogicalInsert) (PhysicalNode, error) {
 	var values [][]Expr
 	values = append(values, n.Values...)
-	return &PhysInsert{Table: n.Table, Columns: n.Columns, Values: values}, nil
+	return &PhysInsert{
+		Table: n.Table, Columns: n.Columns, Values: values,
+		ReturningExprs: n.ReturningExprs, ReturningNames: n.ReturningNames,
+	}, nil
 }
 
 func (o *Optimizer) optimizeDelete(n *LogicalDelete) (PhysicalNode, error) {
@@ -1098,7 +1164,10 @@ func (o *Optimizer) optimizeDelete(n *LogicalDelete) (PhysicalNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &PhysDelete{Table: n.Table, Child: child}, nil
+	return &PhysDelete{
+		Table: n.Table, Child: child,
+		ReturningExprs: n.ReturningExprs, ReturningNames: n.ReturningNames,
+	}, nil
 }
 
 func (o *Optimizer) optimizeUpdate(n *LogicalUpdate) (PhysicalNode, error) {
@@ -1113,6 +1182,7 @@ func (o *Optimizer) optimizeUpdate(n *LogicalUpdate) (PhysicalNode, error) {
 	return &PhysUpdate{
 		Table: n.Table, Assignments: n.Assignments,
 		Columns: n.Columns, ColTypes: colTypes, Child: child,
+		ReturningExprs: n.ReturningExprs, ReturningNames: n.ReturningNames,
 	}, nil
 }
 

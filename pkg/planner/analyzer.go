@@ -86,6 +86,8 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		return a.transformCreateTrigStmt(n)
 	case *parser.RemoveFuncStmt:
 		return a.transformDropFunctionStmt(n)
+	case *parser.TruncateStmt:
+		return a.transformTruncateStmt(n)
 	case *parser.DropStmt:
 		return a.transformDropStmt(n)
 	case *parser.AlterFunctionStmt:
@@ -177,11 +179,21 @@ func (a *Analyzer) flattenedColumns() []string {
 // Mirrors PostgreSQL's transformSelectStmt() in analyze.c.
 
 func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
+	// Handle set operations (UNION / INTERSECT / EXCEPT).
+	if n.Op != parser.SETOP_NONE && n.Larg != nil && n.Rarg != nil {
+		return a.transformSetOp(n)
+	}
+
 	if len(n.ValuesLists) > 0 {
 		return nil, fmt.Errorf("analyzer: bare VALUES clause not supported")
 	}
 
 	q := &Query{CommandType: CmdSelect}
+
+	// DISTINCT
+	if n.DistinctClause != nil {
+		q.Distinct = true
+	}
 
 	// Step 1: Process FROM clause → build range table and join tree.
 	// Mirrors transformFromClause().
@@ -738,6 +750,21 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 		return right, nil
 	}
 
+	// Handle special expression kinds before resolving left/right.
+	switch e.Kind {
+	case parser.AEXPR_BETWEEN, parser.AEXPR_NOT_BETWEEN,
+		parser.AEXPR_BETWEEN_SYM, parser.AEXPR_NOT_BETWEEN_SYM:
+		return a.transformBetween(e)
+	case parser.AEXPR_IN:
+		return a.transformIn(e)
+	case parser.AEXPR_LIKE, parser.AEXPR_ILIKE:
+		return a.transformLike(e)
+	case parser.AEXPR_DISTINCT:
+		return a.transformDistinctFrom(e, false)
+	case parser.AEXPR_NOT_DISTINCT:
+		return a.transformDistinctFrom(e, true)
+	}
+
 	left, err := a.transformExpr(e.Lexpr)
 	if err != nil {
 		return nil, err
@@ -788,11 +815,146 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 	case "%":
 		op = OpMod
 		resultTyp = inferArithType(left, right)
+	case "||":
+		op = OpConcat
+		resultTyp = tuple.TypeText
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported operator %q", opName)
 	}
 
 	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: resultTyp}, nil
+}
+
+// transformLike handles LIKE / ILIKE / NOT LIKE / NOT ILIKE.
+func (a *Analyzer) transformLike(e *parser.A_Expr) (AnalyzedExpr, error) {
+	left, err := a.transformExpr(e.Lexpr)
+	if err != nil {
+		return nil, err
+	}
+	// Rexpr is either a single pattern or an ExprList (with ESCAPE).
+	// We only support the simple case for now.
+	var patternExpr parser.Expr
+	if el, ok := e.Rexpr.(*parser.ExprList); ok && len(el.Items) > 0 {
+		patternExpr = el.Items[0] // ignore ESCAPE for now
+	} else {
+		patternExpr = e.Rexpr
+	}
+	right, err := a.transformExpr(patternExpr)
+	if err != nil {
+		return nil, err
+	}
+	opName := ""
+	if len(e.Name) > 0 {
+		opName = e.Name[len(e.Name)-1]
+	}
+	var op OpKind
+	switch opName {
+	case "~~":
+		op = OpLike
+	case "~~*":
+		op = OpILike
+	case "!~~":
+		op = OpNotLike
+	case "!~~*":
+		op = OpNotILike
+	default:
+		if e.Kind == parser.AEXPR_ILIKE {
+			op = OpILike
+		} else {
+			op = OpLike
+		}
+	}
+	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: tuple.TypeBool}, nil
+}
+
+// transformBetween desugars BETWEEN into AND/OR comparisons.
+// x BETWEEN a AND b  →  x >= a AND x <= b
+// x NOT BETWEEN a AND b  →  x < a OR x > b
+func (a *Analyzer) transformBetween(e *parser.A_Expr) (AnalyzedExpr, error) {
+	left, err := a.transformExpr(e.Lexpr)
+	if err != nil {
+		return nil, err
+	}
+	el, ok := e.Rexpr.(*parser.ExprList)
+	if !ok || len(el.Items) != 2 {
+		return nil, fmt.Errorf("analyzer: BETWEEN requires exactly 2 bounds")
+	}
+	low, err := a.transformExpr(el.Items[0])
+	if err != nil {
+		return nil, err
+	}
+	high, err := a.transformExpr(el.Items[1])
+	if err != nil {
+		return nil, err
+	}
+	// For SYMMETRIC variants, we'd need runtime min/max, but for now
+	// treat them the same as regular BETWEEN.
+	switch e.Kind {
+	case parser.AEXPR_NOT_BETWEEN, parser.AEXPR_NOT_BETWEEN_SYM:
+		// x < low OR x > high
+		return &BoolExprNode{
+			Op: BoolOr,
+			Args: []AnalyzedExpr{
+				&OpExpr{Op: OpLt, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+				&OpExpr{Op: OpGt, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+			},
+			
+		}, nil
+	default:
+		// x >= low AND x <= high
+		return &BoolExprNode{
+			Op: BoolAnd,
+			Args: []AnalyzedExpr{
+				&OpExpr{Op: OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+				&OpExpr{Op: OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+			},
+			
+		}, nil
+	}
+}
+
+// transformIn desugars IN (val1, val2, ...) into x=a OR x=b OR ...
+func (a *Analyzer) transformIn(e *parser.A_Expr) (AnalyzedExpr, error) {
+	left, err := a.transformExpr(e.Lexpr)
+	if err != nil {
+		return nil, err
+	}
+	el, ok := e.Rexpr.(*parser.ExprList)
+	if !ok {
+		return nil, fmt.Errorf("analyzer: IN requires a value list")
+	}
+	var eqExprs []AnalyzedExpr
+	for _, item := range el.Items {
+		val, err := a.transformExpr(item)
+		if err != nil {
+			return nil, err
+		}
+		eqExprs = append(eqExprs, &OpExpr{Op: OpEq, Left: left, Right: val, ResultTyp: tuple.TypeBool})
+	}
+	if len(eqExprs) == 1 {
+		return eqExprs[0], nil
+	}
+	return &BoolExprNode{Op: BoolOr, Args: eqExprs}, nil
+}
+
+// transformDistinctFrom handles IS [NOT] DISTINCT FROM.
+func (a *Analyzer) transformDistinctFrom(e *parser.A_Expr, notDistinct bool) (AnalyzedExpr, error) {
+	left, err := a.transformExpr(e.Lexpr)
+	if err != nil {
+		return nil, err
+	}
+	right, err := a.transformExpr(e.Rexpr)
+	if err != nil {
+		return nil, err
+	}
+	// IS DISTINCT FROM: like <> but treats NULL as a comparable value.
+	// IS NOT DISTINCT FROM: like = but treats NULL as a comparable value.
+	// We implement this as a special function call.
+	funcName := "is_distinct_from"
+	if notDistinct {
+		funcName = "is_not_distinct_from"
+	}
+	return &FuncCallExpr{FuncName: funcName, Args: []AnalyzedExpr{left, right}, ReturnType: tuple.TypeBool}, nil
 }
 
 // inferArithType returns the result type for an arithmetic operation.
@@ -848,6 +1010,69 @@ func (a *Analyzer) transformNullTest(e *parser.NullTest) (AnalyzedExpr, error) {
 
 // transformInsertStmt resolves an INSERT statement.
 // Mirrors PostgreSQL's transformInsertStmt() in analyze.c.
+func (a *Analyzer) transformSetOp(n *parser.SelectStmt) (*Query, error) {
+	// Analyze left and right branches independently.
+	leftAnalyzer := &Analyzer{Cat: a.Cat}
+	leftQ, err := leftAnalyzer.transformSelectStmt(n.Larg)
+	if err != nil {
+		return nil, fmt.Errorf("analyzer: left side of set operation: %w", err)
+	}
+	rightAnalyzer := &Analyzer{Cat: a.Cat}
+	rightQ, err := rightAnalyzer.transformSelectStmt(n.Rarg)
+	if err != nil {
+		return nil, fmt.Errorf("analyzer: right side of set operation: %w", err)
+	}
+
+	var opKind SetOpKind
+	switch n.Op {
+	case parser.SETOP_UNION:
+		opKind = SetOpUnion
+	case parser.SETOP_INTERSECT:
+		opKind = SetOpIntersect
+	case parser.SETOP_EXCEPT:
+		opKind = SetOpExcept
+	}
+
+	q := &Query{
+		CommandType: CmdSelect,
+		SetOp:       opKind,
+		SetAll:      n.All,
+		SetLeft:     leftQ,
+		SetRight:    rightQ,
+		TargetList:  leftQ.TargetList, // column names from left side
+	}
+
+	// Handle ORDER BY / LIMIT on the combined result.
+	if len(n.SortClause) > 0 {
+		for _, sc := range n.SortClause {
+			expr, err := a.transformExpr(sc.Node)
+			if err != nil {
+				return nil, err
+			}
+			q.SortClause = append(q.SortClause, &SortClause{
+				Expr: expr,
+				Desc: sc.SortbyDir == parser.SORTBY_DESC,
+			})
+		}
+	}
+	if n.LimitCount != nil {
+		lc, err := a.transformExpr(n.LimitCount)
+		if err != nil {
+			return nil, err
+		}
+		q.LimitCount = lc
+	}
+	if n.LimitOffset != nil {
+		lo, err := a.transformExpr(n.LimitOffset)
+		if err != nil {
+			return nil, err
+		}
+		q.LimitOffset = lo
+	}
+
+	return q, nil
+}
+
 func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 	q := &Query{CommandType: CmdInsert}
 
@@ -865,22 +1090,42 @@ func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 		}
 	}
 
-	// Resolve VALUES.
+	// Resolve source: VALUES or SELECT.
 	sel, ok := n.SelectStmt.(*parser.SelectStmt)
-	if !ok || len(sel.ValuesLists) == 0 {
+	if !ok {
 		return nil, fmt.Errorf("analyzer: unsupported INSERT source")
 	}
 
-	for _, row := range sel.ValuesLists {
-		var resolvedRow []AnalyzedExpr
-		for _, e := range row {
-			expr, err := a.transformExpr(e)
-			if err != nil {
-				return nil, err
+	if len(sel.ValuesLists) > 0 {
+		// INSERT ... VALUES (...)
+		for _, row := range sel.ValuesLists {
+			var resolvedRow []AnalyzedExpr
+			for _, e := range row {
+				expr, err := a.transformExpr(e)
+				if err != nil {
+					return nil, err
+				}
+				resolvedRow = append(resolvedRow, expr)
 			}
-			resolvedRow = append(resolvedRow, expr)
+			q.Values = append(q.Values, resolvedRow)
 		}
-		q.Values = append(q.Values, resolvedRow)
+	} else {
+		// INSERT ... SELECT ...
+		subAnalyzer := &Analyzer{Cat: a.Cat}
+		subQ, err := subAnalyzer.transformSelectStmt(sel)
+		if err != nil {
+			return nil, fmt.Errorf("analyzer: INSERT ... SELECT: %w", err)
+		}
+		q.SelectSource = subQ
+	}
+
+	// RETURNING clause.
+	if len(n.ReturningList) > 0 {
+		ret, err := a.transformReturningList(n.ReturningList)
+		if err != nil {
+			return nil, fmt.Errorf("analyzer: INSERT RETURNING: %w", err)
+		}
+		q.ReturningList = ret
 	}
 
 	q.RangeTable = a.rangeTable
@@ -910,6 +1155,16 @@ func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*Query, error) {
 	}
 
 	q.JoinTree = &FromExpr{FromList: fromList, Quals: qual}
+
+	// RETURNING clause.
+	if len(n.ReturningList) > 0 {
+		ret, err := a.transformReturningList(n.ReturningList)
+		if err != nil {
+			return nil, fmt.Errorf("analyzer: DELETE RETURNING: %w", err)
+		}
+		q.ReturningList = ret
+	}
+
 	q.RangeTable = a.rangeTable
 	return q, nil
 }
@@ -971,8 +1226,56 @@ func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 		})
 	}
 
+	// RETURNING clause.
+	if len(n.ReturningList) > 0 {
+		ret, err := a.transformReturningList(n.ReturningList)
+		if err != nil {
+			return nil, fmt.Errorf("analyzer: UPDATE RETURNING: %w", err)
+		}
+		q.ReturningList = ret
+	}
+
 	q.RangeTable = a.rangeTable
 	return q, nil
+}
+
+// transformReturningList resolves a RETURNING clause into target entries.
+func (a *Analyzer) transformReturningList(list []*parser.ResTarget) ([]*TargetEntry, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	var entries []*TargetEntry
+	for _, rt := range list {
+		if isStarTarget(rt) {
+			// RETURNING * — expand all columns from the range table.
+			for _, rte := range a.rangeTable {
+				for _, col := range rte.Columns {
+					entries = append(entries, &TargetEntry{
+						Name: col.Name,
+						Expr: &ColumnVar{
+							RTIndex:  rte.RTIndex,
+							ColNum:   col.ColNum,
+							ColName:  col.Name,
+							Table:    rte.RelName,
+							VarType:  col.Type,
+							AttIndex: int(col.ColNum - 1),
+						},
+					})
+				}
+			}
+			continue
+		}
+		expr, err := a.transformExpr(rt.Val)
+		if err != nil {
+			return nil, err
+		}
+		name := rt.Name
+		if name == "" {
+			name = exprString(rt.Val)
+		}
+		entries = append(entries, &TargetEntry{Name: name, Expr: expr})
+	}
+	return entries, nil
 }
 
 // --- Utility statement transformations ---
@@ -989,6 +1292,8 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		sqlType := typeNameToString(colDef.TypeName)
 		dt := a.resolveColumnType(sqlType)
 		notNull := false
+		primaryKey := false
+		unique := false
 		defaultExpr := ""
 		for _, c := range colDef.Constraints {
 			switch c.Contype {
@@ -998,10 +1303,43 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 				if c.RawExpr != nil {
 					defaultExpr = parser.DeparseExpr(c.RawExpr)
 				}
+			case parser.CONSTR_PRIMARY:
+				primaryKey = true
+				notNull = true // PRIMARY KEY implies NOT NULL
+			case parser.CONSTR_UNIQUE:
+				unique = true
 			}
 		}
-		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, NotNull: notNull, DefaultExpr: defaultExpr})
+		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr})
 	}
+
+	// Handle table-level constraints (e.g., PRIMARY KEY (col), UNIQUE (col)).
+	for _, elt := range n.TableElts {
+		con, ok := elt.(*parser.Constraint)
+		if !ok {
+			continue
+		}
+		switch con.Contype {
+		case parser.CONSTR_PRIMARY:
+			for _, key := range con.Keys {
+				for i := range cols {
+					if cols[i].Name == key {
+						cols[i].PrimaryKey = true
+						cols[i].NotNull = true
+					}
+				}
+			}
+		case parser.CONSTR_UNIQUE:
+			for _, key := range con.Keys {
+				for i := range cols {
+					if cols[i].Name == key {
+						cols[i].Unique = true
+					}
+				}
+			}
+		}
+	}
+
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
 		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName, Columns: cols,
 	}), nil
@@ -1036,7 +1374,7 @@ func (a *Analyzer) transformExplainStmt(n *parser.ExplainStmt) (*Query, error) {
 func (a *Analyzer) transformAlterTableStmt(n *parser.AlterTableStmt) (*Query, error) {
 	tableName := n.Relation.Relname
 
-	// Check for RLS enable/disable commands.
+	// Handle single-command ALTER TABLE statements that map to dedicated utility types.
 	for _, cmd := range n.Cmds {
 		switch cmd.Subtype {
 		case parser.AT_EnableRowSecurity:
@@ -1046,6 +1384,41 @@ func (a *Analyzer) transformAlterTableStmt(n *parser.AlterTableStmt) (*Query, er
 		case parser.AT_DisableRowSecurity:
 			return a.makeUtilityQuery(UtilDisableRLS, &UtilityStmt{
 				Type: UtilDisableRLS, TableName: tableName,
+			}), nil
+		case parser.AT_AddColumn:
+			colDef, ok := cmd.Def.(*parser.ColumnDef)
+			if !ok {
+				return nil, fmt.Errorf("analyzer: ADD COLUMN missing column definition")
+			}
+			sqlType := typeNameToString(colDef.TypeName)
+			dt := a.resolveColumnType(sqlType)
+			notNull := colDef.IsNotNull
+			defaultExpr := ""
+			for _, c := range colDef.Constraints {
+				switch c.Contype {
+				case parser.CONSTR_NOTNULL:
+					notNull = true
+				case parser.CONSTR_DEFAULT:
+					if c.RawExpr != nil {
+						defaultExpr = parser.DeparseExpr(c.RawExpr)
+					}
+				}
+			}
+			return a.makeUtilityQuery(UtilAddColumn, &UtilityStmt{
+				Type:      UtilAddColumn,
+				TableName: tableName,
+				AlterColDef: &ColDef{
+					Name: colDef.Colname, Type: dt, TypeName: sqlType,
+					NotNull: notNull, DefaultExpr: defaultExpr,
+				},
+				AlterIfNotExists: cmd.MissingOk,
+			}), nil
+		case parser.AT_DropColumn:
+			return a.makeUtilityQuery(UtilDropColumn, &UtilityStmt{
+				Type:         UtilDropColumn,
+				TableName:    tableName,
+				AlterColName: cmd.Name,
+				AlterIfExists: cmd.MissingOk,
 			}), nil
 		}
 	}
@@ -1642,6 +2015,16 @@ func (a *Analyzer) transformDropFunctionStmt(n *parser.RemoveFuncStmt) (*Query, 
 	}), nil
 }
 
+func (a *Analyzer) transformTruncateStmt(n *parser.TruncateStmt) (*Query, error) {
+	if len(n.Relations) == 0 {
+		return nil, fmt.Errorf("analyzer: TRUNCATE requires at least one table")
+	}
+	tableName := n.Relations[0].Relname
+	return a.makeUtilityQuery(UtilTruncate, &UtilityStmt{
+		Type: UtilTruncate, TableName: tableName,
+	}), nil
+}
+
 func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 	switch n.RemoveType {
 	case parser.OBJECT_TRIGGER:
@@ -1668,6 +2051,28 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 			Type:          UtilDropType,
 			DropTypeName:  typeName,
 			DropMissingOk: n.MissingOk,
+		}), nil
+	case parser.OBJECT_INDEX:
+		indexName := ""
+		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
+			indexName = n.Objects[0][len(n.Objects[0])-1]
+		}
+		return a.makeUtilityQuery(UtilDropIndex, &UtilityStmt{
+			Type:          UtilDropIndex,
+			IndexName:     indexName,
+			DropMissingOk: n.MissingOk,
+			DropCascade:   n.Behavior == parser.DROP_CASCADE,
+		}), nil
+	case parser.OBJECT_VIEW:
+		viewName := ""
+		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
+			viewName = n.Objects[0][len(n.Objects[0])-1]
+		}
+		return a.makeUtilityQuery(UtilDropView, &UtilityStmt{
+			Type:          UtilDropView,
+			ViewName:      viewName,
+			DropMissingOk: n.MissingOk,
+			DropCascade:   n.Behavior == parser.DROP_CASCADE,
 		}), nil
 	case parser.OBJECT_SCHEMA:
 		schemaName := ""
