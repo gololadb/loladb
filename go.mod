@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/chzyer/readline v1.5.1
-	github.com/gololadb/gopgsql v0.0.0-20260402131737-d38bb67d2e8e
+	github.com/gololadb/gopgsql v0.0.0-20260402134522-9440f074d9a7
 )
 
 require (

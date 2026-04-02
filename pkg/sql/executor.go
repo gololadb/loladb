@@ -88,11 +88,11 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		stmt = explain.Query
 	}
 
-	// For CREATE VIEW, extract the SELECT definition from the original SQL
+	// For CREATE VIEW, deparse the SELECT definition from the AST
 	// so we can store it as the rewrite rule definition.
 	var viewDefSQL string
-	if _, ok := stmt.(*parser.ViewStmt); ok {
-		viewDefSQL = extractViewDef(sql)
+	if vs, ok := stmt.(*parser.ViewStmt); ok {
+		viewDefSQL = parser.Deparse(vs.Query)
 	}
 
 	// Phase 1: Analyze — parse tree → Query tree (semantic analysis).
@@ -229,13 +229,4 @@ func extractSetValue(expr parser.Expr) string {
 	return ""
 }
 
-// extractViewDef extracts the SELECT portion from a CREATE VIEW statement.
-// e.g., "CREATE VIEW v AS SELECT * FROM t" → "SELECT * FROM t"
-func extractViewDef(sql string) string {
-	upper := strings.ToUpper(sql)
-	idx := strings.Index(upper, " AS ")
-	if idx < 0 {
-		return ""
-	}
-	return strings.TrimSpace(sql[idx+4:])
-}
+

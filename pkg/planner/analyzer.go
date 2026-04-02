@@ -434,14 +434,9 @@ func (a *Analyzer) transformConst(c *parser.A_Const) AnalyzedExpr {
 			return &Const{Value: tuple.DText(c.Val.Str), ConstType: tuple.TypeText}
 		}
 		return &Const{Value: tuple.DFloat64(f), ConstType: tuple.TypeFloat64}
+	case parser.ValBool:
+		return &Const{Value: tuple.DBool(c.Val.Bool), ConstType: tuple.TypeBool}
 	case parser.ValStr:
-		// gopgsql represents boolean literals true/false as ValStr "t"/"f".
-		if c.Val.Str == "t" {
-			return &Const{Value: tuple.DBool(true), ConstType: tuple.TypeBool}
-		}
-		if c.Val.Str == "f" {
-			return &Const{Value: tuple.DBool(false), ConstType: tuple.TypeBool}
-		}
 		return &Const{Value: tuple.DText(c.Val.Str), ConstType: tuple.TypeText}
 	case parser.ValNull:
 		return &Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}

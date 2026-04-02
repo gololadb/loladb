@@ -376,16 +376,6 @@ func unescapeCopyText(s string) string {
 // preprocessSQL rewrites PostgreSQL-specific syntax that our parser
 // doesn't handle into equivalent forms it can parse.
 func preprocessSQL(sql string) string {
-	// Strip PARTITION BY clauses from CREATE TABLE.
-	// e.g. "... ) PARTITION BY RANGE (payment_date)" → "... )"
-	if idx := findPartitionBy(sql); idx >= 0 {
-		sql = strings.TrimSpace(sql[:idx])
-		// Make sure it still ends with )
-		if !strings.HasSuffix(sql, ")") {
-			sql += ")"
-		}
-	}
-
 	// Replace schema-qualified custom types with TEXT.
 	// Matches patterns like "public.typename" in column definitions.
 	sql = replaceCustomTypes(sql)
@@ -394,26 +384,6 @@ func preprocessSQL(sql string) string {
 	sql = replaceUnsupportedTypes(sql)
 
 	return sql
-}
-
-// findPartitionBy returns the index of "PARTITION BY" in a CREATE TABLE
-// statement, or -1 if not found.
-func findPartitionBy(sql string) int {
-	upper := strings.ToUpper(sql)
-	if !strings.Contains(upper, "CREATE TABLE") {
-		return -1
-	}
-	idx := strings.Index(upper, "PARTITION BY")
-	if idx < 0 {
-		return -1
-	}
-	// Walk backward to find the closing paren before PARTITION BY.
-	for i := idx - 1; i >= 0; i-- {
-		if sql[i] == ')' {
-			return i + 1 // keep the closing paren, strip from there
-		}
-	}
-	return idx
 }
 
 // replaceCustomTypes replaces schema-qualified types (e.g., public.year,
@@ -655,7 +625,6 @@ func isExpectedParseFailure(sql string, err error) bool {
 				return true
 			}
 			if strings.Contains(upper, "OWNER TO") ||
-				strings.Contains(upper, "PARTITION BY") ||
 				strings.Contains(upper, "ATTACH PARTITION") {
 				return true
 			}
