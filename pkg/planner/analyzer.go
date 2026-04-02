@@ -231,11 +231,22 @@ func (a *Analyzer) transformFromClause(items []parser.Node) ([]JoinTreeNode, err
 func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 	switch t := item.(type) {
 	case *parser.RangeVar:
-		alias := t.Relname
+		tableName := t.Relname
+		alias := tableName
 		if t.Alias != nil && t.Alias.Aliasname != "" {
 			alias = t.Alias.Aliasname
 		}
-		rte, err := a.addRangeTableEntry(t.Relname, alias)
+		// Schema-qualified names: pg_catalog.pg_class → pg_class.
+		// We resolve by stripping the schema prefix since all catalog
+		// tables live in a flat namespace for now.
+		if t.Schemaname != "" {
+			// Keep the unqualified name for catalog lookup.
+			// The alias defaults to the unqualified name.
+			if alias == tableName {
+				alias = tableName
+			}
+		}
+		rte, err := a.addRangeTableEntry(tableName, alias)
 		if err != nil {
 			return nil, err
 		}
@@ -460,6 +471,20 @@ func (a *Analyzer) transformColumnRef(ref *parser.ColumnRef) (AnalyzedExpr, erro
 		if s, ok := ref.Fields[1].(*parser.String); ok {
 			colName = s.Str
 		} else if _, ok := ref.Fields[1].(*parser.A_Star); ok {
+			return &StarExpr{}, nil
+		}
+		return a.resolveColumnByName(colName, tableName)
+	}
+	if len(ref.Fields) == 3 {
+		// schema.table.column — strip schema, resolve as table.column.
+		tableName := ""
+		colName := ""
+		if s, ok := ref.Fields[1].(*parser.String); ok {
+			tableName = s.Str
+		}
+		if s, ok := ref.Fields[2].(*parser.String); ok {
+			colName = s.Str
+		} else if _, ok := ref.Fields[2].(*parser.A_Star); ok {
 			return &StarExpr{}, nil
 		}
 		return a.resolveColumnByName(colName, tableName)

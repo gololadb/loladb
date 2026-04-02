@@ -50,6 +50,82 @@ func (a *sqlAdapter) SetUser(user string) {
 	a.exec.SetRole(user)
 }
 
+// CatalogProvider implementation for pg_dump compatibility.
+
+func (a *sqlAdapter) ListTables() []pgwire.TableInfo {
+	tables, err := a.cat.ListTables()
+	if err != nil {
+		return nil
+	}
+	var result []pgwire.TableInfo
+	for _, t := range tables {
+		cols, _ := a.cat.GetColumns(t.OID)
+		var colInfos []pgwire.ColumnInfo
+		for _, c := range cols {
+			typeOID := int32(23) // int4 default
+			switch c.Type {
+			case 1: // TypeInt32
+				typeOID = 23
+			case 2: // TypeInt64
+				typeOID = 20
+			case 3: // TypeText
+				typeOID = 25
+			case 4: // TypeBool
+				typeOID = 16
+			case 5: // TypeFloat64
+				typeOID = 701
+			}
+			colInfos = append(colInfos, pgwire.ColumnInfo{
+				Name:    c.Name,
+				TypeOID: typeOID,
+				Num:     int16(c.Num),
+			})
+		}
+		result = append(result, pgwire.TableInfo{
+			OID:     t.OID,
+			Name:    t.Name,
+			Columns: colInfos,
+		})
+	}
+	return result
+}
+
+func (a *sqlAdapter) ListIndexes() []pgwire.IndexMeta {
+	indexes, err := a.cat.ListAllIndexes()
+	if err != nil {
+		return nil
+	}
+	var result []pgwire.IndexMeta
+	for _, idx := range indexes {
+		// Look up the table name and column name.
+		tableName := ""
+		colName := ""
+		tables, _ := a.cat.ListTables()
+		for _, t := range tables {
+			if t.OID == idx.TableOID {
+				tableName = t.Name
+				cols, _ := a.cat.GetColumns(t.OID)
+				for _, c := range cols {
+					if c.Num == idx.ColNum {
+						colName = c.Name
+						break
+					}
+				}
+				break
+			}
+		}
+		result = append(result, pgwire.IndexMeta{
+			OID:       idx.OID,
+			Name:      idx.Name,
+			TableOID:  idx.TableOID,
+			TableName: tableName,
+			ColName:   colName,
+			Method:    idx.Method,
+		})
+	}
+	return result
+}
+
 func (a *sqlAdapter) NewSession() pgwire.QueryExecutor {
 	ex := sql.NewExecutor(a.cat)
 	return &sqlAdapter{cat: a.cat, exec: ex}

@@ -222,45 +222,7 @@ func (s *aclStore) GetACL(relOID int32) []ACLItem {
 // Catalog methods for role management (pg_authid)
 // -----------------------------------------------------------------------
 
-// bootstrapAuth allocates pg_authid and pg_auth_members pages and
-// creates the default superuser role.
-func (c *Catalog) bootstrapAuth() error {
-	pgAuthIDPage, err := c.Eng.AllocPage()
-	if err != nil {
-		return err
-	}
-	pgAuthMembersPage, err := c.Eng.AllocPage()
-	if err != nil {
-		return err
-	}
-
-	for _, pg := range []uint32{pgAuthIDPage, pgAuthMembersPage} {
-		buf, err := c.Eng.Pool.FetchPage(pg)
-		if err != nil {
-			return err
-		}
-		sp := slottedpage.Init(slottedpage.PageTypeHeap, pg, 0)
-		copy(buf, sp.Bytes())
-		c.Eng.Pool.MarkDirty(pg)
-		c.Eng.Pool.ReleasePage(pg)
-	}
-
-	c.Eng.Super.PgAuthIDPage = pgAuthIDPage
-	c.Eng.Super.PgAuthMembersPage = pgAuthMembersPage
-
-	// Create the default superuser role (like PostgreSQL's bootstrap superuser).
-	return c.createRoleInternal(&Role{
-		OID:       int32(c.Eng.Super.AllocOID()),
-		Name:      "loladb",
-		SuperUser: true,
-		CreateDB:  true,
-		CreateRole: true,
-		Inherit:   true,
-		Login:     true,
-		BypassRLS: true,
-		ConnLimit: -1,
-	})
-}
+// bootstrapAuth is now handled by the unified bootstrap in bootstrap.go.
 
 // pg_authid tuple format:
 // (oid int32, rolname text, rolsuper int32, rolcreatedb int32,
@@ -811,23 +773,7 @@ func (c *Catalog) FindRelationByOID(relOID int32) *Relation {
 	return found
 }
 
-// bootstrapACL allocates the pg_acl heap page.
-func (c *Catalog) bootstrapACL() error {
-	pgACLPage, err := c.Eng.AllocPage()
-	if err != nil {
-		return err
-	}
-	buf, err := c.Eng.Pool.FetchPage(pgACLPage)
-	if err != nil {
-		return err
-	}
-	sp := slottedpage.Init(slottedpage.PageTypeHeap, pgACLPage, 0)
-	copy(buf, sp.Bytes())
-	c.Eng.Pool.MarkDirty(pgACLPage)
-	c.Eng.Pool.ReleasePage(pgACLPage)
-	c.Eng.Super.PgACLPage = pgACLPage
-	return nil
-}
+// bootstrapACL is now handled by the unified bootstrap in bootstrap.go.
 
 // pg_acl tuple format: (reloid int32, grantee int32, grantor int32, privileges int32, columns text)
 // The columns field is a comma-separated list of column names, or empty for table-level.

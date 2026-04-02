@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strings"
 
 	"github.com/jespino/loladb/pkg/tuple"
@@ -80,6 +81,9 @@ const (
 	msgBindComplete     byte = '2'
 	msgCloseComplete    byte = '3'
 	msgNoData           byte = 'n'
+	msgCopyOutResponse  byte = 'H'
+	msgCopyData         byte = 'd'
+	msgCopyDone         byte = 'c'
 )
 
 // Error/Notice field identifiers — mirrors postgres_ext.h PG_DIAG_*.
@@ -189,6 +193,7 @@ type conn struct {
 	params        map[string]string // startup parameters from client
 	preparedSQL   string            // last Parse'd statement
 	portalSQL     string            // last Bind'd portal
+	namedStmts    map[string]string // SQL-level PREPARE name→query
 }
 
 func (s *Server) handleConn(nc net.Conn) {
@@ -206,6 +211,7 @@ func (s *Server) handleConn(nc net.Conn) {
 		tlsConfig:     s.TLSConfig,
 		authenticator: s.Authenticator,
 		params:        make(map[string]string),
+		namedStmts:    make(map[string]string),
 	}
 
 	if err := c.startup(); err != nil {
@@ -288,14 +294,16 @@ func (c *conn) startup() error {
 		break // startup complete
 	}
 
-	// Set the session user if the executor supports it.
-	if user, ok := c.params["user"]; ok {
-		if se, ok := c.executor.(SessionExecutor); ok {
-			se.SetUser(user)
+	// Set the session user and authenticate if an authenticator is configured.
+	// When no authenticator is set (--no-auth), we leave the session user
+	// empty so that privilege checks are bypassed.
+	if c.authenticator != nil {
+		if user, ok := c.params["user"]; ok {
+			if se, ok := c.executor.(SessionExecutor); ok {
+				se.SetUser(user)
+			}
 		}
 	}
-
-	// Authenticate if an authenticator is configured.
 	if c.authenticator != nil {
 		if err := c.authenticate(); err != nil {
 			c.sendError("FATAL", "28P01", err.Error())
@@ -413,6 +421,37 @@ func (c *conn) handleQuery(payload []byte) {
 }
 
 func (c *conn) executeAndSend(sql string) {
+	// Handle SQL-level PREPARE / EXECUTE / DEALLOCATE for pg_dump.
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	if strings.HasPrefix(upper, "PREPARE ") {
+		c.handleSQLPrepare(sql)
+		return
+	}
+	if strings.HasPrefix(upper, "EXECUTE ") {
+		c.handleSQLExecute(sql)
+		return
+	}
+	if strings.HasPrefix(upper, "COPY ") && strings.Contains(upper, "TO STDOUT") {
+		c.handleCopyToStdout(sql, upper)
+		return
+	}
+
+	// Try the pg_dump compatibility interceptor first.
+	var provider CatalogProvider
+	if cp, ok := c.executor.(CatalogProvider); ok {
+		provider = cp
+	}
+	if result, handled := interceptQuery(sql, provider); handled {
+		if len(result.Columns) > 0 {
+			c.sendRowDescription(result.Columns)
+			for _, row := range result.Rows {
+				c.sendDataRow(row)
+			}
+		}
+		c.sendCommandComplete(result.Message)
+		return
+	}
+
 	result, err := c.executor.Execute(sql)
 	if err != nil {
 		c.sendError("ERROR", "42000", err.Error())
@@ -748,4 +787,200 @@ func splitStatements(sql string) []string {
 		stmts = append(stmts, s)
 	}
 	return stmts
+}
+
+
+// handleSQLPrepare parses SQL-level PREPARE and stores the query text.
+// Syntax: PREPARE name(type,...) AS query
+// or:     PREPARE name AS query
+func (c *conn) handleSQLPrepare(sql string) {
+	// Strip "PREPARE " prefix.
+	rest := strings.TrimSpace(sql[len("PREPARE "):])
+
+	// Extract name — everything up to '(' or whitespace.
+	var name string
+	idx := strings.IndexAny(rest, "( \t")
+	if idx < 0 {
+		c.sendError("ERROR", "42601", "invalid PREPARE syntax")
+		return
+	}
+	name = strings.ToLower(rest[:idx])
+	rest = rest[idx:]
+
+	// Skip optional parameter type list: (...).
+	if rest[0] == '(' {
+		paren := strings.Index(rest, ")")
+		if paren < 0 {
+			c.sendError("ERROR", "42601", "invalid PREPARE syntax: unmatched parenthesis")
+			return
+		}
+		rest = rest[paren+1:]
+	}
+
+	// Find "AS" keyword (may be followed by space or newline).
+	rest = strings.TrimSpace(rest)
+	upper := strings.ToUpper(rest)
+	if len(upper) >= 3 && upper[:2] == "AS" && (upper[2] == ' ' || upper[2] == '\n' || upper[2] == '\r' || upper[2] == '\t') {
+		rest = rest[2:]
+	} else {
+		c.sendError("ERROR", "42601", "invalid PREPARE syntax: missing AS")
+		return
+	}
+	query := strings.TrimSpace(rest)
+
+	c.namedStmts[name] = query
+	c.sendCommandComplete("PREPARE")
+}
+
+var reParam = regexp.MustCompile(`\$(\d+)`)
+
+// handleSQLExecute runs a previously PREPAREd statement with parameter substitution.
+// Syntax: EXECUTE name(val, val, ...)
+// or:     EXECUTE name
+func (c *conn) handleSQLExecute(sql string) {
+	rest := strings.TrimSpace(sql[len("EXECUTE "):])
+
+	// Extract name.
+	var name string
+	idx := strings.IndexAny(rest, "( \t;")
+	if idx < 0 {
+		name = strings.ToLower(strings.TrimRight(rest, "; \t"))
+	} else {
+		name = strings.ToLower(rest[:idx])
+		rest = rest[idx:]
+	}
+
+	query, ok := c.namedStmts[name]
+	if !ok {
+		c.sendError("ERROR", "26000", fmt.Sprintf("prepared statement %q does not exist", name))
+		return
+	}
+
+	// Extract parameter values if present.
+	var params []string
+	if idx >= 0 && len(rest) > 0 && rest[0] == '(' {
+		end := strings.LastIndex(rest, ")")
+		if end > 0 {
+			paramStr := rest[1:end]
+			params = splitParams(paramStr)
+		}
+	}
+
+	// Substitute $1, $2, ... with actual values.
+	resolved := reParam.ReplaceAllStringFunc(query, func(m string) string {
+		numStr := m[1:]
+		n := 0
+		for _, ch := range numStr {
+			n = n*10 + int(ch-'0')
+		}
+		if n >= 1 && n <= len(params) {
+			return params[n-1]
+		}
+		return m
+	})
+
+	// Route through the normal query path (which includes the interceptor).
+	c.executeAndSend(resolved)
+}
+
+// splitParams splits a comma-separated parameter list, respecting quoted strings.
+func splitParams(s string) []string {
+	var params []string
+	var current strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '\'' && !inQuote:
+			inQuote = true
+			current.WriteByte(ch)
+		case ch == '\'' && inQuote:
+			if i+1 < len(s) && s[i+1] == '\'' {
+				current.WriteString("''")
+				i++
+			} else {
+				inQuote = false
+				current.WriteByte(ch)
+			}
+		case ch == ',' && !inQuote:
+			params = append(params, strings.TrimSpace(current.String()))
+			current.Reset()
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	if current.Len() > 0 {
+		params = append(params, strings.TrimSpace(current.String()))
+	}
+	return params
+}
+
+// handleCopyToStdout implements COPY table TO stdout for pg_dump.
+// Converts to SELECT, then sends results in COPY text format.
+func (c *conn) handleCopyToStdout(sql, upper string) {
+	// Parse: COPY schema.table (col1, col2, ...) TO stdout;
+	// Extract table name and optional column list.
+	rest := strings.TrimSpace(sql[len("COPY "):])
+
+	// Find table name (possibly schema-qualified).
+	var tableName string
+	idx := strings.IndexAny(rest, " (")
+	if idx < 0 {
+		c.sendError("ERROR", "42601", "invalid COPY syntax")
+		return
+	}
+	tableName = rest[:idx]
+	// Strip schema prefix.
+	if dot := strings.LastIndex(tableName, "."); dot >= 0 {
+		tableName = tableName[dot+1:]
+	}
+
+	// Build SELECT query.
+	selectSQL := fmt.Sprintf("SELECT * FROM %s", tableName)
+
+	result, err := c.executor.Execute(selectSQL)
+	if err != nil {
+		c.sendError("ERROR", "42000", err.Error())
+		return
+	}
+
+	// Send CopyOutResponse: text format, N columns.
+	numCols := len(result.Columns)
+	{
+		buf := newMsgBuf(msgCopyOutResponse)
+		buf.writeByte(0) // text format overall
+		buf.writeInt16(int16(numCols))
+		for i := 0; i < numCols; i++ {
+			buf.writeInt16(0) // text format per column
+		}
+		c.send(buf)
+	}
+
+	// Send CopyData for each row (tab-separated, newline-terminated).
+	for _, row := range result.Rows {
+		var line strings.Builder
+		for i, d := range row {
+			if i > 0 {
+				line.WriteByte('\t')
+			}
+			if d.Type == tuple.TypeNull {
+				line.WriteString("\\N")
+			} else {
+				line.WriteString(datumToText(d))
+			}
+		}
+		line.WriteByte('\n')
+
+		buf := newMsgBuf(msgCopyData)
+		buf.writeBytes([]byte(line.String()))
+		c.send(buf)
+	}
+
+	// Send CopyDone.
+	{
+		buf := newMsgBuf(msgCopyDone)
+		c.send(buf)
+	}
+
+	c.sendCommandComplete(fmt.Sprintf("COPY %d", len(result.Rows)))
 }
