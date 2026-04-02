@@ -3,9 +3,9 @@ package catalog
 import (
 	"testing"
 
-	"github.com/jespino/loladb/pkg/engine"
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 func openEngine(t *testing.T, path string) (*engine.Engine, error) {

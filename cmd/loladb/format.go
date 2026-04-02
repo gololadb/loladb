@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	loladbsql "github.com/jespino/loladb/pkg/sql"
-	"github.com/jespino/loladb/pkg/tuple"
+	loladbsql "github.com/gololadb/loladb/pkg/sql"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 func formatResult(r *loladbsql.Result, format string) string {

@@ -3,10 +3,10 @@ package brin
 import (
 	"testing"
 
-	"github.com/jespino/loladb/pkg/index"
-	"github.com/jespino/loladb/pkg/pageio"
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/index"
+	"github.com/gololadb/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 type memAllocator struct {

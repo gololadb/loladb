@@ -7,8 +7,8 @@ import (
 
 	"github.com/jespino/gopgsql/parser"
 
-	"github.com/jespino/loladb/pkg/catalog"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // Analyzer performs semantic analysis on a raw parse tree, resolving

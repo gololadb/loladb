@@ -4,11 +4,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jespino/loladb/pkg/freelist"
-	"github.com/jespino/loladb/pkg/pageio"
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/superblock"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/freelist"
+	"github.com/gololadb/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/superblock"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // TestPhase1_EndToEnd exercises the full Phase 1 flow:

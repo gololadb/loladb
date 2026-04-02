@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/jespino/loladb/pkg/pageio"
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // MaxInlineSize is the maximum byte length of a Text datum before it

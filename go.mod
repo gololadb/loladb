@@ -1,4 +1,4 @@
-module github.com/jespino/loladb
+module github.com/gololadb/loladb
 
 go 1.25.1
 

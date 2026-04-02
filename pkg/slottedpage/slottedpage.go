@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/jespino/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/pageio"
 )
 
 // Page type constants.

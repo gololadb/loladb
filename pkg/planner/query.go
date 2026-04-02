@@ -3,7 +3,7 @@ package planner
 import (
 	"fmt"
 
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // CmdType identifies the type of command a Query represents,

@@ -3,8 +3,8 @@ package toast
 import (
 	"testing"
 
-	"github.com/jespino/loladb/pkg/pageio"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 type memAlloc struct {

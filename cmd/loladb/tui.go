@@ -10,9 +10,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jespino/loladb/pkg/catalog"
-	"github.com/jespino/loladb/pkg/engine"
-	loladbsql "github.com/jespino/loladb/pkg/sql"
+	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/engine"
+	loladbsql "github.com/gololadb/loladb/pkg/sql"
 )
 
 func runTUI(path string) {

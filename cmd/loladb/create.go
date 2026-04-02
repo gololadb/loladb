@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jespino/loladb/pkg/catalog"
-	"github.com/jespino/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/engine"
 )
 
 func runCreate(path string) {

@@ -5,8 +5,8 @@ import (
 	"math"
 	"strings"
 
-	"github.com/jespino/loladb/pkg/catalog"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // Optimizer converts a logical plan into a physical plan using

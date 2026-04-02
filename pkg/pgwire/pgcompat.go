@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // CatalogProvider supplies schema metadata for pg_dump compatibility.

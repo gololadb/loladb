@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // mockExecutor implements QueryExecutor for testing.

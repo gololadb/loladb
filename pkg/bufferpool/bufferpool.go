@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/jespino/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/pageio"
 )
 
 // DefaultPoolSize is the default number of frames in the buffer pool.

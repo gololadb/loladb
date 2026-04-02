@@ -3,7 +3,7 @@ package slottedpage
 import (
 	"testing"
 
-	"github.com/jespino/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/pageio"
 )
 
 func TestInit(t *testing.T) {

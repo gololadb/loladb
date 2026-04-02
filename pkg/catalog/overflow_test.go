@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 func TestOverflow_ThousandsOfRows(t *testing.T) {

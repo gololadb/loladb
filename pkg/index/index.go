@@ -13,8 +13,8 @@ import (
 	"hash/fnv"
 	"math"
 
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // DatumToInt64 converts any Datum to an int64 key suitable for index

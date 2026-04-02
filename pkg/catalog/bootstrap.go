@@ -3,7 +3,7 @@ package catalog
 import (
 	"fmt"
 
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // bootstrap creates the initial system catalog tables and populates

@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jespino/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/pageio"
 )
 
 func newTestPool(t *testing.T, size int) (*BufferPool, *pageio.PageIO) {

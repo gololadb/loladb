@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jespino/loladb/pkg/catalog"
-	"github.com/jespino/loladb/pkg/engine"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 var _ = tuple.DNull

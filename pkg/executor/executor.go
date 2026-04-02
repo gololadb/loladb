@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jespino/loladb/pkg/catalog"
-	"github.com/jespino/loladb/pkg/index"
-	"github.com/jespino/loladb/pkg/planner"
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/index"
+	"github.com/gololadb/loladb/pkg/planner"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // Result holds the output of plan execution.

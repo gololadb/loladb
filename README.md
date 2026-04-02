@@ -1,4 +1,4 @@
-[![Built with Ona](https://ona.com/build-with-ona.svg)](https://app.ona.com/#https://github.com/jespino/loladb)
+[![Built with Ona](https://ona.com/build-with-ona.svg)](https://app.ona.com/#https://github.com/gololadb/loladb)
 
 # LolaDB
 

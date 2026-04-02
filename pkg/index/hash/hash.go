@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"hash/fnv"
 
-	"github.com/jespino/loladb/pkg/index"
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/index"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // -----------------------------------------------------------------------

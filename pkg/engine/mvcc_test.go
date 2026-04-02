@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // helper: create an engine and a heap page, return engine + head page num.

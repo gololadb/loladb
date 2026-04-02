@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/tuple"
-	"github.com/jespino/loladb/pkg/wal"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/wal"
 )
 
 func tempDir(t *testing.T) string {

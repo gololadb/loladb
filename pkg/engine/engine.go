@@ -6,14 +6,14 @@ import (
 	"os"
 	"sync"
 
-	"github.com/jespino/loladb/pkg/bufferpool"
-	"github.com/jespino/loladb/pkg/freelist"
-	"github.com/jespino/loladb/pkg/mvcc"
-	"github.com/jespino/loladb/pkg/pageio"
-	"github.com/jespino/loladb/pkg/slottedpage"
-	"github.com/jespino/loladb/pkg/superblock"
-	"github.com/jespino/loladb/pkg/tuple"
-	"github.com/jespino/loladb/pkg/wal"
+	"github.com/gololadb/loladb/pkg/bufferpool"
+	"github.com/gololadb/loladb/pkg/freelist"
+	"github.com/gololadb/loladb/pkg/mvcc"
+	"github.com/gololadb/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/superblock"
+	"github.com/gololadb/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/wal"
 )
 
 // Engine ties together the buffer pool, WAL, superblock, and freelist

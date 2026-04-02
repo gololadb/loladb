@@ -6,11 +6,11 @@ import (
 
 	"github.com/jespino/gopgsql/parser"
 
-	"github.com/jespino/loladb/pkg/catalog"
-	"github.com/jespino/loladb/pkg/executor"
-	"github.com/jespino/loladb/pkg/planner"
-	"github.com/jespino/loladb/pkg/rewriter"
-	"github.com/jespino/loladb/pkg/tuple"
+	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/executor"
+	"github.com/gololadb/loladb/pkg/planner"
+	"github.com/gololadb/loladb/pkg/rewriter"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // Result holds the result of a SQL execution.
