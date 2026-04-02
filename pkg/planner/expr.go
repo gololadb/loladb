@@ -378,6 +378,120 @@ type ExprStar struct{}
 func (e *ExprStar) String() string                        { return "*" }
 func (e *ExprStar) Eval(row *Row) (tuple.Datum, error)    { return tuple.DNull(), nil }
 
+// ExprCase represents a CASE expression at the execution level.
+type ExprCase struct {
+	Arg      Expr // optional: simple CASE comparison value
+	Whens    []ExprCaseWhen
+	ElseExpr Expr // optional ELSE clause
+}
+
+type ExprCaseWhen struct {
+	Cond   Expr
+	Result Expr
+}
+
+func (e *ExprCase) String() string {
+	var sb strings.Builder
+	sb.WriteString("CASE")
+	if e.Arg != nil {
+		sb.WriteString(" ")
+		sb.WriteString(e.Arg.String())
+	}
+	for _, w := range e.Whens {
+		sb.WriteString(" WHEN ")
+		sb.WriteString(w.Cond.String())
+		sb.WriteString(" THEN ")
+		sb.WriteString(w.Result.String())
+	}
+	if e.ElseExpr != nil {
+		sb.WriteString(" ELSE ")
+		sb.WriteString(e.ElseExpr.String())
+	}
+	sb.WriteString(" END")
+	return sb.String()
+}
+
+func (e *ExprCase) Eval(row *Row) (tuple.Datum, error) {
+	if e.Arg != nil {
+		argVal, err := e.Arg.Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		for _, w := range e.Whens {
+			whenVal, err := w.Cond.Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if CompareDatums(argVal, whenVal) == 0 {
+				return w.Result.Eval(row)
+			}
+		}
+	} else {
+		for _, w := range e.Whens {
+			condVal, err := w.Cond.Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if datumToBool(condVal) {
+				return w.Result.Eval(row)
+			}
+		}
+	}
+	if e.ElseExpr != nil {
+		return e.ElseExpr.Eval(row)
+	}
+	return tuple.DNull(), nil
+}
+
+// ExprBoolTest represents IS TRUE / IS FALSE / IS UNKNOWN at the execution level.
+type ExprBoolTest struct {
+	Arg  Expr
+	Test BoolTestKind
+}
+
+func (e *ExprBoolTest) String() string {
+	suffix := ""
+	switch e.Test {
+	case BoolTestIsTrue:
+		suffix = " IS TRUE"
+	case BoolTestIsNotTrue:
+		suffix = " IS NOT TRUE"
+	case BoolTestIsFalse:
+		suffix = " IS FALSE"
+	case BoolTestIsNotFalse:
+		suffix = " IS NOT FALSE"
+	case BoolTestIsUnknown:
+		suffix = " IS UNKNOWN"
+	case BoolTestIsNotUnknown:
+		suffix = " IS NOT UNKNOWN"
+	}
+	return e.Arg.String() + suffix
+}
+
+func (e *ExprBoolTest) Eval(row *Row) (tuple.Datum, error) {
+	val, err := e.Arg.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	isNull := val.Type == tuple.TypeNull
+	isTrue := !isNull && datumToBool(val)
+	switch e.Test {
+	case BoolTestIsTrue:
+		return tuple.DBool(isTrue), nil
+	case BoolTestIsNotTrue:
+		return tuple.DBool(!isTrue), nil
+	case BoolTestIsFalse:
+		return tuple.DBool(!isNull && !isTrue), nil
+	case BoolTestIsNotFalse:
+		return tuple.DBool(isNull || isTrue), nil
+	case BoolTestIsUnknown:
+		return tuple.DBool(isNull), nil
+	case BoolTestIsNotUnknown:
+		return tuple.DBool(!isNull), nil
+	}
+	return tuple.DNull(), nil
+}
+
 // --- Helpers ---
 
 func datumToBool(d tuple.Datum) bool {

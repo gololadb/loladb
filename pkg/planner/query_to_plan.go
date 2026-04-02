@@ -404,6 +404,27 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 		return &ExprFunc{Name: e.FuncName, Args: args}
 	case *StarExpr:
 		return &ExprStar{}
+	case *CaseExprNode:
+		node := &ExprCase{}
+		if e.Arg != nil {
+			node.Arg = analyzedToExpr(e.Arg, rtes)
+		}
+		node.Whens = make([]ExprCaseWhen, len(e.Whens))
+		for i, w := range e.Whens {
+			node.Whens[i] = ExprCaseWhen{
+				Cond:   analyzedToExpr(w.Cond, rtes),
+				Result: analyzedToExpr(w.Result, rtes),
+			}
+		}
+		if e.ElseExpr != nil {
+			node.ElseExpr = analyzedToExpr(e.ElseExpr, rtes)
+		}
+		return node
+	case *BooleanTestExpr:
+		return &ExprBoolTest{
+			Arg:  analyzedToExpr(e.Arg, rtes),
+			Test: e.Test,
+		}
 	default:
 		// Fallback: AnalyzedExpr already implements Expr.
 		return ae

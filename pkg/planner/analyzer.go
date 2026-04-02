@@ -514,6 +514,100 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 			retType = args[0].ResultType()
 		}
 		return &FuncCallExpr{FuncName: "coalesce", Args: args, ReturnType: retType}, nil
+	case *parser.CaseExpr:
+		var arg AnalyzedExpr
+		if e.Arg != nil {
+			var err error
+			arg, err = a.transformExpr(e.Arg)
+			if err != nil {
+				return nil, err
+			}
+		}
+		whens := make([]CaseWhenClause, len(e.Args))
+		retType := tuple.TypeNull
+		for i, w := range e.Args {
+			cond, err := a.transformExpr(w.Expr)
+			if err != nil {
+				return nil, err
+			}
+			result, err := a.transformExpr(w.Result)
+			if err != nil {
+				return nil, err
+			}
+			if i == 0 && result.ResultType() != tuple.TypeNull {
+				retType = result.ResultType()
+			}
+			whens[i] = CaseWhenClause{Cond: cond, Result: result}
+		}
+		var elseExpr AnalyzedExpr
+		if e.Defresult != nil {
+			var err error
+			elseExpr, err = a.transformExpr(e.Defresult)
+			if err != nil {
+				return nil, err
+			}
+			if retType == tuple.TypeNull && elseExpr.ResultType() != tuple.TypeNull {
+				retType = elseExpr.ResultType()
+			}
+		}
+		return &CaseExprNode{Arg: arg, Whens: whens, ElseExpr: elseExpr, ReturnTyp: retType}, nil
+
+	case *parser.BooleanTest:
+		arg, err := a.transformExpr(e.Arg)
+		if err != nil {
+			return nil, err
+		}
+		var kind BoolTestKind
+		switch e.BooltestType {
+		case parser.IS_TRUE:
+			kind = BoolTestIsTrue
+		case parser.IS_NOT_TRUE:
+			kind = BoolTestIsNotTrue
+		case parser.IS_FALSE:
+			kind = BoolTestIsFalse
+		case parser.IS_NOT_FALSE:
+			kind = BoolTestIsNotFalse
+		case parser.IS_UNKNOWN:
+			kind = BoolTestIsUnknown
+		case parser.IS_NOT_UNKNOWN:
+			kind = BoolTestIsNotUnknown
+		}
+		return &BooleanTestExpr{Arg: arg, Test: kind}, nil
+
+	case *parser.NullIfExpr:
+		if len(e.Args) != 2 {
+			return nil, fmt.Errorf("analyzer: NULLIF requires exactly 2 arguments")
+		}
+		var args []AnalyzedExpr
+		for _, arg := range e.Args {
+			resolved, err := a.transformExpr(arg)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, resolved)
+		}
+		retType := args[0].ResultType()
+		return &FuncCallExpr{FuncName: "nullif", Args: args, ReturnType: retType}, nil
+
+	case *parser.MinMaxExpr:
+		var args []AnalyzedExpr
+		for _, arg := range e.Args {
+			resolved, err := a.transformExpr(arg)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, resolved)
+		}
+		retType := tuple.TypeNull
+		if len(args) > 0 {
+			retType = args[0].ResultType()
+		}
+		funcName := "greatest"
+		if e.Op == parser.IS_LEAST {
+			funcName = "least"
+		}
+		return &FuncCallExpr{FuncName: funcName, Args: args, ReturnType: retType}, nil
+
 	case *parser.ParamRef:
 		return nil, fmt.Errorf("analyzer: parameter references ($%d) not supported", e.Number)
 	default:

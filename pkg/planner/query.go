@@ -663,3 +663,141 @@ func (f *FuncCallExpr) ResultType() tuple.DatumType { return f.ReturnType }
 func (s *StarExpr) String() string                        { return "*" }
 func (s *StarExpr) Eval(row *Row) (tuple.Datum, error)    { return tuple.DNull(), nil }
 func (s *StarExpr) ResultType() tuple.DatumType            { return tuple.TypeNull }
+
+// --- CaseExpr implements AnalyzedExpr ---
+
+// CaseWhenClause is a single WHEN ... THEN ... pair.
+type CaseWhenClause struct {
+	Cond   AnalyzedExpr
+	Result AnalyzedExpr
+}
+
+// CaseExprNode represents a CASE expression.
+type CaseExprNode struct {
+	Arg       AnalyzedExpr     // optional: simple CASE comparison value
+	Whens     []CaseWhenClause // WHEN clauses
+	ElseExpr  AnalyzedExpr     // optional ELSE clause (nil → NULL)
+	ReturnTyp tuple.DatumType
+}
+
+func (c *CaseExprNode) String() string {
+	var sb strings.Builder
+	sb.WriteString("CASE")
+	if c.Arg != nil {
+		sb.WriteString(" ")
+		sb.WriteString(c.Arg.String())
+	}
+	for _, w := range c.Whens {
+		sb.WriteString(" WHEN ")
+		sb.WriteString(w.Cond.String())
+		sb.WriteString(" THEN ")
+		sb.WriteString(w.Result.String())
+	}
+	if c.ElseExpr != nil {
+		sb.WriteString(" ELSE ")
+		sb.WriteString(c.ElseExpr.String())
+	}
+	sb.WriteString(" END")
+	return sb.String()
+}
+
+func (c *CaseExprNode) Eval(row *Row) (tuple.Datum, error) {
+	if c.Arg != nil {
+		// Simple CASE: compare Arg against each WHEN value.
+		argVal, err := c.Arg.Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		for _, w := range c.Whens {
+			whenVal, err := w.Cond.Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if CompareDatums(argVal, whenVal) == 0 {
+				return w.Result.Eval(row)
+			}
+		}
+	} else {
+		// Searched CASE: each WHEN is a boolean expression.
+		for _, w := range c.Whens {
+			condVal, err := w.Cond.Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if datumToBool(condVal) {
+				return w.Result.Eval(row)
+			}
+		}
+	}
+	if c.ElseExpr != nil {
+		return c.ElseExpr.Eval(row)
+	}
+	return tuple.DNull(), nil
+}
+
+func (c *CaseExprNode) ResultType() tuple.DatumType { return c.ReturnTyp }
+
+// --- BooleanTestExpr implements AnalyzedExpr ---
+
+// BoolTestKind mirrors parser.BoolTestType.
+type BoolTestKind int
+
+const (
+	BoolTestIsTrue BoolTestKind = iota
+	BoolTestIsNotTrue
+	BoolTestIsFalse
+	BoolTestIsNotFalse
+	BoolTestIsUnknown
+	BoolTestIsNotUnknown
+)
+
+// BooleanTestExpr represents IS TRUE / IS FALSE / IS UNKNOWN tests.
+type BooleanTestExpr struct {
+	Arg  AnalyzedExpr
+	Test BoolTestKind
+}
+
+func (b *BooleanTestExpr) String() string {
+	suffix := ""
+	switch b.Test {
+	case BoolTestIsTrue:
+		suffix = " IS TRUE"
+	case BoolTestIsNotTrue:
+		suffix = " IS NOT TRUE"
+	case BoolTestIsFalse:
+		suffix = " IS FALSE"
+	case BoolTestIsNotFalse:
+		suffix = " IS NOT FALSE"
+	case BoolTestIsUnknown:
+		suffix = " IS UNKNOWN"
+	case BoolTestIsNotUnknown:
+		suffix = " IS NOT UNKNOWN"
+	}
+	return b.Arg.String() + suffix
+}
+
+func (b *BooleanTestExpr) Eval(row *Row) (tuple.Datum, error) {
+	val, err := b.Arg.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	isNull := val.Type == tuple.TypeNull
+	isTrue := !isNull && datumToBool(val)
+	switch b.Test {
+	case BoolTestIsTrue:
+		return tuple.DBool(isTrue), nil
+	case BoolTestIsNotTrue:
+		return tuple.DBool(!isTrue), nil
+	case BoolTestIsFalse:
+		return tuple.DBool(!isNull && !isTrue), nil
+	case BoolTestIsNotFalse:
+		return tuple.DBool(isNull || isTrue), nil
+	case BoolTestIsUnknown:
+		return tuple.DBool(isNull), nil
+	case BoolTestIsNotUnknown:
+		return tuple.DBool(!isNull), nil
+	}
+	return tuple.DNull(), nil
+}
+
+func (b *BooleanTestExpr) ResultType() tuple.DatumType { return tuple.TypeBool }
