@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jespino/gopgsql/parser"
+	"github.com/gololadb/gopgsql/parser"
 
 	"github.com/gololadb/loladb/pkg/catalog"
 	"github.com/gololadb/loladb/pkg/executor"
