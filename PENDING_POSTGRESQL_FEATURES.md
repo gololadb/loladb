@@ -11,15 +11,19 @@ indicators based on how commonly the feature is used in real applications.
 
 For context, here is what is currently implemented:
 
-- **DML:** SELECT, INSERT (VALUES only), UPDATE, DELETE
-- **DDL:** CREATE/DROP TABLE, CREATE INDEX (btree, hash, brin, gin, gist, spgist),
-  CREATE VIEW, CREATE SEQUENCE, ALTER TABLE (limited), CREATE SCHEMA,
-  CREATE FUNCTION, CREATE TRIGGER, CREATE DOMAIN, CREATE TYPE (enum),
-  CREATE POLICY (RLS)
-- **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, GROUP BY, HAVING, JOIN (INNER, LEFT, RIGHT, CROSS)
+- **DML:** SELECT, INSERT (VALUES, SELECT), UPDATE, DELETE, TRUNCATE,
+  INSERT/UPDATE/DELETE ... RETURNING
+- **DDL:** CREATE/DROP TABLE, CREATE/DROP INDEX, CREATE/DROP VIEW,
+  CREATE/DROP SCHEMA, CREATE SEQUENCE, ALTER TABLE (ADD/DROP COLUMN,
+  ADD CONSTRAINT, RLS enable/disable), CREATE FUNCTION, CREATE TRIGGER,
+  CREATE DOMAIN, CREATE TYPE (enum), CREATE POLICY (RLS)
+- **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, GROUP BY, HAVING,
+  JOIN (INNER, LEFT, RIGHT, CROSS), DISTINCT, UNION/INTERSECT/EXCEPT
 - **Expressions:** Arithmetic (+, -, *, /, %), comparison (=, <>, <, >, <=, >=),
   AND/OR/NOT, IS [NOT] NULL, IS TRUE/FALSE/UNKNOWN, CASE (simple + searched),
-  CAST, COALESCE, NULLIF, GREATEST, LEAST
+  CAST, COALESCE, NULLIF, GREATEST, LEAST, LIKE/ILIKE/NOT LIKE/NOT ILIKE,
+  BETWEEN, IN (value list), IS [NOT] DISTINCT FROM, string concatenation (`||`)
+- **Constraints:** PRIMARY KEY, UNIQUE (with auto-index creation and enforcement)
 - **Aggregates:** count, sum, avg, min, max, bool_and, bool_or, every, string_agg, array_agg
 - **Functions:** ~65 scalar functions (math, string, date/time, regex, formatting, encoding)
 - **Types:** int32, int64, float64, text, bool (+ domains, enums)
@@ -34,34 +38,6 @@ For context, here is what is currently implemented:
 
 ## 1. SQL Expressions and Operators
 
-### 🔴 LIKE / ILIKE / NOT LIKE
-
-```sql
-SELECT * FROM users WHERE name LIKE 'A%';
-SELECT * FROM users WHERE name ILIKE '%smith%';
-```
-
-The parser recognizes `AEXPR_LIKE` and `AEXPR_ILIKE` but the analyzer does not
-handle them. This is one of the most commonly used SQL features.
-
-### 🔴 BETWEEN / NOT BETWEEN
-
-```sql
-SELECT * FROM orders WHERE amount BETWEEN 100 AND 500;
-```
-
-Parser produces `AEXPR_BETWEEN` but the analyzer ignores it. Equivalent to
-`x >= lo AND x <= hi` so could be desugared in the analyzer.
-
-### 🔴 IN (value list)
-
-```sql
-SELECT * FROM users WHERE status IN ('active', 'pending');
-```
-
-Parser produces `AEXPR_IN` but the analyzer does not handle it. Extremely common
-in application queries.
-
 ### 🔴 Subqueries (IN, EXISTS, ANY, ALL, scalar subqueries)
 
 ```sql
@@ -72,14 +48,6 @@ SELECT name, (SELECT count(*) FROM orders o WHERE o.uid = u.id) FROM users u;
 
 No subquery support at all — no `SubLink`/`SubPlan` handling in the analyzer or
 executor. This is a fundamental SQL feature.
-
-### 🔴 IS DISTINCT FROM / IS NOT DISTINCT FROM
-
-```sql
-SELECT * FROM t WHERE a IS DISTINCT FROM b;
-```
-
-NULL-safe equality comparison. Not implemented.
 
 ### 🟡 SIMILAR TO
 
@@ -169,25 +137,6 @@ Niche use case. PostgreSQL supports these with operators and GiST indexing.
 
 ## 3. Query Features
 
-### 🔴 SELECT DISTINCT
-
-```sql
-SELECT DISTINCT city FROM customers;
-SELECT DISTINCT ON (department) name, salary FROM employees;
-```
-
-Not implemented. The `DISTINCT` keyword is only handled for aggregate functions
-(`count(DISTINCT ...)`), not for the top-level SELECT.
-
-### 🔴 UNION / INTERSECT / EXCEPT
-
-```sql
-SELECT name FROM employees UNION SELECT name FROM contractors;
-SELECT id FROM a INTERSECT SELECT id FROM b;
-```
-
-No set operations at all. These are fundamental SQL features.
-
 ### 🔴 Common Table Expressions (WITH / WITH RECURSIVE)
 
 ```sql
@@ -218,15 +167,6 @@ No window function support. This includes `row_number()`, `rank()`,
 `dense_rank()`, `lag()`, `lead()`, `first_value()`, `last_value()`, `ntile()`,
 `percent_rank()`, `cume_dist()`, `nth_value()`, and aggregate-as-window usage.
 
-### 🔴 INSERT ... SELECT
-
-```sql
-INSERT INTO archive SELECT * FROM orders WHERE date < '2023-01-01';
-```
-
-INSERT only supports VALUES clauses. The analyzer explicitly rejects non-VALUES
-sources.
-
 ### 🔴 INSERT ... ON CONFLICT (UPSERT)
 
 ```sql
@@ -235,15 +175,6 @@ ON CONFLICT (key) DO UPDATE SET val = EXCLUDED.val;
 ```
 
 No upsert support.
-
-### 🔴 INSERT / UPDATE / DELETE ... RETURNING
-
-```sql
-INSERT INTO users (name) VALUES ('Alice') RETURNING id;
-DELETE FROM sessions WHERE expired RETURNING user_id;
-```
-
-No RETURNING clause support.
 
 ### 🔴 UPDATE ... FROM
 
@@ -347,24 +278,6 @@ No row-level locks. The design doc mentions this as a future item.
 
 ## 5. Constraints
 
-### 🔴 PRIMARY KEY
-
-```sql
-CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT);
-```
-
-No primary key constraint. The parser recognizes `CONSTR_PRIMARY` but the
-analyzer ignores it. This means no automatic unique index, no enforcement.
-
-### 🔴 UNIQUE
-
-```sql
-CREATE TABLE users (email TEXT UNIQUE);
-ALTER TABLE users ADD CONSTRAINT uq_email UNIQUE (email);
-```
-
-No unique constraint enforcement.
-
 ### 🔴 FOREIGN KEY / REFERENCES
 
 ```sql
@@ -400,29 +313,16 @@ CREATE TABLE t (id INT PRIMARY KEY DEFERRABLE INITIALLY DEFERRED);
 
 ## 6. DDL
 
-### 🔴 DROP INDEX / DROP VIEW / DROP SCHEMA
-
-DROP only supports TABLE and SEQUENCE. Cannot drop indexes, views, or schemas.
-
-### 🔴 ALTER TABLE ADD/DROP/ALTER COLUMN
+### 🟡 ALTER TABLE ALTER COLUMN / RENAME COLUMN
 
 ```sql
-ALTER TABLE users ADD COLUMN age INT;
-ALTER TABLE users DROP COLUMN email;
 ALTER TABLE users ALTER COLUMN name SET NOT NULL;
 ALTER TABLE users RENAME COLUMN name TO full_name;
+ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
 ```
 
-ALTER TABLE is recognized but only handles ADD CONSTRAINT and RLS enable/disable.
-Column modifications are not implemented.
-
-### 🔴 TRUNCATE
-
-```sql
-TRUNCATE TABLE large_table;
-```
-
-Not implemented. Much faster than DELETE for clearing a table.
+ALTER TABLE supports ADD/DROP COLUMN but not ALTER COLUMN type, SET/DROP NOT NULL,
+SET/DROP DEFAULT, or RENAME COLUMN.
 
 ### 🟡 CREATE TABLE ... AS / SELECT INTO
 
@@ -471,19 +371,6 @@ CREATE TABLE logs_2024 PARTITION OF logs FOR VALUES FROM ('2024-01-01') TO ('202
 ---
 
 ## 7. Functions and Operators
-
-### 🔴 LIKE operator (as expression, not function)
-
-Needs analyzer support for `AEXPR_LIKE` → desugar to a pattern-match expression.
-
-### 🔴 String concatenation operator (`||`)
-
-```sql
-SELECT 'hello' || ' ' || 'world';
-```
-
-The `||` operator is not handled in the binary operator evaluation. Only `concat()`
-function works.
 
 ### 🔴 Type casting with `::`
 
@@ -769,30 +656,18 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| LIKE / ILIKE | Expressions |
-| BETWEEN | Expressions |
-| IN (value list) | Expressions |
 | Subqueries (IN, EXISTS, scalar) | Queries |
-| SELECT DISTINCT | Queries |
-| UNION / INTERSECT / EXCEPT | Queries |
 | CTEs (WITH) | Queries |
 | Window functions | Queries |
-| INSERT ... SELECT | DML |
-| INSERT ... RETURNING | DML |
 | INSERT ... ON CONFLICT | DML |
 | UPDATE ... FROM | DML |
 | Real transactions (BEGIN/COMMIT/ROLLBACK) | Transactions |
-| PRIMARY KEY | Constraints |
-| UNIQUE | Constraints |
 | FOREIGN KEY | Constraints |
 | CHECK constraints | Constraints |
-| DROP INDEX / VIEW / SCHEMA | DDL |
-| ALTER TABLE ADD/DROP COLUMN | DDL |
-| TRUNCATE | DDL |
 | Native DATE/TIMESTAMP types | Types |
 | NUMERIC (arbitrary precision) | Types |
 | JSON/JSONB | Types |
-| String `\|\|` operator | Operators |
+| Type casting with `::` | Operators |
 | COPY | Bulk I/O |
 | VACUUM | Maintenance |
 | information_schema | Introspection |
@@ -806,7 +681,7 @@ SELECT pg_advisory_lock(12345);
 | LATERAL joins | Queries |
 | GROUPING SETS / CUBE / ROLLUP | Queries |
 | SIMILAR TO | Expressions |
-| IS DISTINCT FROM | Expressions |
+| ALTER TABLE ALTER/RENAME COLUMN | DDL |
 | Transaction isolation levels | Transactions |
 | FOR UPDATE / FOR SHARE | Transactions |
 | SAVEPOINT | Transactions |
