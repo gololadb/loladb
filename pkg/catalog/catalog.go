@@ -79,6 +79,8 @@ type Catalog struct {
 	Rules    *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
 	Policies *policyStore     // in-memory RLS policy storage (pg_policy)
 	ACLs     *aclStore        // in-memory object ACL cache
+	Funcs    *funcStore       // in-memory function definitions (pg_proc)
+	Triggers *triggerStore    // in-memory trigger definitions (pg_trigger)
 	cache    *syscache        // catalog lookup cache
 }
 
@@ -94,7 +96,12 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		"gist":   gist.NewAM(alloc),
 		"spgist": spgist.NewAM(alloc),
 	}
-	c := &Catalog{Eng: eng, alloc: alloc, IdxAMs: ams, Rules: newRuleStore(), Policies: newPolicyStore(), ACLs: newACLStore(), cache: newSyscache()}
+	c := &Catalog{
+		Eng: eng, alloc: alloc, IdxAMs: ams,
+		Rules: newRuleStore(), Policies: newPolicyStore(), ACLs: newACLStore(),
+		Funcs: newFuncStore(), Triggers: newTriggerStore(),
+		cache: newSyscache(),
+	}
 
 	if eng.Super.PgClassPage == 0 {
 		// Fresh database — bootstrap all catalog tables.
@@ -112,6 +119,12 @@ func New(eng *engine.Engine) (*Catalog, error) {
 	}
 	if err := c.loadPolicies(); err != nil {
 		return nil, fmt.Errorf("catalog: load policies: %w", err)
+	}
+	if err := c.loadFunctions(); err != nil {
+		return nil, fmt.Errorf("catalog: load functions: %w", err)
+	}
+	if err := c.loadTriggers(); err != nil {
+		return nil, fmt.Errorf("catalog: load triggers: %w", err)
 	}
 
 	return c, nil

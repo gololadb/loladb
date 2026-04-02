@@ -38,8 +38,10 @@ const (
 //	 44      4    PgAuthIDPage   — first heap page of pg_authid (roles)
 //	 48      4    PgAuthMembersPage — first heap page of pg_auth_members (role membership)
 //	 52      4    PgACLPage      — first heap page of pg_acl (object privileges)
+//	 56      4    PgProcPage     — first heap page of pg_proc (functions)
+//	 60      4    PgTriggerPage  — first heap page of pg_trigger (triggers)
 //
-// The rest of the page (bytes 56..4095) is reserved and zero-filled.
+// The rest of the page (bytes 64..4095) is reserved and zero-filled.
 type Superblock struct {
 	Magic             uint32
 	Version           uint32
@@ -55,9 +57,11 @@ type Superblock struct {
 	PgAuthIDPage      uint32
 	PgAuthMembersPage uint32
 	PgACLPage         uint32
+	PgProcPage        uint32
+	PgTriggerPage     uint32
 }
 
-const serializedSize = 14 * 4 // 56 bytes
+const serializedSize = 16 * 4 // 64 bytes
 
 // New returns a Superblock initialised with default values for a
 // fresh database.
@@ -92,6 +96,8 @@ func (sb *Superblock) Serialize() []byte {
 	binary.LittleEndian.PutUint32(buf[44:48], sb.PgAuthIDPage)
 	binary.LittleEndian.PutUint32(buf[48:52], sb.PgAuthMembersPage)
 	binary.LittleEndian.PutUint32(buf[52:56], sb.PgACLPage)
+	binary.LittleEndian.PutUint32(buf[56:60], sb.PgProcPage)
+	binary.LittleEndian.PutUint32(buf[60:64], sb.PgTriggerPage)
 	return buf
 }
 
@@ -116,6 +122,8 @@ func Deserialize(buf []byte) (*Superblock, error) {
 		PgAuthIDPage:      binary.LittleEndian.Uint32(buf[44:48]),
 		PgAuthMembersPage: binary.LittleEndian.Uint32(buf[48:52]),
 		PgACLPage:         binary.LittleEndian.Uint32(buf[52:56]),
+		PgProcPage:        binary.LittleEndian.Uint32(buf[56:60]),
+		PgTriggerPage:     binary.LittleEndian.Uint32(buf[60:64]),
 	}
 
 	if sb.Magic != Magic {

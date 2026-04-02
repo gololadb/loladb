@@ -366,3 +366,44 @@ func TestCLI_UnknownCommand(t *testing.T) {
 		t.Fatalf("unexpected: %s", out)
 	}
 }
+
+func TestCLI_Triggers(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "triggers.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	// Helper to run SQL and check for errors.
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Create table.
+	run("CREATE TABLE items (id INTEGER, price INTEGER)")
+
+	// Create a trigger function that doubles the price on INSERT.
+	run(`CREATE FUNCTION double_price() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN NEW.price := NEW.price * 2; RETURN NEW; END'`)
+
+	// Create the trigger.
+	run("CREATE TRIGGER trg_double BEFORE INSERT ON items FOR EACH ROW EXECUTE FUNCTION double_price()")
+
+	// Insert a row — the trigger should double the price.
+	run("INSERT INTO items VALUES (1, 50)")
+
+	// Verify the price was doubled.
+	out := run("SELECT * FROM items")
+	if !strings.Contains(out, "100") {
+		t.Fatalf("expected price=100 (doubled from 50), got: %s", out)
+	}
+
+	// Insert another row.
+	run("INSERT INTO items VALUES (2, 30)")
+	out = run("SELECT * FROM items")
+	if !strings.Contains(out, "60") {
+		t.Fatalf("expected price=60 (doubled from 30), got: %s", out)
+	}
+}

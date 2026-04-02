@@ -30,6 +30,8 @@ const (
 	OIDPgAuthID      = 1260
 	OIDPgAuthMembers = 1261
 	OIDPgACL         = 6100 // LolaDB-specific, no PG equivalent
+	OIDPgProc        = 1255
+	OIDPgTrigger     = 2620
 
 	// Relation kinds stored in pg_class.relkind (TEXT, single char).
 	RelKindOrdinaryTable_S = "r"

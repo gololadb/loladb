@@ -340,3 +340,40 @@ type LogicalRevokePrivilege struct {
 func (n *LogicalRevokePrivilege) String() string         { return fmt.Sprintf("Revoke(%v ON %v FROM %v)", n.Privileges, n.Objects, n.Grantees) }
 func (n *LogicalRevokePrivilege) OutputColumns() []string { return nil }
 
+
+// LogicalCreateFunction represents CREATE FUNCTION.
+type LogicalCreateFunction struct {
+	Name       string
+	Language   string
+	Body       string
+	ReturnType string
+	ParamNames []string
+	ParamTypes []string
+	Replace    bool
+}
+
+func (n *LogicalCreateFunction) String() string         { return fmt.Sprintf("CreateFunction(%s)", n.Name) }
+func (n *LogicalCreateFunction) OutputColumns() []string { return nil }
+
+// LogicalCreateTrigger represents CREATE TRIGGER.
+type LogicalCreateTrigger struct {
+	TrigName string
+	Table    string
+	FuncName string
+	Timing   int
+	Events   int
+	ForEach  string
+	Replace  bool
+}
+
+func (n *LogicalCreateTrigger) String() string         { return fmt.Sprintf("CreateTrigger(%s ON %s)", n.TrigName, n.Table) }
+func (n *LogicalCreateTrigger) OutputColumns() []string { return nil }
+
+// LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
+type LogicalResult struct {
+	Exprs []Expr
+	Names []string
+}
+
+func (n *LogicalResult) String() string         { return "Result" }
+func (n *LogicalResult) OutputColumns() []string { return n.Names }

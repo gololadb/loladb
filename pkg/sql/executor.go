@@ -8,6 +8,7 @@ import (
 
 	"github.com/gololadb/loladb/pkg/catalog"
 	"github.com/gololadb/loladb/pkg/executor"
+	"github.com/gololadb/loladb/pkg/pl/plpgsql"
 	"github.com/gololadb/loladb/pkg/planner"
 	"github.com/gololadb/loladb/pkg/rewriter"
 	"github.com/gololadb/loladb/pkg/tuple"
@@ -35,13 +36,46 @@ type Executor struct {
 // NewExecutor creates a SQL executor backed by the given catalog.
 func NewExecutor(cat *catalog.Catalog) *Executor {
 	a := &planner.Analyzer{Cat: cat}
-	return &Executor{
+	ex := &Executor{
 		Cat:       cat,
 		analyzer:  a,
 		rewriter:  rewriter.New(cat, a),
 		optimizer: &planner.Optimizer{Cat: cat, Costs: planner.DefaultCosts()},
 		exec:      executor.NewExecutor(cat),
 	}
+
+	// Wire PL/pgSQL interpreter for trigger execution.
+	interp := plpgsql.New(func(sql string) (*plpgsql.SQLResult, error) {
+		r, err := ex.Exec(sql)
+		if err != nil {
+			return nil, err
+		}
+		return &plpgsql.SQLResult{
+			Columns: r.Columns,
+			Rows:    r.Rows,
+			Message: r.Message,
+		}, nil
+	})
+
+	ex.exec.TriggerExec = func(body string, tc *executor.TriggerContext) (map[string]tuple.Datum, error) {
+		td := &plpgsql.TriggerData{
+			TgName:   tc.TgName,
+			TgTable:  tc.TgTable,
+			TgOp:     tc.TgOp,
+			TgWhen:   tc.TgWhen,
+			TgLevel:  tc.TgLevel,
+			NewRow:   tc.NewRow,
+			OldRow:   tc.OldRow,
+			ColNames: tc.ColNames,
+		}
+		result, err := interp.ExecTrigger(body, td)
+		if err != nil {
+			return nil, err
+		}
+		return result.TriggerRow, nil
+	}
+
+	return ex
 }
 
 // SetRole sets the session-level current user for RLS policy evaluation.

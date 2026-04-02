@@ -99,6 +99,11 @@ const (
 	OpGte                // >=
 	OpAnd                // AND
 	OpOr                 // OR
+	OpAdd                // +
+	OpSub                // -
+	OpMul                // *
+	OpDiv                // /
+	OpMod                // %
 )
 
 func (op OpKind) String() string {
@@ -119,6 +124,16 @@ func (op OpKind) String() string {
 		return "AND"
 	case OpOr:
 		return "OR"
+	case OpAdd:
+		return "+"
+	case OpSub:
+		return "-"
+	case OpMul:
+		return "*"
+	case OpDiv:
+		return "/"
+	case OpMod:
+		return "%"
 	default:
 		return "?"
 	}
@@ -138,6 +153,9 @@ func (e *ExprBinOp) String() string {
 func (e *ExprBinOp) Eval(row *Row) (tuple.Datum, error) {
 	if e.Op == OpAnd || e.Op == OpOr {
 		return e.evalLogical(row)
+	}
+	if e.Op >= OpAdd && e.Op <= OpMod {
+		return e.evalArithmetic(row)
 	}
 	return e.evalComparison(row)
 }
@@ -185,6 +203,66 @@ func (e *ExprBinOp) evalComparison(row *Row) (tuple.Datum, error) {
 		return tuple.DBool(cmp > 0), nil
 	case OpGte:
 		return tuple.DBool(cmp >= 0), nil
+	}
+	return tuple.DNull(), nil
+}
+
+func (e *ExprBinOp) evalArithmetic(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	lf, lok := datumToFloat(lv)
+	rf, rok := datumToFloat(rv)
+	if !lok || !rok {
+		return tuple.DNull(), fmt.Errorf("arithmetic on non-numeric types")
+	}
+	// If both operands are integers, stay in integer domain.
+	lint, lisInt := datumToInt(lv)
+	rint, risInt := datumToInt(rv)
+	if lisInt && risInt {
+		switch e.Op {
+		case OpAdd:
+			return tuple.DInt64(lint + rint), nil
+		case OpSub:
+			return tuple.DInt64(lint - rint), nil
+		case OpMul:
+			return tuple.DInt64(lint * rint), nil
+		case OpDiv:
+			if rint == 0 {
+				return tuple.DNull(), fmt.Errorf("division by zero")
+			}
+			return tuple.DInt64(lint / rint), nil
+		case OpMod:
+			if rint == 0 {
+				return tuple.DNull(), fmt.Errorf("division by zero")
+			}
+			return tuple.DInt64(lint % rint), nil
+		}
+	}
+	switch e.Op {
+	case OpAdd:
+		return tuple.DFloat64(lf + rf), nil
+	case OpSub:
+		return tuple.DFloat64(lf - rf), nil
+	case OpMul:
+		return tuple.DFloat64(lf * rf), nil
+	case OpDiv:
+		if rf == 0 {
+			return tuple.DNull(), fmt.Errorf("division by zero")
+		}
+		return tuple.DFloat64(lf / rf), nil
+	case OpMod:
+		if rf == 0 {
+			return tuple.DNull(), fmt.Errorf("division by zero")
+		}
+		li := int64(lf)
+		ri := int64(rf)
+		return tuple.DInt64(li % ri), nil
 	}
 	return tuple.DNull(), nil
 }
@@ -306,6 +384,23 @@ func toInt64(d tuple.Datum) (int64, bool) {
 		return int64(d.I32), true
 	case tuple.TypeInt64:
 		return d.I64, true
+	default:
+		return 0, false
+	}
+}
+
+func datumToInt(d tuple.Datum) (int64, bool) {
+	return toInt64(d)
+}
+
+func datumToFloat(d tuple.Datum) (float64, bool) {
+	switch d.Type {
+	case tuple.TypeInt32:
+		return float64(d.I32), true
+	case tuple.TypeInt64:
+		return float64(d.I64), true
+	case tuple.TypeFloat64:
+		return d.F64, true
 	default:
 		return 0, false
 	}

@@ -31,8 +31,18 @@ func QueryToLogicalPlan(q *Query) (LogicalNode, error) {
 }
 
 func queryToSelectPlan(q *Query) (LogicalNode, error) {
-	if q.JoinTree == nil {
-		// SELECT without FROM → NoOp.
+	if q.JoinTree == nil || len(q.JoinTree.FromList) == 0 {
+		// SELECT without FROM → Result node (single virtual row).
+		if len(q.TargetList) > 0 {
+			// Evaluate expressions and project.
+			var exprs []Expr
+			var names []string
+			for _, te := range q.TargetList {
+				exprs = append(exprs, analyzedToExpr(te.Expr, q.RangeTable))
+				names = append(names, te.Name)
+			}
+			return &LogicalResult{Exprs: exprs, Names: names}, nil
+		}
 		if q.Utility != nil {
 			return &LogicalNoOp{Message: q.Utility.Message}, nil
 		}
@@ -205,6 +215,18 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 		return &LogicalGrantPrivilege{Privileges: u.Privileges, PrivCols: u.PrivCols, TargetType: u.TargetType, Objects: u.Objects, Grantees: u.Grantees, GrantOption: u.GrantOption}, nil
 	case UtilRevokePrivilege:
 		return &LogicalRevokePrivilege{Privileges: u.Privileges, PrivCols: u.PrivCols, TargetType: u.TargetType, Objects: u.Objects, Grantees: u.Grantees}, nil
+	case UtilCreateFunction:
+		return &LogicalCreateFunction{
+			Name: u.FuncName, Language: u.FuncLanguage, Body: u.FuncBody,
+			ReturnType: u.FuncReturnType, ParamNames: u.FuncParamNames,
+			ParamTypes: u.FuncParamTypes, Replace: u.FuncReplace,
+		}, nil
+	case UtilCreateTrigger:
+		return &LogicalCreateTrigger{
+			TrigName: u.TrigName, Table: u.TrigTable, FuncName: u.TrigFuncName,
+			Timing: u.TrigTiming, Events: u.TrigEvents, ForEach: u.TrigForEach,
+			Replace: u.TrigReplace,
+		}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

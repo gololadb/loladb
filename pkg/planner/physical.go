@@ -414,3 +414,43 @@ type PhysRevokePrivilege struct {
 func (n *PhysRevokePrivilege) String() string            { return fmt.Sprintf("Revoke %v ON %v FROM %v", n.Privileges, n.Objects, n.Grantees) }
 func (n *PhysRevokePrivilege) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysRevokePrivilege) Children() []PhysicalNode  { return nil }
+
+// PhysCreateFunction represents CREATE [OR REPLACE] FUNCTION.
+type PhysCreateFunction struct {
+	Name       string
+	Language   string
+	Body       string
+	ReturnType string
+	ParamNames []string
+	ParamTypes []string
+	Replace    bool
+}
+
+func (n *PhysCreateFunction) String() string            { return fmt.Sprintf("CreateFunction %s", n.Name) }
+func (n *PhysCreateFunction) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreateFunction) Children() []PhysicalNode  { return nil }
+
+// PhysCreateTrigger represents CREATE TRIGGER.
+type PhysCreateTrigger struct {
+	TrigName string
+	Table    string
+	FuncName string
+	Timing   int
+	Events   int
+	ForEach  string // "ROW" or "STATEMENT"
+	Replace  bool
+}
+
+func (n *PhysCreateTrigger) String() string            { return fmt.Sprintf("CreateTrigger %s ON %s", n.TrigName, n.Table) }
+func (n *PhysCreateTrigger) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreateTrigger) Children() []PhysicalNode  { return nil }
+
+// PhysResult produces a single row by evaluating expressions (SELECT without FROM).
+type PhysResult struct {
+	Exprs []Expr
+	Names []string
+}
+
+func (n *PhysResult) String() string            { return "Result" }
+func (n *PhysResult) Cost() PlanCost            { return PlanCost{Startup: 0.01, Total: 0.01, Rows: 1} }
+func (n *PhysResult) Children() []PhysicalNode  { return nil }

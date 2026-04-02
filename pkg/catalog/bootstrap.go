@@ -23,7 +23,7 @@ func (c *Catalog) bootstrap() error {
 	catalogOIDs := []int32{
 		OIDPgNamespace, OIDPgType, OIDPgClass, OIDPgAttribute,
 		OIDPgIndex, OIDPgAuthID, OIDPgAuthMembers, OIDPgACL,
-		OIDPgRewrite, OIDPgPolicy,
+		OIDPgRewrite, OIDPgPolicy, OIDPgProc, OIDPgTrigger,
 	}
 	for _, oid := range catalogOIDs {
 		page, err := c.Eng.AllocPage()
@@ -43,6 +43,8 @@ func (c *Catalog) bootstrap() error {
 	c.Eng.Super.PgAuthIDPage = pages[OIDPgAuthID]
 	c.Eng.Super.PgAuthMembersPage = pages[OIDPgAuthMembers]
 	c.Eng.Super.PgACLPage = pages[OIDPgACL]
+	c.Eng.Super.PgProcPage = pages[OIDPgProc]
+	c.Eng.Super.PgTriggerPage = pages[OIDPgTrigger]
 	if err := c.Eng.Super.Save(c.Eng.IO); err != nil {
 		return fmt.Errorf("bootstrap: write superblock: %w", err)
 	}
@@ -77,6 +79,8 @@ func (c *Catalog) bootstrap() error {
 		{OIDPgACL, "pg_acl"},
 		{OIDPgRewrite, "pg_rewrite"},
 		{OIDPgPolicy, "pg_policy"},
+		{OIDPgProc, "pg_proc"},
+		{OIDPgTrigger, "pg_trigger"},
 	}
 	for _, t := range catTables {
 		row := pgClassRow(t.oid, t.name, OIDPgCatalog, RelKindOrdinaryTable_S,
@@ -286,6 +290,24 @@ func catalogColumnDefs() [][]tuple.Datum {
 		{OIDPgPolicy, "polroles", OIDText, -1, 5},
 		{OIDPgPolicy, "polqual", OIDText, -1, 6},
 		{OIDPgPolicy, "polwithcheck", OIDText, -1, 7},
+
+		// pg_proc columns (matches persistFunction in functions.go)
+		{OIDPgProc, "oid", OIDInt4, 4, 1},
+		{OIDPgProc, "proname", OIDText, -1, 2},
+		{OIDPgProc, "prolang", OIDText, -1, 3},
+		{OIDPgProc, "prosrc", OIDText, -1, 4},
+		{OIDPgProc, "prorettype", OIDText, -1, 5},
+		{OIDPgProc, "proargnames", OIDText, -1, 6},
+		{OIDPgProc, "proargtypes", OIDText, -1, 7},
+
+		// pg_trigger columns (matches persistTrigger in functions.go)
+		{OIDPgTrigger, "oid", OIDInt4, 4, 1},
+		{OIDPgTrigger, "tgname", OIDText, -1, 2},
+		{OIDPgTrigger, "tgrelid", OIDInt4, 4, 3},
+		{OIDPgTrigger, "tgfoid", OIDInt4, 4, 4},
+		{OIDPgTrigger, "tgtiming", OIDInt4, 4, 5},
+		{OIDPgTrigger, "tgevents", OIDInt4, 4, 6},
+		{OIDPgTrigger, "tgforeach", OIDText, -1, 7},
 	}
 
 	var rows [][]tuple.Datum

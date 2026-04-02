@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/chzyer/readline v1.5.1
 	github.com/gololadb/gopgsql v0.0.0-20260402134522-9440f074d9a7
+	github.com/gololadb/goplpgsql v0.0.0-20260402132324-749d90262606
 )
 
 require (

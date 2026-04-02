@@ -224,6 +224,24 @@ type UtilityStmt struct {
 	TargetType     string     // "TABLE", etc.
 	Objects        []string   // object names
 	GrantOption    bool
+
+	// CREATE FUNCTION fields
+	FuncName       string
+	FuncLanguage   string
+	FuncBody       string
+	FuncReturnType string
+	FuncParamNames []string
+	FuncParamTypes []string
+	FuncReplace    bool
+
+	// CREATE TRIGGER fields
+	TrigName       string
+	TrigTable      string
+	TrigFuncName   string
+	TrigTiming     int
+	TrigEvents     int
+	TrigForEach    string // "ROW" or "STATEMENT"
+	TrigReplace    bool
 }
 
 type UtilityType int
@@ -244,6 +262,8 @@ const (
 	UtilRevokeRole
 	UtilGrantPrivilege
 	UtilRevokePrivilege
+	UtilCreateFunction
+	UtilCreateTrigger
 	UtilNoOp
 )
 
@@ -371,6 +391,9 @@ func (o *OpExpr) Eval(row *Row) (tuple.Datum, error) {
 	if err != nil {
 		return tuple.DNull(), err
 	}
+	if o.Op >= OpAdd && o.Op <= OpMod {
+		return evalArithmeticDatums(o.Op, lv, rv)
+	}
 	cmp := CompareDatums(lv, rv)
 	switch o.Op {
 	case OpEq:
@@ -385,6 +408,55 @@ func (o *OpExpr) Eval(row *Row) (tuple.Datum, error) {
 		return tuple.DBool(cmp > 0), nil
 	case OpGte:
 		return tuple.DBool(cmp >= 0), nil
+	}
+	return tuple.DNull(), nil
+}
+
+func evalArithmeticDatums(op OpKind, lv, rv tuple.Datum) (tuple.Datum, error) {
+	lint, lisInt := toInt64(lv)
+	rint, risInt := toInt64(rv)
+	if lisInt && risInt {
+		switch op {
+		case OpAdd:
+			return tuple.DInt64(lint + rint), nil
+		case OpSub:
+			return tuple.DInt64(lint - rint), nil
+		case OpMul:
+			return tuple.DInt64(lint * rint), nil
+		case OpDiv:
+			if rint == 0 {
+				return tuple.DNull(), fmt.Errorf("division by zero")
+			}
+			return tuple.DInt64(lint / rint), nil
+		case OpMod:
+			if rint == 0 {
+				return tuple.DNull(), fmt.Errorf("division by zero")
+			}
+			return tuple.DInt64(lint % rint), nil
+		}
+	}
+	lf, lok := datumToFloat(lv)
+	rf, rok := datumToFloat(rv)
+	if !lok || !rok {
+		return tuple.DNull(), fmt.Errorf("arithmetic on non-numeric types")
+	}
+	switch op {
+	case OpAdd:
+		return tuple.DFloat64(lf + rf), nil
+	case OpSub:
+		return tuple.DFloat64(lf - rf), nil
+	case OpMul:
+		return tuple.DFloat64(lf * rf), nil
+	case OpDiv:
+		if rf == 0 {
+			return tuple.DNull(), fmt.Errorf("division by zero")
+		}
+		return tuple.DFloat64(lf / rf), nil
+	case OpMod:
+		if rf == 0 {
+			return tuple.DNull(), fmt.Errorf("division by zero")
+		}
+		return tuple.DInt64(int64(lf) % int64(rf)), nil
 	}
 	return tuple.DNull(), nil
 }

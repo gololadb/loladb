@@ -101,6 +101,12 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysGrantPrivilege{Privileges: n.Privileges, PrivCols: n.PrivCols, TargetType: n.TargetType, Objects: n.Objects, Grantees: n.Grantees, GrantOption: n.GrantOption}, nil
 	case *LogicalRevokePrivilege:
 		return &PhysRevokePrivilege{Privileges: n.Privileges, PrivCols: n.PrivCols, TargetType: n.TargetType, Objects: n.Objects, Grantees: n.Grantees}, nil
+	case *LogicalCreateFunction:
+		return &PhysCreateFunction{Name: n.Name, Language: n.Language, Body: n.Body, ReturnType: n.ReturnType, ParamNames: n.ParamNames, ParamTypes: n.ParamTypes, Replace: n.Replace}, nil
+	case *LogicalCreateTrigger:
+		return &PhysCreateTrigger{TrigName: n.TrigName, Table: n.Table, FuncName: n.FuncName, Timing: n.Timing, Events: n.Events, ForEach: n.ForEach, Replace: n.Replace}, nil
+	case *LogicalResult:
+		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
 	default:
 		child, err := o.optimize(node)
 		return child, err

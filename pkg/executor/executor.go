@@ -21,10 +21,27 @@ type Result struct {
 	Message      string
 }
 
+// TriggerExecFunc executes a trigger function body with the given trigger data.
+// Returns the (possibly modified) NEW row for BEFORE ROW triggers, or nil.
+type TriggerExecFunc func(body string, td *TriggerContext) (map[string]tuple.Datum, error)
+
+// TriggerContext holds the context for a trigger invocation.
+type TriggerContext struct {
+	TgName   string
+	TgTable  string
+	TgOp     string // INSERT, UPDATE, DELETE
+	TgWhen   string // BEFORE, AFTER
+	TgLevel  string // ROW, STATEMENT
+	NewRow   map[string]tuple.Datum
+	OldRow   map[string]tuple.Datum
+	ColNames []string
+}
+
 // Executor runs physical plan trees against the catalog/engine.
 type Executor struct {
 	Cat         *catalog.Catalog
 	CurrentUser string // session user for privilege checks
+	TriggerExec TriggerExecFunc // optional PL/pgSQL trigger executor
 }
 
 // NewExecutor creates a plan executor.
@@ -217,6 +234,12 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execGrantPrivilege(n)
 	case *planner.PhysRevokePrivilege:
 		return ex.execRevokePrivilege(n)
+	case *planner.PhysCreateFunction:
+		return ex.execCreateFunction(n)
+	case *planner.PhysCreateTrigger:
+		return ex.execCreateTrigger(n)
+	case *planner.PhysResult:
+		return ex.execResult(n)
 	default:
 		return nil, fmt.Errorf("executor: unsupported node %T", node)
 	}
@@ -774,6 +797,10 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 	if err := ex.checkTablePrivilege(n.Table, catalog.PrivInsert); err != nil {
 		return nil, err
 	}
+
+	colNames := ex.getTableColNames(n.Table)
+	hasTriggers := len(ex.Cat.GetTableTriggers(n.Table)) > 0 && ex.TriggerExec != nil
+
 	var count int64
 	for _, rowExprs := range n.Values {
 		values := make([]tuple.Datum, len(rowExprs))
@@ -784,11 +811,33 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 			}
 			values[i] = val
 		}
+
+		if hasTriggers {
+			newMap := rowToMap(colNames, values)
+			// BEFORE ROW INSERT triggers.
+			modifiedNew, err := ex.fireTriggers(n.Table, catalog.TrigBefore, catalog.TrigInsert, colNames, newMap, nil)
+			if err != nil {
+				return nil, err
+			}
+			if modifiedNew == nil {
+				continue // trigger suppressed the insert
+			}
+			values = mapToRow(colNames, modifiedNew)
+		}
+
 		_, err := ex.Cat.InsertInto(n.Table, values)
 		if err != nil {
 			return nil, err
 		}
 		count++
+
+		if hasTriggers {
+			// AFTER ROW INSERT triggers.
+			newMap := rowToMap(colNames, values)
+			if _, err := ex.fireTriggers(n.Table, catalog.TrigAfter, catalog.TrigInsert, colNames, newMap, nil); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return &Result{RowsAffected: count, Message: fmt.Sprintf("INSERT 0 %d", count)}, nil
 }
@@ -802,29 +851,48 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 		return nil, err
 	}
 
-	// We need the ItemIDs. Re-scan the table with the same filter to get them.
 	rel, err := ex.Cat.FindRelation(n.Table)
 	if err != nil || rel == nil {
 		return nil, fmt.Errorf("executor: table %q not found", n.Table)
 	}
 
-	// Collect matching rows via scan
-	var toDelete []slottedpage.ItemID
+	colNames := ex.getTableColNames(n.Table)
+	hasTriggers := len(ex.Cat.GetTableTriggers(n.Table)) > 0 && ex.TriggerExec != nil
+
+	type deleteTarget struct {
+		id  slottedpage.ItemID
+		row []tuple.Datum
+	}
+	var toDelete []deleteTarget
 	matchIdx := 0
 	ex.Cat.SeqScan(n.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		// Match against the child result rows.
 		if matchIdx < len(child.Rows) {
-			// Simple approach: delete rows that match the child scan's columns.
 			if rowsMatch(tup.Columns, child.Rows[matchIdx]) {
-				toDelete = append(toDelete, id)
+				row := make([]tuple.Datum, len(tup.Columns))
+				copy(row, tup.Columns)
+				toDelete = append(toDelete, deleteTarget{id: id, row: row})
 				matchIdx++
 			}
 		}
 		return true
 	})
 
-	for _, id := range toDelete {
-		ex.Cat.Delete(n.Table, id)
+	for _, dt := range toDelete {
+		if hasTriggers {
+			oldMap := rowToMap(colNames, dt.row)
+			if _, err := ex.fireTriggers(n.Table, catalog.TrigBefore, catalog.TrigDelete, colNames, nil, oldMap); err != nil {
+				return nil, err
+			}
+		}
+
+		ex.Cat.Delete(n.Table, dt.id)
+
+		if hasTriggers {
+			oldMap := rowToMap(colNames, dt.row)
+			if _, err := ex.fireTriggers(n.Table, catalog.TrigAfter, catalog.TrigDelete, colNames, nil, oldMap); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return &Result{RowsAffected: int64(len(toDelete)), Message: fmt.Sprintf("DELETE %d", len(toDelete))}, nil
@@ -844,7 +912,9 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 		return nil, fmt.Errorf("executor: table %q not found", n.Table)
 	}
 
-	// Collect matching ItemIDs.
+	colNames := ex.getTableColNames(n.Table)
+	hasTriggers := len(ex.Cat.GetTableTriggers(n.Table)) > 0 && ex.TriggerExec != nil
+
 	type target struct {
 		id  slottedpage.ItemID
 		row []tuple.Datum
@@ -878,7 +948,29 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 				}
 			}
 		}
+
+		if hasTriggers {
+			oldMap := rowToMap(colNames, t.row)
+			newMap := rowToMap(colNames, newVals)
+			modifiedNew, err := ex.fireTriggers(n.Table, catalog.TrigBefore, catalog.TrigUpdate, colNames, newMap, oldMap)
+			if err != nil {
+				return nil, err
+			}
+			if modifiedNew == nil {
+				continue // trigger suppressed the update
+			}
+			newVals = mapToRow(colNames, modifiedNew)
+		}
+
 		ex.Cat.Update(n.Table, t.id, newVals)
+
+		if hasTriggers {
+			oldMap := rowToMap(colNames, t.row)
+			newMap := rowToMap(colNames, newVals)
+			if _, err := ex.fireTriggers(n.Table, catalog.TrigAfter, catalog.TrigUpdate, colNames, newMap, oldMap); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return &Result{RowsAffected: int64(len(targets)), Message: fmt.Sprintf("UPDATE %d", len(targets))}, nil
@@ -1229,3 +1321,163 @@ func (ex *Executor) execRevokePrivilege(n *planner.PhysRevokePrivilege) (*Result
 	return &Result{Message: "REVOKE"}, nil
 }
 
+
+// fireTriggers fires matching triggers for a table/event/timing combination.
+// For BEFORE ROW triggers on INSERT/UPDATE, returns the (possibly modified) NEW row.
+func (ex *Executor) fireTriggers(tableName string, timing int, event int, colNames []string, newRow, oldRow map[string]tuple.Datum) (map[string]tuple.Datum, error) {
+	if ex.TriggerExec == nil {
+		return newRow, nil
+	}
+
+	triggers := ex.Cat.GetTableTriggers(tableName)
+	if len(triggers) == 0 {
+		return newRow, nil
+	}
+
+	tgWhen := "BEFORE"
+	if timing == catalog.TrigAfter {
+		tgWhen = "AFTER"
+	}
+	tgOp := ""
+	switch {
+	case event&catalog.TrigInsert != 0:
+		tgOp = "INSERT"
+	case event&catalog.TrigUpdate != 0:
+		tgOp = "UPDATE"
+	case event&catalog.TrigDelete != 0:
+		tgOp = "DELETE"
+	}
+
+	currentNew := newRow
+	for _, trig := range triggers {
+		if trig.Timing&timing == 0 || trig.Events&event == 0 {
+			continue
+		}
+		fn := ex.Cat.FindFunctionByOID(trig.FuncOID)
+		if fn == nil {
+			continue
+		}
+
+		tc := &TriggerContext{
+			TgName:   trig.Name,
+			TgTable:  tableName,
+			TgOp:     tgOp,
+			TgWhen:   tgWhen,
+			TgLevel:  trig.ForEach,
+			NewRow:   currentNew,
+			OldRow:   oldRow,
+			ColNames: colNames,
+		}
+
+		modifiedNew, err := ex.TriggerExec(fn.Body, tc)
+		if err != nil {
+			return nil, fmt.Errorf("trigger %q: %w", trig.Name, err)
+		}
+		// BEFORE ROW triggers can modify NEW.
+		if timing == catalog.TrigBefore && modifiedNew != nil {
+			currentNew = modifiedNew
+		}
+	}
+	return currentNew, nil
+}
+
+// rowToMap converts a datum slice to a column-name-keyed map.
+func rowToMap(colNames []string, values []tuple.Datum) map[string]tuple.Datum {
+	m := make(map[string]tuple.Datum, len(colNames))
+	for i, name := range colNames {
+		if i < len(values) {
+			m[name] = values[i]
+		}
+	}
+	return m
+}
+
+// mapToRow converts a column-name-keyed map back to a datum slice.
+func mapToRow(colNames []string, m map[string]tuple.Datum) []tuple.Datum {
+	row := make([]tuple.Datum, len(colNames))
+	for i, name := range colNames {
+		if v, ok := m[name]; ok {
+			row[i] = v
+		} else {
+			row[i] = tuple.DNull()
+		}
+	}
+	return row
+}
+
+// getTableColNames returns the column names for a table.
+func (ex *Executor) getTableColNames(tableName string) []string {
+	rel, err := ex.Cat.FindRelation(tableName)
+	if err != nil || rel == nil {
+		return nil
+	}
+	cols, err := ex.Cat.GetColumns(rel.OID)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = c.Name
+	}
+	return names
+}
+
+func (ex *Executor) execCreateFunction(n *planner.PhysCreateFunction) (*Result, error) {
+	err := ex.Cat.CreateFunction(&catalog.FuncDef{
+		Name:       n.Name,
+		Language:   n.Language,
+		Body:       n.Body,
+		ReturnType: n.ReturnType,
+		ParamNames: n.ParamNames,
+		ParamTypes: n.ParamTypes,
+		Replace:    n.Replace,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Message: fmt.Sprintf("CREATE FUNCTION %s", n.Name)}, nil
+}
+
+func (ex *Executor) execCreateTrigger(n *planner.PhysCreateTrigger) (*Result, error) {
+	// Resolve the table OID.
+	rel, err := ex.Cat.FindRelation(n.Table)
+	if err != nil || rel == nil {
+		return nil, fmt.Errorf("executor: table %q not found", n.Table)
+	}
+
+	// Resolve the function OID.
+	fn := ex.Cat.FindFunction(n.FuncName)
+	if fn == nil {
+		return nil, fmt.Errorf("executor: function %q not found", n.FuncName)
+	}
+
+	err = ex.Cat.CreateTrigger(&catalog.TriggerDef{
+		Name:     n.TrigName,
+		TableOID: rel.OID,
+		FuncOID:  fn.OID,
+		Timing:   n.Timing,
+		Events:   n.Events,
+		ForEach:  n.ForEach,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Message: fmt.Sprintf("CREATE TRIGGER %s", n.TrigName)}, nil
+}
+
+func (ex *Executor) execResult(n *planner.PhysResult) (*Result, error) {
+	row := make([]tuple.Datum, len(n.Exprs))
+	emptyRow := &planner.Row{}
+	for i, expr := range n.Exprs {
+		val, err := expr.Eval(emptyRow)
+		if err != nil {
+			return nil, fmt.Errorf("executor: Result eval: %w", err)
+		}
+		row[i] = val
+	}
+	return &Result{
+		Columns: n.Names,
+		Rows:    [][]tuple.Datum{row},
+		Message: "SELECT 1",
+	}, nil
+}

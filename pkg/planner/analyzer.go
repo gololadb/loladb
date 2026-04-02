@@ -80,6 +80,10 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		return a.transformGrantRoleStmt(n)
 	case *parser.GrantStmt:
 		return a.transformGrantStmt(n)
+	case *parser.CreateFunctionStmt:
+		return a.transformCreateFunctionStmt(n)
+	case *parser.CreateTrigStmt:
+		return a.transformCreateTrigStmt(n)
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported statement %T", stmt)
 	}
@@ -154,9 +158,23 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		return nil, err
 	}
 	if len(fromList) == 0 {
-		// SELECT without FROM (e.g., SELECT 1).
-		q.Utility = &UtilityStmt{Type: UtilNoOp, Message: "SELECT"}
-		q.CommandType = CmdUtility
+		// SELECT without FROM (e.g., SELECT 1, SELECT 1+1).
+		// Build target list and use an empty FromExpr — the planner
+		// will produce a Result node that emits a single row.
+		var targets []*TargetEntry
+		for i, item := range n.TargetList {
+			expr, err := a.transformExpr(item.Val)
+			if err != nil {
+				return nil, err
+			}
+			name := item.Name
+			if name == "" {
+				name = fmt.Sprintf("?column%d?", i)
+			}
+			targets = append(targets, &TargetEntry{Expr: expr, Name: name})
+		}
+		q.TargetList = targets
+		q.JoinTree = &FromExpr{} // empty FROM → Result node
 		q.RangeTable = a.rangeTable
 		return q, nil
 	}
@@ -554,24 +572,46 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 	}
 
 	var op OpKind
+	var resultTyp tuple.DatumType
 	switch opName {
 	case "=":
 		op = OpEq
+		resultTyp = tuple.TypeBool
 	case "<>", "!=":
 		op = OpNeq
+		resultTyp = tuple.TypeBool
 	case "<":
 		op = OpLt
+		resultTyp = tuple.TypeBool
 	case "<=":
 		op = OpLte
+		resultTyp = tuple.TypeBool
 	case ">":
 		op = OpGt
+		resultTyp = tuple.TypeBool
 	case ">=":
 		op = OpGte
+		resultTyp = tuple.TypeBool
+	case "+":
+		op = OpAdd
+		resultTyp = tuple.TypeInt64
+	case "-":
+		op = OpSub
+		resultTyp = tuple.TypeInt64
+	case "*":
+		op = OpMul
+		resultTyp = tuple.TypeInt64
+	case "/":
+		op = OpDiv
+		resultTyp = tuple.TypeInt64
+	case "%":
+		op = OpMod
+		resultTyp = tuple.TypeInt64
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported operator %q", opName)
 	}
 
-	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: tuple.TypeBool}, nil
+	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: resultTyp}, nil
 }
 
 // transformBoolExpr resolves AND/OR/NOT expressions.
@@ -1274,3 +1314,79 @@ func (a *Analyzer) transformGrantStmt(n *parser.GrantStmt) (*Query, error) {
 	}), nil
 }
 
+
+func (a *Analyzer) transformCreateFunctionStmt(n *parser.CreateFunctionStmt) (*Query, error) {
+	name := ""
+	if len(n.Funcname) > 0 {
+		name = n.Funcname[len(n.Funcname)-1] // use last part (unqualified name)
+	}
+
+	language := "plpgsql"
+	body := ""
+	for _, opt := range n.Options {
+		switch strings.ToLower(opt.Defname) {
+		case "language":
+			if s, ok := opt.Arg.(*parser.String); ok {
+				language = strings.ToLower(s.Str)
+			}
+		case "as":
+			if s, ok := opt.Arg.(*parser.String); ok {
+				body = s.Str
+			}
+		}
+	}
+
+	retType := ""
+	if n.ReturnType != nil && len(n.ReturnType.Names) > 0 {
+		retType = n.ReturnType.Names[len(n.ReturnType.Names)-1]
+	}
+
+	var paramNames, paramTypes []string
+	for _, p := range n.Parameters {
+		paramNames = append(paramNames, p.Name)
+		if p.ArgType != nil && len(p.ArgType.Names) > 0 {
+			paramTypes = append(paramTypes, p.ArgType.Names[len(p.ArgType.Names)-1])
+		} else {
+			paramTypes = append(paramTypes, "unknown")
+		}
+	}
+
+	return a.makeUtilityQuery(UtilCreateFunction, &UtilityStmt{
+		Type:           UtilCreateFunction,
+		FuncName:       name,
+		FuncLanguage:   language,
+		FuncBody:       body,
+		FuncReturnType: retType,
+		FuncParamNames: paramNames,
+		FuncParamTypes: paramTypes,
+		FuncReplace:    n.Replace,
+	}), nil
+}
+
+func (a *Analyzer) transformCreateTrigStmt(n *parser.CreateTrigStmt) (*Query, error) {
+	tableName := ""
+	if n.Relation != nil {
+		tableName = n.Relation.Relname
+	}
+
+	funcName := ""
+	if len(n.Funcname) > 0 {
+		funcName = n.Funcname[len(n.Funcname)-1]
+	}
+
+	forEach := "STATEMENT"
+	if n.Row {
+		forEach = "ROW"
+	}
+
+	return a.makeUtilityQuery(UtilCreateTrigger, &UtilityStmt{
+		Type:        UtilCreateTrigger,
+		TrigName:    n.Trigname,
+		TrigTable:   tableName,
+		TrigFuncName: funcName,
+		TrigTiming:  n.Timing,
+		TrigEvents:  n.Events,
+		TrigForEach: forEach,
+		TrigReplace: n.Replace,
+	}), nil
+}
