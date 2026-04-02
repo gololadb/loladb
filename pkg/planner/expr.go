@@ -306,6 +306,54 @@ func (e *ExprIsNull) Eval(row *Row) (tuple.Datum, error) {
 	return tuple.DBool(isNull), nil
 }
 
+// ExprCast represents a type cast expression (e.g., expr::integer).
+type ExprCast struct {
+	Inner      Expr
+	TargetType tuple.DatumType
+	TypeName   string
+}
+
+func (e *ExprCast) String() string { return e.Inner.String() + "::" + e.TypeName }
+func (e *ExprCast) Eval(row *Row) (tuple.Datum, error) {
+	val, err := e.Inner.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	return castDatum(val, e.TargetType, e.TypeName)
+}
+
+// ExprFunc represents a function call expression.
+type ExprFunc struct {
+	Name string
+	Args []Expr
+}
+
+func (e *ExprFunc) String() string {
+	args := make([]string, len(e.Args))
+	for i, a := range e.Args {
+		args[i] = a.String()
+	}
+	return e.Name + "(" + strings.Join(args, ", ") + ")"
+}
+
+func (e *ExprFunc) Eval(row *Row) (tuple.Datum, error) {
+	// Wrap Expr args as AnalyzedExpr for evalBuiltinFunc.
+	analyzed := make([]AnalyzedExpr, len(e.Args))
+	for i, a := range e.Args {
+		analyzed[i] = &exprWrapper{inner: a}
+	}
+	return evalBuiltinFunc(e.Name, analyzed, row)
+}
+
+// exprWrapper adapts an Expr to the AnalyzedExpr interface.
+type exprWrapper struct {
+	inner Expr
+}
+
+func (w *exprWrapper) String() string                     { return w.inner.String() }
+func (w *exprWrapper) Eval(row *Row) (tuple.Datum, error) { return w.inner.Eval(row) }
+func (w *exprWrapper) ResultType() tuple.DatumType        { return tuple.TypeText }
+
 // ExprStar represents SELECT * (expanded during analysis).
 type ExprStar struct{}
 

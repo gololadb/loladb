@@ -430,8 +430,13 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 	case *parser.BoolExpr:
 		return a.transformBoolExpr(e)
 	case *parser.TypeCast:
-		// Pass through to inner expression (type coercion not yet implemented).
-		return a.transformExpr(e.Arg)
+		inner, err := a.transformExpr(e.Arg)
+		if err != nil {
+			return nil, err
+		}
+		typeName := typeNameToString(e.TypeName)
+		castType := a.resolveColumnType(strings.ToLower(typeName))
+		return &TypeCastExpr{Arg: inner, TargetType: strings.ToLower(typeName), CastType: castType}, nil
 	case *parser.NullTest:
 		return a.transformNullTest(e)
 	case *parser.SQLValueFunction:
@@ -455,6 +460,22 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 		default:
 			return nil, fmt.Errorf("analyzer: unsupported SQL value function (op %d)", e.Op)
 		}
+	case *parser.FuncCall:
+		return a.transformFuncCall(e)
+	case *parser.CoalesceExpr:
+		var args []AnalyzedExpr
+		for _, arg := range e.Args {
+			resolved, err := a.transformExpr(arg)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, resolved)
+		}
+		retType := tuple.TypeNull
+		if len(args) > 0 {
+			retType = args[0].ResultType()
+		}
+		return &FuncCallExpr{FuncName: "coalesce", Args: args, ReturnType: retType}, nil
 	case *parser.ParamRef:
 		return nil, fmt.Errorf("analyzer: parameter references ($%d) not supported", e.Number)
 	default:
@@ -705,6 +726,13 @@ func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 	}
 	q.ResultRelation = rte.RTIndex
 
+	// Extract explicit column list if present.
+	if len(n.Cols) > 0 {
+		for _, col := range n.Cols {
+			q.InsertColumns = append(q.InsertColumns, col.Name)
+		}
+	}
+
 	// Resolve VALUES.
 	sel, ok := n.SelectStmt.(*parser.SelectStmt)
 	if !ok || len(sel.ValuesLists) == 0 {
@@ -829,12 +857,18 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		sqlType := typeNameToString(colDef.TypeName)
 		dt := a.resolveColumnType(sqlType)
 		notNull := false
+		defaultExpr := ""
 		for _, c := range colDef.Constraints {
-			if c.Contype == parser.CONSTR_NOTNULL {
+			switch c.Contype {
+			case parser.CONSTR_NOTNULL:
 				notNull = true
+			case parser.CONSTR_DEFAULT:
+				if c.RawExpr != nil {
+					defaultExpr = parser.DeparseExpr(c.RawExpr)
+				}
 			}
 		}
-		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, NotNull: notNull})
+		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, NotNull: notNull, DefaultExpr: defaultExpr})
 	}
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
 		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName, Columns: cols,
@@ -1582,5 +1616,61 @@ func (a *Analyzer) transformCreateSchemaStmt(n *parser.CreateSchemaStmt) (*Query
 		SchemaAuthRole:    n.AuthRole,
 	}), nil
 }
+
+// transformFuncCall resolves a function call expression.
+func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
+	// Get the unqualified function name.
+	name := ""
+	if len(f.Funcname) > 0 {
+		name = strings.ToLower(f.Funcname[len(f.Funcname)-1])
+	}
+
+	// Resolve arguments.
+	var args []AnalyzedExpr
+	for _, arg := range f.Args {
+		resolved, err := a.transformExpr(arg)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, resolved)
+	}
+
+	// Determine return type based on function name.
+	var retType tuple.DatumType
+	switch name {
+	case "now", "current_timestamp", "current_date":
+		retType = tuple.TypeText
+	case "nextval", "currval", "setval":
+		retType = tuple.TypeInt64
+	case "length", "char_length", "character_length":
+		retType = tuple.TypeInt64
+	case "upper", "lower", "concat":
+		retType = tuple.TypeText
+	case "coalesce":
+		if len(args) > 0 {
+			retType = args[0].ResultType()
+		} else {
+			retType = tuple.TypeNull
+		}
+	case "nullif":
+		if len(args) > 0 {
+			retType = args[0].ResultType()
+		} else {
+			retType = tuple.TypeNull
+		}
+	default:
+		retType = tuple.TypeText
+	}
+
+	return &FuncCallExpr{FuncName: name, Args: args, ReturnType: retType}, nil
+}
+
+// TransformExpr is an exported wrapper around transformExpr for use by
+// the executor when evaluating DEFAULT expressions.
+func (a *Analyzer) TransformExpr(expr parser.Expr) (AnalyzedExpr, error) {
+	return a.transformExpr(expr)
+}
+
+
 
 

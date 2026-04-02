@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gololadb/gopgsql/parser"
 	"github.com/gololadb/loladb/pkg/catalog"
 	"github.com/gololadb/loladb/pkg/index"
 	"github.com/gololadb/loladb/pkg/planner"
@@ -833,15 +834,57 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		}
 	}
 
+	// Build column index mapping when an explicit column list is provided.
+	var colIndexMap []int // colIndexMap[i] = table column index for the i-th provided value
+	if len(n.Columns) > 0 {
+		colIndexMap = make([]int, len(n.Columns))
+		for i, name := range n.Columns {
+			found := false
+			for j, tc := range tableCols {
+				if strings.EqualFold(name, tc.Name) {
+					colIndexMap[i] = j
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("column %q of relation %q does not exist", name, n.Table)
+			}
+		}
+	}
+
 	var count int64
 	for _, rowExprs := range n.Values {
-		values := make([]tuple.Datum, len(rowExprs))
+		// Evaluate provided expressions.
+		provided := make([]tuple.Datum, len(rowExprs))
 		for i, expr := range rowExprs {
 			val, err := expr.Eval(&planner.Row{})
 			if err != nil {
 				return nil, err
 			}
-			values[i] = val
+			provided[i] = val
+		}
+
+		// Build full-width row, applying defaults for missing columns.
+		values := make([]tuple.Datum, len(tableCols))
+		if colIndexMap != nil {
+			// Explicit column list: fill defaults first, then overlay provided values.
+			for j, tc := range tableCols {
+				values[j] = ex.evalDefault(tc)
+			}
+			for i, j := range colIndexMap {
+				if i < len(provided) {
+					values[j] = provided[i]
+				}
+			}
+		} else if len(provided) < len(tableCols) {
+			// Fewer values than columns: fill trailing with defaults.
+			copy(values, provided)
+			for j := len(provided); j < len(tableCols); j++ {
+				values[j] = ex.evalDefault(tableCols[j])
+			}
+		} else {
+			copy(values, provided)
 		}
 
 		if hasTriggers {
@@ -1066,7 +1109,7 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error) {
 	cols := make([]catalog.ColumnDef, len(n.Columns))
 	for i, c := range n.Columns {
-		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName, NotNull: c.NotNull}
+		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName, NotNull: c.NotNull, DefaultExpr: c.DefaultExpr}
 	}
 	// Set the owner to the current session user.
 	var ownerOID int32
@@ -1516,6 +1559,37 @@ func (ex *Executor) getTableColumns(tableName string) []catalog.Column {
 		return nil
 	}
 	return cols
+}
+
+// evalDefault evaluates a column's DEFAULT expression and returns the
+// resulting datum. Returns NULL if the column has no default.
+func (ex *Executor) evalDefault(col catalog.Column) tuple.Datum {
+	if col.DefaultExpr == "" {
+		return tuple.DNull()
+	}
+	// Parse the default expression as a SELECT expression.
+	sql := "SELECT " + col.DefaultExpr
+	stmts, err := parser.Parse(strings.NewReader(sql), nil)
+	if err != nil || len(stmts) == 0 {
+		return tuple.DNull()
+	}
+	sel, ok := stmts[0].Stmt.(*parser.SelectStmt)
+	if !ok || len(sel.TargetList) == 0 {
+		return tuple.DNull()
+	}
+	// Use the analyzer to transform the expression, then convert to
+	// an executable Expr and evaluate it.
+	a := &planner.Analyzer{Cat: ex.Cat}
+	analyzed, err := a.TransformExpr(sel.TargetList[0].Val)
+	if err != nil {
+		return tuple.DNull()
+	}
+	expr := planner.AnalyzedToExpr(analyzed, nil)
+	val, err := expr.Eval(&planner.Row{})
+	if err != nil {
+		return tuple.DNull()
+	}
+	return val
 }
 
 // validateNotNull checks that NOT NULL columns do not contain NULL values.

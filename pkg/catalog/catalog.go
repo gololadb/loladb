@@ -30,10 +30,11 @@ const (
 
 // ColumnDef describes a column in a table.
 type ColumnDef struct {
-	Name     string
-	Type     tuple.DatumType
-	TypeName string // original SQL type name (for domain/enum validation)
-	NotNull  bool   // column-level NOT NULL constraint
+	Name       string
+	Type       tuple.DatumType
+	TypeName   string // original SQL type name (for domain/enum validation)
+	NotNull    bool   // column-level NOT NULL constraint
+	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
 }
 
 // Relation holds metadata about a table or index (a row from pg_class).
@@ -49,12 +50,13 @@ type Relation struct {
 
 // Column holds metadata about a column (a row from pg_attribute).
 type Column struct {
-	RelID   int32
-	Name    string
-	Num     int32 // 1-based
-	Type    int32 // maps to tuple.DatumType
-	TypeOID int32 // raw pg_type OID (for custom type lookup)
-	NotNull bool  // attnotnull
+	RelID       int32
+	Name        string
+	Num         int32  // 1-based
+	Type        int32  // maps to tuple.DatumType
+	TypeOID     int32  // raw pg_type OID (for custom type lookup)
+	NotNull     bool   // attnotnull
+	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
 }
 
 // IndexInfo holds metadata about an index (extra fields in the pg_class
@@ -229,7 +231,7 @@ func (c *Catalog) CreateTableInSchema(name string, cols []ColumnDef, ownerOID in
 			}
 		}
 		_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, pgAttributeRow(
-			oid, col.Name, typeOID, -1, int16(i+1), col.NotNull,
+			oid, col.Name, typeOID, -1, int16(i+1), col.NotNull, col.DefaultExpr,
 		))
 		if err != nil {
 			c.Eng.TxMgr.Abort(xid)
@@ -270,7 +272,7 @@ func (c *Catalog) CreateView(name string, cols []ColumnDef, definition string) (
 	// Insert columns into pg_attribute (new 8-column format).
 	for i, col := range cols {
 		_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, pgAttributeRow(
-			oid, col.Name, datumTypeToPgTypeOID(col.Type), -1, int16(i+1), false,
+			oid, col.Name, datumTypeToPgTypeOID(col.Type), -1, int16(i+1), false, "",
 		))
 		if err != nil {
 			c.Eng.TxMgr.Abort(xid)
@@ -682,14 +684,19 @@ func (c *Catalog) getColumnsWithSnapshot(oid int32, snap *mvcc.Snapshot) ([]Colu
 		if ct := c.Types.findByOID(rawOID); ct != nil {
 			dt = int32(ct.BaseType)
 		}
-		cols = append(cols, Column{
+		col := Column{
 			RelID:   tup.Columns[0].I32,
 			Name:    tup.Columns[1].Text,
 			Num:     tup.Columns[4].I32,
 			Type:    dt,
 			TypeOID: rawOID,
 			NotNull: tup.Columns[PgAttrAttnotnull].I32 != 0,
-		})
+		}
+		// Read default expression if present (10-column format).
+		if len(tup.Columns) >= PgAttrNumCols && tup.Columns[PgAttrAtthasdef].I32 != 0 {
+			col.DefaultExpr = tup.Columns[PgAttrAttdefault].Text
+		}
+		cols = append(cols, col)
 		return true
 	})
 	if err != nil {

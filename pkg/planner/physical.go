@@ -211,6 +211,7 @@ func (n *PhysSort) Children() []PhysicalNode  { return []PhysicalNode{n.Child} }
 
 type PhysInsert struct {
 	Table    string
+	Columns  []string // explicit column list (nil = all columns in order)
 	Values   [][]Expr
 	Estimate PlanCost
 }

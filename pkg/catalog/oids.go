@@ -63,15 +63,17 @@ const (
 
 // pg_attribute column positions.
 const (
-	PgAttrAttrelid    = 0 // attrelid INT (FK → pg_class.oid)
-	PgAttrAttname     = 1 // attname TEXT
-	PgAttrAtttypid    = 2 // atttypid INT (FK → pg_type.oid)
-	PgAttrAttlen      = 3 // attlen INT
-	PgAttrAttnum      = 4 // attnum INT (1-based)
-	PgAttrAtttypmod   = 5 // atttypmod INT
-	PgAttrAttnotnull  = 6 // attnotnull INT (0/1)
+	PgAttrAttrelid     = 0 // attrelid INT (FK → pg_class.oid)
+	PgAttrAttname      = 1 // attname TEXT
+	PgAttrAtttypid     = 2 // atttypid INT (FK → pg_type.oid)
+	PgAttrAttlen       = 3 // attlen INT
+	PgAttrAttnum       = 4 // attnum INT (1-based)
+	PgAttrAtttypmod    = 5 // atttypmod INT
+	PgAttrAttnotnull   = 6 // attnotnull INT (0/1)
 	PgAttrAttisdropped = 7 // attisdropped INT (0/1)
-	PgAttrNumCols     = 8
+	PgAttrAtthasdef    = 8 // atthasdef INT (0/1)
+	PgAttrAttdefault   = 9 // attdefault TEXT (SQL expression)
+	PgAttrNumCols      = 10
 )
 
 // pg_type column positions.

@@ -1075,7 +1075,7 @@ func (o *Optimizer) optimizeSort(n *LogicalSort) (PhysicalNode, error) {
 func (o *Optimizer) optimizeInsert(n *LogicalInsert) (PhysicalNode, error) {
 	var values [][]Expr
 	values = append(values, n.Values...)
-	return &PhysInsert{Table: n.Table, Values: values}, nil
+	return &PhysInsert{Table: n.Table, Columns: n.Columns, Values: values}, nil
 }
 
 func (o *Optimizer) optimizeDelete(n *LogicalDelete) (PhysicalNode, error) {

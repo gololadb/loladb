@@ -2,6 +2,7 @@ package planner
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -78,6 +79,9 @@ type Query struct {
 
 	// Values holds the rows for INSERT ... VALUES.
 	Values [][]AnalyzedExpr
+
+	// InsertColumns is the explicit column list for INSERT (nil = all).
+	InsertColumns []string
 
 	// Assignments holds SET col = expr for UPDATE.
 	Assignments []*UpdateAssignment
@@ -360,6 +364,20 @@ type NullTestExpr struct {
 	IsNot  bool // true for IS NOT NULL
 }
 
+// FuncCallExpr represents a resolved function call.
+type FuncCallExpr struct {
+	FuncName   string         // unqualified function name (lowercase)
+	Args       []AnalyzedExpr
+	ReturnType tuple.DatumType
+}
+
+// TypeCastExpr represents a type cast (e.g., expr::integer).
+type TypeCastExpr struct {
+	Arg        AnalyzedExpr
+	TargetType string          // SQL type name (lowercase)
+	CastType   tuple.DatumType // resolved target datum type
+}
+
 // StarExpr represents SELECT * (expanded during analysis into
 // individual TargetEntry items, but kept for compatibility).
 type StarExpr struct{}
@@ -570,6 +588,32 @@ func (n *NullTestExpr) Eval(row *Row) (tuple.Datum, error) {
 func (n *NullTestExpr) ResultType() tuple.DatumType { return tuple.TypeBool }
 
 // --- StarExpr implements AnalyzedExpr ---
+
+func (tc *TypeCastExpr) String() string {
+	return tc.Arg.String() + "::" + tc.TargetType
+}
+func (tc *TypeCastExpr) Eval(row *Row) (tuple.Datum, error) {
+	val, err := tc.Arg.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	return castDatum(val, tc.CastType, tc.TargetType)
+}
+func (tc *TypeCastExpr) ResultType() tuple.DatumType { return tc.CastType }
+
+func (f *FuncCallExpr) String() string {
+	args := make([]string, len(f.Args))
+	for i, a := range f.Args {
+		args[i] = a.String()
+	}
+	return f.FuncName + "(" + strings.Join(args, ", ") + ")"
+}
+func (f *FuncCallExpr) Eval(row *Row) (tuple.Datum, error) {
+	// Delegate to ExprFunc at execution time; this path is used when
+	// the analyzed expression is used directly (e.g., in DEFAULT eval).
+	return evalBuiltinFunc(f.FuncName, f.Args, row)
+}
+func (f *FuncCallExpr) ResultType() tuple.DatumType { return f.ReturnType }
 
 func (s *StarExpr) String() string                        { return "*" }
 func (s *StarExpr) Eval(row *Row) (tuple.Datum, error)    { return tuple.DNull(), nil }

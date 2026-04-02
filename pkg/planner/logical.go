@@ -142,8 +142,9 @@ type Assignment struct {
 }
 
 type LogicalInsert struct {
-	Table  string
-	Values [][]Expr // each inner slice is a row
+	Table   string
+	Columns []string // explicit column list (nil = all columns in order)
+	Values  [][]Expr // each inner slice is a row
 }
 
 func (n *LogicalInsert) String() string        { return fmt.Sprintf("Insert(%s)", n.Table) }
@@ -177,10 +178,11 @@ type LogicalCreateTable struct {
 }
 
 type ColDef struct {
-	Name     string
-	Type     tuple.DatumType
-	TypeName string // original SQL type name (for domain/enum validation)
-	NotNull  bool   // column-level NOT NULL constraint
+	Name        string
+	Type        tuple.DatumType
+	TypeName    string // original SQL type name (for domain/enum validation)
+	NotNull     bool   // column-level NOT NULL constraint
+	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
 }
 
 func (n *LogicalCreateTable) String() string        { return fmt.Sprintf("CreateTable(%s)", n.Table) }

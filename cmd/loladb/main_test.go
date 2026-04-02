@@ -1170,4 +1170,203 @@ func TestCLI_SearchPathPersistence(t *testing.T) {
 	}
 }
 
+func TestCLI_DefaultValues(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "defaults.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Create table with DEFAULT values.
+	run("CREATE TABLE items (id INTEGER NOT NULL, name TEXT DEFAULT 'unnamed', active BOOLEAN DEFAULT true NOT NULL)")
+
+	// Insert with explicit column list, omitting columns with defaults.
+	run("INSERT INTO items (id) VALUES (1)")
+	out := run("SELECT * FROM items")
+	if !strings.Contains(out, "unnamed") {
+		t.Fatalf("expected default 'unnamed' for name, got: %s", out)
+	}
+	if !strings.Contains(out, "true") {
+		t.Fatalf("expected default true for active, got: %s", out)
+	}
+
+	// Insert with all columns explicitly.
+	run("INSERT INTO items (id, name, active) VALUES (2, 'widget', false)")
+	out = run("SELECT * FROM items WHERE id = 2")
+	if !strings.Contains(out, "widget") {
+		t.Fatalf("expected 'widget', got: %s", out)
+	}
+
+	// Insert with fewer values than columns (trailing defaults).
+	run("INSERT INTO items VALUES (3)")
+	out = run("SELECT * FROM items WHERE id = 3")
+	if !strings.Contains(out, "unnamed") {
+		t.Fatalf("expected default 'unnamed' for trailing column, got: %s", out)
+	}
+}
+
+func TestCLI_FunctionCalls(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "funcs.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Test now() returns a timestamp-like string.
+	out := run("SELECT now()")
+	if !strings.Contains(out, "-") || !strings.Contains(out, ":") {
+		t.Fatalf("expected timestamp from now(), got: %s", out)
+	}
+
+	// Test nextval() returns an integer.
+	out = run("SELECT nextval('test_seq')")
+	if !strings.Contains(out, "1") {
+		t.Fatalf("expected 1 from nextval(), got: %s", out)
+	}
+
+	// Test string functions.
+	out = run("SELECT upper('hello')")
+	if !strings.Contains(out, "HELLO") {
+		t.Fatalf("expected HELLO from upper(), got: %s", out)
+	}
+
+	out = run("SELECT lower('WORLD')")
+	if !strings.Contains(out, "world") {
+		t.Fatalf("expected world from lower(), got: %s", out)
+	}
+
+	out = run("SELECT length('test')")
+	if !strings.Contains(out, "4") {
+		t.Fatalf("expected 4 from length(), got: %s", out)
+	}
+
+	// Test coalesce.
+	out = run("SELECT coalesce(NULL, 'fallback')")
+	if !strings.Contains(out, "fallback") {
+		t.Fatalf("expected fallback from coalesce(), got: %s", out)
+	}
+}
+
+func TestCLI_TypeCasts(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "casts.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Integer cast.
+	out := run("SELECT 42::text")
+	if !strings.Contains(out, "42") {
+		t.Fatalf("expected 42 from int::text, got: %s", out)
+	}
+
+	// Boolean cast.
+	out = run("SELECT 'true'::boolean")
+	if !strings.Contains(out, "true") {
+		t.Fatalf("expected true from text::boolean, got: %s", out)
+	}
+
+	// regclass cast (pass-through).
+	out = run("SELECT 'my_sequence'::regclass")
+	if !strings.Contains(out, "my_sequence") {
+		t.Fatalf("expected my_sequence from regclass cast, got: %s", out)
+	}
+}
+
+func TestCLI_NextvalDefault(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "nextvaldef.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Create table with nextval default — the Pagila pattern.
+	run("CREATE TABLE customer (customer_id integer DEFAULT nextval('customer_customer_id_seq') NOT NULL, name TEXT NOT NULL)")
+
+	// Insert using column list, omitting customer_id.
+	run("INSERT INTO customer (name) VALUES ('Alice')")
+	run("INSERT INTO customer (name) VALUES ('Bob')")
+
+	// Both should have auto-generated IDs.
+	out := run("SELECT * FROM customer")
+	if !strings.Contains(out, "Alice") || !strings.Contains(out, "Bob") {
+		t.Fatalf("expected Alice and Bob, got: %s", out)
+	}
+	// IDs should be 1 and 2.
+	if !strings.Contains(out, "1") || !strings.Contains(out, "2") {
+		t.Fatalf("expected auto-generated IDs 1 and 2, got: %s", out)
+	}
+}
+
+func TestCLI_FullPagilaCustomerTable(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "pagila_customer.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Full Pagila customer table DDL.
+	run(`CREATE TABLE customer (
+		customer_id integer DEFAULT nextval('customer_customer_id_seq'::regclass) NOT NULL,
+		store_id smallint NOT NULL,
+		first_name text NOT NULL,
+		last_name text NOT NULL,
+		email text,
+		address_id smallint NOT NULL,
+		activebool boolean DEFAULT true NOT NULL,
+		create_date date DEFAULT now() NOT NULL,
+		last_update timestamp without time zone DEFAULT now(),
+		active integer
+	)`)
+
+	// Insert with explicit columns, relying on defaults.
+	run("INSERT INTO customer (store_id, first_name, last_name, address_id) VALUES (1, 'Mary', 'Smith', 5)")
+	run("INSERT INTO customer (store_id, first_name, last_name, email, address_id, active) VALUES (1, 'Patricia', 'Johnson', 'patricia@example.com', 6, 1)")
+
+	out := run("SELECT * FROM customer")
+	if !strings.Contains(out, "Mary") || !strings.Contains(out, "Patricia") {
+		t.Fatalf("expected Mary and Patricia, got: %s", out)
+	}
+	// activebool should default to true.
+	if !strings.Contains(out, "true") {
+		t.Fatalf("expected default activebool=true, got: %s", out)
+	}
+}
+
+
 

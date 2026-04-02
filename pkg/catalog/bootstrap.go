@@ -153,10 +153,14 @@ func pgClassRow(oid int32, name string, namespace int32, kind string,
 }
 
 // pgAttributeRow builds a pg_attribute tuple.
-func pgAttributeRow(relid int32, name string, typid, typlen int32, num int16, notNull bool) []tuple.Datum {
+func pgAttributeRow(relid int32, name string, typid, typlen int32, num int16, notNull bool, defaultExpr string) []tuple.Datum {
 	var nn int32
 	if notNull {
 		nn = 1
+	}
+	var hasDef int32
+	if defaultExpr != "" {
+		hasDef = 1
 	}
 	return []tuple.Datum{
 		tuple.DInt32(relid),        // attrelid
@@ -167,6 +171,8 @@ func pgAttributeRow(relid int32, name string, typid, typlen int32, num int16, no
 		tuple.DInt32(-1),           // atttypmod
 		tuple.DInt32(nn),           // attnotnull
 		tuple.DInt32(0),            // attisdropped
+		tuple.DInt32(hasDef),       // atthasdef
+		tuple.DText(defaultExpr),   // attdefault
 	}
 }
 
@@ -324,7 +330,7 @@ func catalogColumnDefs() [][]tuple.Datum {
 
 	var rows [][]tuple.Datum
 	for _, d := range defs {
-		rows = append(rows, pgAttributeRow(d.relOID, d.name, d.typOID, d.typLen, d.num, false))
+		rows = append(rows, pgAttributeRow(d.relOID, d.name, d.typOID, d.typLen, d.num, false, ""))
 	}
 	return rows
 }

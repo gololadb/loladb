@@ -116,7 +116,7 @@ func queryToInsertPlan(q *Query) (LogicalNode, error) {
 		}
 		values = append(values, rowExprs)
 	}
-	return &LogicalInsert{Table: rte.RelName, Values: values}, nil
+	return &LogicalInsert{Table: rte.RelName, Columns: q.InsertColumns, Values: values}, nil
 }
 
 func queryToDeletePlan(q *Query) (LogicalNode, error) {
@@ -310,6 +310,12 @@ func joinTreeNodeToPlan(node JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, 
 // Converts the typed analyzed expressions back to the Expr interface
 // used by the optimizer and executor.
 
+// AnalyzedToExpr converts an AnalyzedExpr to an executable Expr.
+// Exported for use by the executor (e.g., evaluating DEFAULT expressions).
+func AnalyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
+	return analyzedToExpr(ae, rtes)
+}
+
 func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 	switch e := ae.(type) {
 	case *ColumnVar:
@@ -333,6 +339,18 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 			Child: analyzedToExpr(e.Arg, rtes),
 			Not:   e.IsNot,
 		}
+	case *TypeCastExpr:
+		return &ExprCast{
+			Inner:      analyzedToExpr(e.Arg, rtes),
+			TargetType: e.CastType,
+			TypeName:   e.TargetType,
+		}
+	case *FuncCallExpr:
+		args := make([]Expr, len(e.Args))
+		for i, a := range e.Args {
+			args[i] = analyzedToExpr(a, rtes)
+		}
+		return &ExprFunc{Name: e.FuncName, Args: args}
 	case *StarExpr:
 		return &ExprStar{}
 	default:
