@@ -415,6 +415,19 @@ func CompareDatums(a, b tuple.Datum) int {
 		return 0
 	}
 
+	// Coerce int/float cross-type comparisons.
+	af, afok := toFloat64(a)
+	bf, bfok := toFloat64(b)
+	if afok && bfok {
+		if af < bf {
+			return -1
+		}
+		if af > bf {
+			return 1
+		}
+		return 0
+	}
+
 	if a.Type != b.Type {
 		return 0 // incomparable
 	}
@@ -461,6 +474,19 @@ func CompareDatums(a, b tuple.Datum) int {
 		return 1
 	default:
 		return 0
+	}
+}
+
+func toFloat64(d tuple.Datum) (float64, bool) {
+	switch d.Type {
+	case tuple.TypeFloat64:
+		return d.F64, true
+	case tuple.TypeInt32:
+		return float64(d.I32), true
+	case tuple.TypeInt64:
+		return float64(d.I64), true
+	default:
+		return 0, false
 	}
 }
 

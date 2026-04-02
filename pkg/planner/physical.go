@@ -269,8 +269,9 @@ func (n *PhysCreateIndex) Children() []PhysicalNode  { return nil }
 // PhysNoOp is a physical node that produces a message but does no real work.
 // PhysAggregate performs hash-based aggregation.
 type PhysAggregate struct {
-	GroupExprs []Expr    // GROUP BY expressions
-	AggDescs   []AggDesc // aggregate descriptors
+	GroupExprs []Expr       // GROUP BY expressions
+	AggDescs   []AggDesc   // aggregate descriptors
+	HavingQual Expr         // HAVING filter (nil = no HAVING)
 	Child      PhysicalNode
 }
 

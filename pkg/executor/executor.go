@@ -796,12 +796,14 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 	}
 
 	type aggState struct {
-		count int64
-		sum   float64
+		count  int64
+		sum    float64
 		hasVal bool
-		min   tuple.Datum
-		max   tuple.Datum
-		vals  []tuple.Datum // for DISTINCT
+		min    tuple.Datum
+		max    tuple.Datum
+		vals   []tuple.Datum // for DISTINCT
+		strBuf strings.Builder // for string_agg
+		arrBuf []tuple.Datum   // for array_agg
 	}
 
 	type groupEntry struct {
@@ -890,6 +892,21 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				if !st.hasVal || planner.CompareDatums(val, st.max) > 0 {
 					st.max = val
 				}
+			case "string_agg":
+				// Get delimiter from second argument (default ',').
+				delim := ","
+				if len(ad.ArgExprs) >= 2 {
+					dv, err := ad.ArgExprs[1].Eval(r)
+					if err == nil && dv.Type == tuple.TypeText {
+						delim = dv.Text
+					}
+				}
+				if st.hasVal {
+					st.strBuf.WriteString(delim)
+				}
+				st.strBuf.WriteString(datumToStringVal(val))
+			case "array_agg":
+				st.arrBuf = append(st.arrBuf, val)
 			}
 			st.hasVal = true
 		}
@@ -977,13 +994,62 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				} else {
 					row = append(row, st.max) // max of bools = OR
 				}
+			case "string_agg":
+				if !st.hasVal {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, tuple.DText(st.strBuf.String()))
+				}
+			case "array_agg":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					// Format as PostgreSQL array literal: {val1,val2,...}
+					var sb strings.Builder
+					sb.WriteByte('{')
+					for j, v := range st.arrBuf {
+						if j > 0 {
+							sb.WriteByte(',')
+						}
+						sb.WriteString(datumToStringVal(v))
+					}
+					sb.WriteByte('}')
+					row = append(row, tuple.DText(sb.String()))
+				}
 			default:
 				row = append(row, tuple.DNull())
+			}
+		}
+		// Apply HAVING filter.
+		if n.HavingQual != nil {
+			r := &planner.Row{Columns: row, Names: outCols}
+			if !planner.EvalBool(n.HavingQual, r) {
+				continue
 			}
 		}
 		result.Rows = append(result.Rows, row)
 	}
 	return result, nil
+}
+
+func datumToStringVal(d tuple.Datum) string {
+	switch d.Type {
+	case tuple.TypeText:
+		return d.Text
+	case tuple.TypeInt32:
+		return fmt.Sprintf("%d", d.I32)
+	case tuple.TypeInt64:
+		return fmt.Sprintf("%d", d.I64)
+	case tuple.TypeFloat64:
+		return fmt.Sprintf("%g", d.F64)
+	case tuple.TypeBool:
+		if d.Bool {
+			return "true"
+		}
+		return "false"
+	default:
+		return "NULL"
+	}
 }
 
 func datumToFloat64(d tuple.Datum) float64 {

@@ -241,15 +241,13 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		}
 	}
 
-	// Step 5: Collect aggregate references from the target list.
-	for _, te := range q.TargetList {
-		collectAggRefs(te.Expr, &q.AggRefs)
-	}
-	if len(q.AggRefs) > 0 {
-		q.HasAggs = true
-		for i, ref := range q.AggRefs {
-			ref.AggIndex = i
+	// Step 5: Transform HAVING clause.
+	if n.HavingClause != nil {
+		havingExpr, err := a.transformExpr(n.HavingClause)
+		if err != nil {
+			return nil, fmt.Errorf("analyzer: HAVING: %w", err)
 		}
+		q.HavingQual = havingExpr
 	}
 
 	// Step 6: Transform ORDER BY.
@@ -267,7 +265,25 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		}
 	}
 
-	// Step 7: Transform LIMIT/OFFSET.
+	// Step 7: Collect aggregate references from all expression trees
+	// (target list, HAVING, ORDER BY) and assign sequential indices.
+	for _, te := range q.TargetList {
+		collectAggRefs(te.Expr, &q.AggRefs)
+	}
+	if q.HavingQual != nil {
+		collectAggRefs(q.HavingQual, &q.AggRefs)
+	}
+	for _, sc := range q.SortClause {
+		collectAggRefs(sc.Expr, &q.AggRefs)
+	}
+	if len(q.AggRefs) > 0 {
+		q.HasAggs = true
+		for i, ref := range q.AggRefs {
+			ref.AggIndex = i
+		}
+	}
+
+	// Step 8: Transform LIMIT/OFFSET.
 	if n.LimitCount != nil {
 		q.LimitCount, err = a.transformExpr(n.LimitCount)
 		if err != nil {

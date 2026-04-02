@@ -1512,5 +1512,142 @@ func TestCLI_AggregateDistinct(t *testing.T) {
 	}
 }
 
+func TestCLI_AggregateHaving(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "agg_having.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE orders (id INTEGER, customer TEXT, amount INTEGER)")
+	run("INSERT INTO orders VALUES (1, 'alice', 100)")
+	run("INSERT INTO orders VALUES (2, 'alice', 200)")
+	run("INSERT INTO orders VALUES (3, 'bob', 50)")
+	run("INSERT INTO orders VALUES (4, 'carol', 300)")
+	run("INSERT INTO orders VALUES (5, 'carol', 400)")
+	run("INSERT INTO orders VALUES (6, 'carol', 100)")
+
+	// HAVING count(*) > 1 should exclude bob (only 1 order).
+	out := run("SELECT customer, count(*) FROM orders GROUP BY customer HAVING count(*) > 1")
+	if strings.Contains(out, "bob") {
+		t.Fatalf("bob should be excluded by HAVING, got: %s", out)
+	}
+	if !strings.Contains(out, "alice") || !strings.Contains(out, "carol") {
+		t.Fatalf("expected alice and carol, got: %s", out)
+	}
+
+	// HAVING sum(amount) >= 500 should only include carol (800).
+	out = run("SELECT customer, sum(amount) FROM orders GROUP BY customer HAVING sum(amount) >= 500")
+	if strings.Contains(out, "alice") || strings.Contains(out, "bob") {
+		t.Fatalf("only carol should pass HAVING sum >= 500, got: %s", out)
+	}
+	if !strings.Contains(out, "carol") {
+		t.Fatalf("expected carol, got: %s", out)
+	}
+}
+
+func TestCLI_AggregateOrderBy(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "agg_orderby.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE scores (player TEXT, score INTEGER)")
+	run("INSERT INTO scores VALUES ('alice', 10)")
+	run("INSERT INTO scores VALUES ('alice', 20)")
+	run("INSERT INTO scores VALUES ('bob', 5)")
+	run("INSERT INTO scores VALUES ('carol', 30)")
+	run("INSERT INTO scores VALUES ('carol', 40)")
+	run("INSERT INTO scores VALUES ('carol', 50)")
+
+	// ORDER BY count(*) DESC — carol(3), alice(2), bob(1).
+	out := run("SELECT player, count(*) FROM scores GROUP BY player ORDER BY count(*) DESC")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	// First data line (after header + separator) should be carol.
+	if len(lines) >= 3 && !strings.Contains(lines[2], "carol") {
+		t.Fatalf("expected carol first in ORDER BY count(*) DESC, got: %s", out)
+	}
+
+	// ORDER BY sum(score) — bob(5), alice(30), carol(120).
+	out = run("SELECT player, sum(score) FROM scores GROUP BY player ORDER BY sum(score)")
+	lines = strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) >= 3 && !strings.Contains(lines[2], "bob") {
+		t.Fatalf("expected bob first in ORDER BY sum(score), got: %s", out)
+	}
+}
+
+func TestCLI_StringAgg(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "string_agg.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE tags (group_name TEXT, tag TEXT)")
+	run("INSERT INTO tags VALUES ('fruits', 'apple')")
+	run("INSERT INTO tags VALUES ('fruits', 'banana')")
+	run("INSERT INTO tags VALUES ('fruits', 'cherry')")
+	run("INSERT INTO tags VALUES ('colors', 'red')")
+	run("INSERT INTO tags VALUES ('colors', 'blue')")
+
+	out := run("SELECT group_name, string_agg(tag, ', ') FROM tags GROUP BY group_name")
+	if !strings.Contains(out, "apple") || !strings.Contains(out, "banana") {
+		t.Fatalf("expected fruit tags, got: %s", out)
+	}
+	if !strings.Contains(out, "red") || !strings.Contains(out, "blue") {
+		t.Fatalf("expected color tags, got: %s", out)
+	}
+}
+
+func TestCLI_ArrayAgg(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "array_agg.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE items (cat TEXT, item TEXT)")
+	run("INSERT INTO items VALUES ('a', 'x')")
+	run("INSERT INTO items VALUES ('a', 'y')")
+	run("INSERT INTO items VALUES ('b', 'z')")
+
+	out := run("SELECT cat, array_agg(item) FROM items GROUP BY cat")
+	if !strings.Contains(out, "{x,y}") {
+		t.Fatalf("expected {x,y} for cat a, got: %s", out)
+	}
+	if !strings.Contains(out, "{z}") {
+		t.Fatalf("expected {z} for cat b, got: %s", out)
+	}
+}
+
 
 

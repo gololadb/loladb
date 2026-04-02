@@ -466,6 +466,7 @@ func (n *LogicalDropSchema) OutputColumns() []string { return nil }
 type LogicalAggregate struct {
 	GroupExprs []Expr    // GROUP BY expressions (empty = single group)
 	AggDescs   []AggDesc // aggregate function descriptors
+	HavingQual Expr      // HAVING filter (nil = no HAVING)
 	Child      LogicalNode
 }
 

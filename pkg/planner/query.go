@@ -86,8 +86,11 @@ type Query struct {
 	// GroupClause holds GROUP BY expressions.
 	GroupClause []AnalyzedExpr
 
-	// HasAggs is true when the target list contains aggregate functions.
+	// HasAggs is true when the query contains aggregate functions.
 	HasAggs bool
+
+	// HavingQual is the HAVING clause expression (may contain AggRefs).
+	HavingQual AnalyzedExpr
 
 	// AggRefs collects all AggRef nodes found in the target list,
 	// in order. The planner uses this to build the aggregate node.

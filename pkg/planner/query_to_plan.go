@@ -2,6 +2,7 @@ package planner
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -82,9 +83,16 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 				Distinct: ref.Distinct,
 			})
 		}
+		var havingExpr Expr
+		if q.HavingQual != nil {
+			havingExpr = analyzedToExpr(q.HavingQual, q.RangeTable)
+			// Patch agg refs in HAVING too.
+			patchAggExprs(havingExpr, len(groupExprs))
+		}
 		plan = &LogicalAggregate{
 			GroupExprs: groupExprs,
 			AggDescs:   aggDescs,
+			HavingQual: havingExpr,
 			Child:      plan,
 		}
 	}
@@ -115,8 +123,13 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 		outCols := plan.OutputColumns()
 		var keys []SortKey
 		for _, sc := range q.SortClause {
+			expr := analyzedToExprWithCols(sc.Expr, q.RangeTable, outCols)
+			// Patch aggregate references in sort keys.
+			if q.HasAggs || len(q.GroupClause) > 0 {
+				patchAggExprs(expr, len(q.GroupClause))
+			}
 			keys = append(keys, SortKey{
-				Expr: analyzedToExprWithCols(sc.Expr, q.RangeTable, outCols),
+				Expr: expr,
 				Desc: sc.Desc,
 			})
 		}
@@ -399,20 +412,41 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 
 func analyzedToExprWithCols(ae AnalyzedExpr, rtes []*RangeTblEntry, outCols []string) Expr {
 	// For ORDER BY, we need to resolve against the output columns.
-	if cv, ok := ae.(*ColumnVar); ok {
+	switch e := ae.(type) {
+	case *ColumnVar:
 		// Try to find the column in the output columns list.
-		target := cv.ColName
-		if cv.Table != "" {
-			target = cv.Table + "." + cv.ColName
+		target := e.ColName
+		if e.Table != "" {
+			target = e.Table + "." + e.ColName
 		}
 		for i, name := range outCols {
 			parts := splitQualified(name)
 			if len(parts) == 2 {
-				if (cv.Table == "" || equalFold(parts[0], cv.Table)) && equalFold(parts[1], cv.ColName) {
+				if (e.Table == "" || equalFold(parts[0], e.Table)) && equalFold(parts[1], e.ColName) {
 					return &ExprColumn{Table: parts[0], Column: parts[1], Index: i}
 				}
-			} else if equalFold(name, target) || equalFold(name, cv.ColName) {
-				return &ExprColumn{Table: cv.Table, Column: cv.ColName, Index: i}
+			} else if equalFold(name, target) || equalFold(name, e.ColName) {
+				return &ExprColumn{Table: e.Table, Column: e.ColName, Index: i}
+			}
+		}
+	case *AggRef:
+		// Match the aggregate expression against the output column names
+		// so the sort key reads from the Project's output by index.
+		// Try both qualified (table.col) and unqualified (col) forms
+		// since exprString uses unqualified names.
+		aggStr := e.String()
+		for i, name := range outCols {
+			if equalFold(name, aggStr) {
+				return &ExprColumn{Column: name, Index: i}
+			}
+		}
+		// Try with unqualified argument names.
+		unqualStr := aggUnqualifiedString(e)
+		if unqualStr != aggStr {
+			for i, name := range outCols {
+				if equalFold(name, unqualStr) {
+					return &ExprColumn{Column: name, Index: i}
+				}
 			}
 		}
 	}
@@ -487,6 +521,24 @@ func splitQualified(name string) []string {
 		}
 	}
 	return []string{name}
+}
+
+// aggUnqualifiedString returns the AggRef's string representation with
+// unqualified column names (no table prefix), matching how exprString
+// formats function calls in the target list.
+func aggUnqualifiedString(a *AggRef) string {
+	if a.Star {
+		return a.AggFunc + "(*)"
+	}
+	args := make([]string, len(a.Args))
+	for i, arg := range a.Args {
+		if cv, ok := arg.(*ColumnVar); ok {
+			args[i] = cv.ColName // unqualified
+		} else {
+			args[i] = arg.String()
+		}
+	}
+	return a.AggFunc + "(" + strings.Join(args, ", ") + ")"
 }
 
 func equalFold(a, b string) bool {
