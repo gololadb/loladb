@@ -64,7 +64,7 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 	case *LogicalUpdate:
 		return o.optimizeUpdate(n)
 	case *LogicalCreateTable:
-		return &PhysCreateTable{Table: n.Table, Columns: n.Columns}, nil
+		return &PhysCreateTable{Table: n.Table, Schema: n.Schema, Columns: n.Columns}, nil
 	case *LogicalCreateIndex:
 		return &PhysCreateIndex{Index: n.Index, Table: n.Table, Column: n.Column, Method: n.Method}, nil
 	case *LogicalExplain:
@@ -119,6 +119,10 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysDropType{Name: n.Name, MissingOk: n.MissingOk}, nil
 	case *LogicalAlterEnum:
 		return &PhysAlterEnum{Name: n.Name, NewVal: n.NewVal}, nil
+	case *LogicalCreateSchema:
+		return &PhysCreateSchema{Name: n.Name, IfNotExists: n.IfNotExists, AuthRole: n.AuthRole}, nil
+	case *LogicalDropSchema:
+		return &PhysDropSchema{Name: n.Name, MissingOk: n.MissingOk}, nil
 	case *LogicalResult:
 		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
 	default:

@@ -131,7 +131,7 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 
 	stmt := stmts[0].Stmt
 
-	// Handle SET ROLE to change the session user for RLS.
+	// Handle SET statements.
 	if setVar, ok := stmt.(*parser.VariableSetStmt); ok {
 		if strings.EqualFold(setVar.Name, "role") && len(setVar.Args) > 0 {
 			role := extractSetValue(setVar.Args[0])
@@ -140,6 +140,24 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 				return &Result{Message: fmt.Sprintf("SET ROLE %s", role)}, nil
 			}
 		}
+		if strings.EqualFold(setVar.Name, "search_path") {
+			var schemas []string
+			for _, arg := range setVar.Args {
+				v := extractSetValue(arg)
+				if v != "" {
+					schemas = append(schemas, v)
+				}
+			}
+			if len(schemas) > 0 {
+				ex.Cat.SearchPath = schemas
+				return &Result{Message: fmt.Sprintf("SET search_path = %s", strings.Join(schemas, ", "))}, nil
+			}
+		}
+	}
+
+	// Handle SHOW statements.
+	if showVar, ok := stmt.(*parser.VariableShowStmt); ok {
+		return ex.execShow(showVar)
 	}
 
 	// Check for EXPLAIN.
@@ -294,6 +312,21 @@ func extractSetValue(expr parser.Expr) string {
 		}
 	}
 	return ""
+}
+
+func (ex *Executor) execShow(n *parser.VariableShowStmt) (*Result, error) {
+	name := strings.ToLower(n.Name)
+	switch name {
+	case "search_path":
+		val := strings.Join(ex.Cat.SearchPath, ", ")
+		return &Result{
+			Columns: []string{"search_path"},
+			Rows:    [][]tuple.Datum{{tuple.DText(val)}},
+			Message: "SHOW",
+		}, nil
+	default:
+		return &Result{Message: fmt.Sprintf("SHOW %s", n.Name)}, nil
+	}
 }
 
 

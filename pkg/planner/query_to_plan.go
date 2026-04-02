@@ -182,7 +182,7 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 	}
 	switch u.Type {
 	case UtilCreateTable:
-		return &LogicalCreateTable{Table: u.TableName, Columns: u.Columns}, nil
+		return &LogicalCreateTable{Table: u.TableName, Schema: u.TableSchema, Columns: u.Columns}, nil
 	case UtilCreateIndex:
 		return &LogicalCreateIndex{Index: u.IndexName, Table: u.IndexTable, Column: u.IndexColumn, Method: u.IndexMethod}, nil
 	case UtilCreateSequence:
@@ -241,6 +241,10 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 		return &LogicalDropType{Name: u.DropTypeName, MissingOk: u.DropMissingOk}, nil
 	case UtilAlterEnum:
 		return &LogicalAlterEnum{Name: u.AlterEnumName, NewVal: u.AlterEnumVal}, nil
+	case UtilCreateSchema:
+		return &LogicalCreateSchema{Name: u.SchemaName, IfNotExists: u.SchemaIfNotExists, AuthRole: u.SchemaAuthRole}, nil
+	case UtilDropSchema:
+		return &LogicalDropSchema{Name: u.SchemaName, MissingOk: u.DropMissingOk}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

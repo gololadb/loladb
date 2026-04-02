@@ -3,6 +3,7 @@ package catalog
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/gololadb/loladb/pkg/engine"
 	"github.com/gololadb/loladb/pkg/index"
@@ -36,12 +37,13 @@ type ColumnDef struct {
 
 // Relation holds metadata about a table or index (a row from pg_class).
 type Relation struct {
-	OID      int32
-	Name     string
-	Kind     int32
-	Pages    int32
-	HeadPage int32
-	OwnerOID int32 // OID of the owning role (0 = no owner)
+	OID          int32
+	Name         string
+	Kind         int32
+	Pages        int32
+	HeadPage     int32
+	OwnerOID     int32 // OID of the owning role (0 = no owner)
+	NamespaceOID int32 // OID of the containing schema (pg_namespace)
 }
 
 // Column holds metadata about a column (a row from pg_attribute).
@@ -75,16 +77,17 @@ func (a *engineAllocator) MarkDirty(pn uint32)                     { a.eng.Pool.
 // Catalog provides DDL operations backed by pg_class and pg_attribute
 // system tables that live in normal heap pages.
 type Catalog struct {
-	Eng      *engine.Engine
-	alloc    *engineAllocator // shared page allocator
-	IdxAMs   map[string]index.IndexAM // AM registry: method name → IndexAM
-	Rules    *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
-	Policies *policyStore     // in-memory RLS policy storage (pg_policy)
-	ACLs     *aclStore        // in-memory object ACL cache
-	Funcs    *funcStore       // in-memory function definitions (pg_proc)
-	Triggers *triggerStore    // in-memory trigger definitions (pg_trigger)
-	Types    *typeStore       // in-memory custom type definitions (domains, enums)
-	cache    *syscache        // catalog lookup cache
+	Eng        *engine.Engine
+	alloc      *engineAllocator // shared page allocator
+	IdxAMs     map[string]index.IndexAM // AM registry: method name → IndexAM
+	Rules      *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
+	Policies   *policyStore     // in-memory RLS policy storage (pg_policy)
+	ACLs       *aclStore        // in-memory object ACL cache
+	Funcs      *funcStore       // in-memory function definitions (pg_proc)
+	Triggers   *triggerStore    // in-memory trigger definitions (pg_trigger)
+	Types      *typeStore       // in-memory custom type definitions (domains, enums)
+	cache      *syscache        // catalog lookup cache
+	SearchPath []string         // schema search path (default: ["public"])
 }
 
 // New wraps an engine with catalog operations. If the database is
@@ -103,7 +106,8 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		Eng: eng, alloc: alloc, IdxAMs: ams,
 		Rules: newRuleStore(), Policies: newPolicyStore(), ACLs: newACLStore(),
 		Funcs: newFuncStore(), Triggers: newTriggerStore(), Types: newTypeStore(),
-		cache: newSyscache(),
+		cache:      newSyscache(),
+		SearchPath: []string{"public"},
 	}
 
 	if eng.Super.PgClassPage == 0 {
@@ -158,11 +162,21 @@ func (c *Catalog) CreateTable(name string, cols []ColumnDef) (int32, error) {
 
 // CreateTableOwned creates a new table with an explicit owner.
 func (c *Catalog) CreateTableOwned(name string, cols []ColumnDef, ownerOID int32) (int32, error) {
-	// Check for duplicate name.
-	existing, err := c.FindRelation(name)
-	if err != nil {
-		return 0, err
+	return c.CreateTableInSchema(name, cols, ownerOID, "")
+}
+
+// CreateTableInSchema creates a new table in the specified schema (or current schema if empty).
+func (c *Catalog) CreateTableInSchema(name string, cols []ColumnDef, ownerOID int32, schemaName string) (int32, error) {
+	nsOID := c.CurrentSchemaOID()
+	if schemaName != "" {
+		nsOID = c.SchemaOID(schemaName)
+		if nsOID == 0 {
+			return 0, fmt.Errorf("schema %q does not exist", schemaName)
+		}
 	}
+
+	// Check for duplicate name in the target schema.
+	existing, _ := c.findRelationInNamespace(name, nsOID)
 	if existing != nil {
 		return 0, fmt.Errorf("catalog: table %q already exists", name)
 	}
@@ -190,7 +204,7 @@ func (c *Catalog) CreateTableOwned(name string, cols []ColumnDef, ownerOID int32
 
 	// Insert into pg_class (new 12-column format).
 	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, pgClassRow(
-		oid, name, OIDPublic, RelKindOrdinaryTable_S,
+		oid, name, nsOID, RelKindOrdinaryTable_S,
 		1, 0, 0, ownerOID, "heap", int32(headPage), 0, 0,
 	))
 	if err != nil {
@@ -226,10 +240,8 @@ func (c *Catalog) CreateTableOwned(name string, cols []ColumnDef, ownerOID int32
 // defining SELECT query. This mirrors PostgreSQL's DefineView() which
 // creates a pg_class entry + a pg_rewrite _RETURN rule.
 func (c *Catalog) CreateView(name string, cols []ColumnDef, definition string) (int32, error) {
-	existing, err := c.FindRelation(name)
-	if err != nil {
-		return 0, err
-	}
+	nsOID := c.CurrentSchemaOID()
+	existing, _ := c.findRelationInNamespace(name, nsOID)
 	if existing != nil {
 		return 0, fmt.Errorf("catalog: relation %q already exists", name)
 	}
@@ -239,8 +251,8 @@ func (c *Catalog) CreateView(name string, cols []ColumnDef, definition string) (
 	xid := c.Eng.TxMgr.Begin()
 
 	// Insert into pg_class with view relkind and HeadPage=0 (no storage).
-	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, pgClassRow(
-		oid, name, OIDPublic, RelKindView_S,
+	_, err := c.Eng.Insert(xid, c.Eng.Super.PgClassPage, pgClassRow(
+		oid, name, nsOID, RelKindView_S,
 		0, 0, 0, 0, "", 0, 0, 0,
 	))
 	if err != nil {
@@ -496,12 +508,13 @@ func tupleToRelation(tup *tuple.Tuple) *Relation {
 		return nil
 	}
 	return &Relation{
-		OID:      tup.Columns[0].I32,
-		Name:     tup.Columns[1].Text,
-		Kind:     relKindStringToInt(tup.Columns[3].Text),
-		Pages:    tup.Columns[4].I32,
-		HeadPage: tup.Columns[9].I32,
-		OwnerOID: tup.Columns[7].I32,
+		OID:          tup.Columns[0].I32,
+		Name:         tup.Columns[1].Text,
+		Kind:         relKindStringToInt(tup.Columns[3].Text),
+		Pages:        tup.Columns[4].I32,
+		HeadPage:     tup.Columns[9].I32,
+		OwnerOID:     tup.Columns[7].I32,
+		NamespaceOID: tup.Columns[2].I32,
 	}
 }
 
@@ -571,6 +584,11 @@ func relKindIntToString(k int32) string {
 }
 
 func (c *Catalog) FindRelation(name string) (*Relation, error) {
+	// Handle schema-qualified names (schema.table).
+	if parts := strings.SplitN(name, ".", 2); len(parts) == 2 {
+		return c.FindRelationQualified(parts[0], parts[1])
+	}
+
 	// Check cache first.
 	if r, ok := c.cache.lookupRelByName(name); ok {
 		return r, nil
@@ -588,16 +606,40 @@ func (c *Catalog) FindRelation(name string) (*Relation, error) {
 }
 
 func (c *Catalog) findRelationWithSnapshot(name string, snap *mvcc.Snapshot) (*Relation, error) {
-	var found *Relation
+	// Collect all relations with this name, then pick the best match
+	// using the search path (pg_catalog first, then SearchPath).
+	var candidates []*Relation
 	err := c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
 		r := tupleToRelation(tup)
 		if r != nil && r.Name == name {
-			found = r
-			return false
+			candidates = append(candidates, r)
 		}
 		return true
 	})
-	return found, err
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	// Multiple matches: resolve using search path.
+	searchOrder := append([]string{"pg_catalog"}, c.SearchPath...)
+	for _, ns := range searchOrder {
+		nsOID := c.SchemaOID(ns)
+		if nsOID == 0 {
+			continue
+		}
+		for _, r := range candidates {
+			if r.NamespaceOID == nsOID {
+				return r, nil
+			}
+		}
+	}
+	// Fallback: return the first candidate.
+	return candidates[0], nil
 }
 
 // GetColumns returns the columns for a relation OID, ordered by attnum.
@@ -860,9 +902,10 @@ func (c *Catalog) CreateIndex(indexName, tableName, colName, method string) (int
 	oid := int32(c.Eng.Super.AllocOID())
 
 	// Insert into pg_class (new 12-column format for index).
+	// Place the index in the same schema as the table.
 	xid := c.Eng.TxMgr.Begin()
 	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, pgClassRow(
-		oid, indexName, OIDPublic, RelKindIndex_S,
+		oid, indexName, table.NamespaceOID, RelKindIndex_S,
 		1, 0, 0, 0, method, int32(rootPage), table.OID, colNum,
 	))
 	if err != nil {

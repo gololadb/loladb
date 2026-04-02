@@ -185,6 +185,7 @@ type UtilityStmt struct {
 
 	// Fields used by various utility types.
 	TableName   string
+	TableSchema string // schema for CREATE TABLE / CREATE VIEW (empty = current)
 	Columns     []ColDef
 	IndexName   string
 	IndexTable  string
@@ -259,6 +260,11 @@ type UtilityStmt struct {
 	TrigEvents     int
 	TrigForEach    string // "ROW" or "STATEMENT"
 	TrigReplace    bool
+
+	// Schema fields
+	SchemaName      string
+	SchemaIfNotExists bool
+	SchemaAuthRole  string
 }
 
 type UtilityType int
@@ -288,6 +294,8 @@ const (
 	UtilCreateEnum
 	UtilDropType
 	UtilAlterEnum
+	UtilCreateSchema
+	UtilDropSchema
 	UtilNoOp
 )
 

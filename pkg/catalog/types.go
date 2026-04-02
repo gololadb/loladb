@@ -149,7 +149,9 @@ func (c *Catalog) AlterEnumAddValue(name, newVal string) error {
 		}
 	}
 	ct.EnumVals = append(ct.EnumVals, newVal)
-	return nil
+	// Persist: delete old row and insert updated one.
+	c.deleteFromPgType(ct.OID)
+	return c.persistCustomType(ct)
 }
 
 // FindTypeByOID returns the custom type with the given OID, or nil.

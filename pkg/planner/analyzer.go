@@ -96,6 +96,8 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		return a.transformCreateEnumStmt(n)
 	case *parser.AlterEnumStmt:
 		return a.transformAlterEnumStmt(n)
+	case *parser.CreateSchemaStmt:
+		return a.transformCreateSchemaStmt(n)
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported statement %T", stmt)
 	}
@@ -107,8 +109,19 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 // addRangeTableEntry resolves a table name against the catalog and
 // adds it to the range table. Returns the 1-based index.
 func (a *Analyzer) addRangeTableEntry(tableName, alias string) (*RangeTblEntry, error) {
-	rel, err := a.Cat.FindRelation(tableName)
-	if err != nil || rel == nil {
+	return a.addRangeTableEntryQualified("", tableName, alias)
+}
+
+// addRangeTableEntryQualified resolves a schema-qualified table name.
+func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) (*RangeTblEntry, error) {
+	rel, err := a.Cat.FindRelationQualified(schema, tableName)
+	if err != nil {
+		return nil, err
+	}
+	if rel == nil {
+		if schema != "" {
+			return nil, fmt.Errorf("analyzer: relation %q.%q does not exist", schema, tableName)
+		}
 		return nil, fmt.Errorf("analyzer: relation %q does not exist", tableName)
 	}
 	cols, err := a.Cat.GetColumns(rel.OID)
@@ -125,6 +138,13 @@ func (a *Analyzer) addRangeTableEntry(tableName, alias string) (*RangeTblEntry, 
 		}
 	}
 
+	// Use schema-qualified name for the RelName so the executor can
+	// find the correct relation when multiple schemas have same-named tables.
+	qualName := tableName
+	if schema != "" {
+		qualName = schema + "." + tableName
+	}
+
 	if alias == "" {
 		alias = tableName
 	}
@@ -132,7 +152,7 @@ func (a *Analyzer) addRangeTableEntry(tableName, alias string) (*RangeTblEntry, 
 	rte := &RangeTblEntry{
 		RTIndex:  len(a.rangeTable) + 1, // 1-based
 		RelOID:   rel.OID,
-		RelName:  tableName,
+		RelName:  qualName,
 		Alias:    alias,
 		Columns:  rteCols,
 		HeadPage: rel.HeadPage,
@@ -266,17 +286,7 @@ func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 		if t.Alias != nil && t.Alias.Aliasname != "" {
 			alias = t.Alias.Aliasname
 		}
-		// Schema-qualified names: pg_catalog.pg_class → pg_class.
-		// We resolve by stripping the schema prefix since all catalog
-		// tables live in a flat namespace for now.
-		if t.Schemaname != "" {
-			// Keep the unqualified name for catalog lookup.
-			// The alias defaults to the unqualified name.
-			if alias == tableName {
-				alias = tableName
-			}
-		}
-		rte, err := a.addRangeTableEntry(tableName, alias)
+		rte, err := a.addRangeTableEntryQualified(t.Schemaname, tableName, alias)
 		if err != nil {
 			return nil, err
 		}
@@ -436,6 +446,12 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 				Table:   "",
 				VarType: tuple.TypeText,
 			}, nil
+		case parser.SVFOP_CURRENT_SCHEMA:
+			// Return the current schema as a constant.
+			schema := a.Cat.CurrentSchema()
+			return &Const{Value: tuple.DText(schema), ConstType: tuple.TypeText}, nil
+		case parser.SVFOP_CURRENT_CATALOG:
+			return &Const{Value: tuple.DText("loladb"), ConstType: tuple.TypeText}, nil
 		default:
 			return nil, fmt.Errorf("analyzer: unsupported SQL value function (op %d)", e.Op)
 		}
@@ -683,7 +699,7 @@ func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 	q := &Query{CommandType: CmdInsert}
 
 	// Add the target relation to the range table.
-	rte, err := a.addRangeTableEntry(n.Relation.Relname, "")
+	rte, err := a.addRangeTableEntryQualified(n.Relation.Schemaname, n.Relation.Relname, "")
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +732,7 @@ func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*Query, error) {
 	q := &Query{CommandType: CmdDelete}
 
-	rte, err := a.addRangeTableEntry(n.Relation.Relname, "")
+	rte, err := a.addRangeTableEntryQualified(n.Relation.Schemaname, n.Relation.Relname, "")
 	if err != nil {
 		return nil, err
 	}
@@ -743,7 +759,7 @@ func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*Query, error) {
 func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 	q := &Query{CommandType: CmdUpdate}
 
-	rte, err := a.addRangeTableEntry(n.Relation.Relname, "")
+	rte, err := a.addRangeTableEntryQualified(n.Relation.Schemaname, n.Relation.Relname, "")
 	if err != nil {
 		return nil, err
 	}
@@ -803,6 +819,7 @@ func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 
 func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 	tableName := n.Relation.Relname
+	schemaName := n.Relation.Schemaname
 	var cols []ColDef
 	for _, elt := range n.TableElts {
 		colDef, ok := elt.(*parser.ColumnDef)
@@ -814,7 +831,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType})
 	}
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
-		Type: UtilCreateTable, TableName: tableName, Columns: cols,
+		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName, Columns: cols,
 	}), nil
 }
 
@@ -1465,6 +1482,16 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 			DropTypeName:  typeName,
 			DropMissingOk: n.MissingOk,
 		}), nil
+	case parser.OBJECT_SCHEMA:
+		schemaName := ""
+		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
+			schemaName = n.Objects[0][len(n.Objects[0])-1]
+		}
+		return a.makeUtilityQuery(UtilDropSchema, &UtilityStmt{
+			Type:          UtilDropSchema,
+			SchemaName:    schemaName,
+			DropMissingOk: n.MissingOk,
+		}), nil
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported DROP object type %d", n.RemoveType)
 	}
@@ -1532,3 +1559,21 @@ func (a *Analyzer) transformAlterEnumStmt(n *parser.AlterEnumStmt) (*Query, erro
 		AlterEnumVal:  n.NewVal,
 	}), nil
 }
+
+func (a *Analyzer) transformCreateSchemaStmt(n *parser.CreateSchemaStmt) (*Query, error) {
+	name := n.Schemaname
+	if name == "" && n.AuthRole != "" {
+		name = n.AuthRole
+	}
+	if name == "" {
+		return nil, fmt.Errorf("analyzer: CREATE SCHEMA requires a name")
+	}
+	return a.makeUtilityQuery(UtilCreateSchema, &UtilityStmt{
+		Type:              UtilCreateSchema,
+		SchemaName:        name,
+		SchemaIfNotExists: n.IfNotExists,
+		SchemaAuthRole:    n.AuthRole,
+	}), nil
+}
+
+

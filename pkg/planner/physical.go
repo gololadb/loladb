@@ -246,6 +246,7 @@ func (n *PhysUpdate) Children() []PhysicalNode  { return []PhysicalNode{n.Child}
 
 type PhysCreateTable struct {
 	Table   string
+	Schema  string // target schema (empty = current)
 	Columns []ColDef
 }
 
@@ -518,6 +519,27 @@ type PhysAlterEnum struct {
 func (n *PhysAlterEnum) String() string            { return fmt.Sprintf("AlterEnum %s", n.Name) }
 func (n *PhysAlterEnum) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysAlterEnum) Children() []PhysicalNode  { return nil }
+
+// PhysCreateSchema represents CREATE SCHEMA.
+type PhysCreateSchema struct {
+	Name        string
+	IfNotExists bool
+	AuthRole    string
+}
+
+func (n *PhysCreateSchema) String() string            { return fmt.Sprintf("CreateSchema %s", n.Name) }
+func (n *PhysCreateSchema) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysCreateSchema) Children() []PhysicalNode  { return nil }
+
+// PhysDropSchema represents DROP SCHEMA.
+type PhysDropSchema struct {
+	Name      string
+	MissingOk bool
+}
+
+func (n *PhysDropSchema) String() string            { return fmt.Sprintf("DropSchema %s", n.Name) }
+func (n *PhysDropSchema) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropSchema) Children() []PhysicalNode  { return nil }
 
 // PhysResult produces a single row by evaluating expressions (SELECT without FROM).
 type PhysResult struct {

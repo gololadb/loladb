@@ -594,3 +594,404 @@ func TestCLI_CreateEnum(t *testing.T) {
 	}
 }
 
+func TestCLI_DomainNotNull(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "domain_nn.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	run("CREATE DOMAIN nn_text AS TEXT NOT NULL")
+	run("CREATE TABLE items (id INTEGER, name nn_text)")
+	run("INSERT INTO items VALUES (1, 'hello')")
+
+	out := runFail("INSERT INTO items VALUES (2, NULL)")
+	if !strings.Contains(out, "does not allow null") {
+		t.Fatalf("expected NOT NULL violation, got: %s", out)
+	}
+
+	out = run("SELECT * FROM items")
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("expected 'hello', got: %s", out)
+	}
+}
+
+func TestCLI_DomainCheck(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "domain_chk.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	run("CREATE DOMAIN positive_int AS INTEGER CHECK (VALUE > 0)")
+	run("CREATE TABLE scores (id INTEGER, value positive_int)")
+	run("INSERT INTO scores VALUES (1, 42)")
+
+	out := runFail("INSERT INTO scores VALUES (2, 0)")
+	if !strings.Contains(out, "violates check constraint") {
+		t.Fatalf("expected CHECK violation for 0, got: %s", out)
+	}
+
+	out = runFail("INSERT INTO scores VALUES (3, -5)")
+	if !strings.Contains(out, "violates check constraint") {
+		t.Fatalf("expected CHECK violation for -5, got: %s", out)
+	}
+
+	out = run("SELECT * FROM scores")
+	if !strings.Contains(out, "42") {
+		t.Fatalf("expected value 42, got: %s", out)
+	}
+}
+
+func TestCLI_EnumValidation(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "enum_val.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	run("CREATE TYPE color AS ENUM ('red', 'green', 'blue')")
+	run("CREATE TABLE items (id INTEGER, c color)")
+	run("INSERT INTO items VALUES (1, 'red')")
+
+	out := runFail("INSERT INTO items VALUES (2, 'yellow')")
+	if !strings.Contains(out, "invalid input value for enum") {
+		t.Fatalf("expected enum validation error, got: %s", out)
+	}
+
+	run("INSERT INTO items VALUES (3, NULL)")
+
+	out = run("SELECT * FROM items")
+	if !strings.Contains(out, "red") {
+		t.Fatalf("expected 'red', got: %s", out)
+	}
+}
+
+func TestCLI_DropType(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "drop_type.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TYPE status AS ENUM ('active', 'inactive')")
+	run("DROP TYPE status")
+	run("DROP TYPE IF EXISTS status")
+	run("CREATE DOMAIN pos AS INTEGER CHECK (VALUE > 0)")
+	run("DROP DOMAIN pos")
+	run("DROP DOMAIN IF EXISTS pos")
+}
+
+func TestCLI_AlterEnumAddValue(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "alter_enum.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TYPE color AS ENUM ('red', 'green')")
+	run("ALTER TYPE color ADD VALUE 'blue'")
+	run("CREATE TABLE items (id INTEGER, c color)")
+	run("INSERT INTO items VALUES (1, 'blue')")
+	out := run("SELECT * FROM items")
+	if !strings.Contains(out, "blue") {
+		t.Fatalf("expected 'blue', got: %s", out)
+	}
+}
+
+func TestCLI_EnumOrdering(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "enum_ord.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TYPE priority AS ENUM ('low', 'medium', 'high')")
+	run("CREATE TABLE tasks (id INTEGER, p priority)")
+	run("INSERT INTO tasks VALUES (1, 'high')")
+	run("INSERT INTO tasks VALUES (2, 'low')")
+	run("INSERT INTO tasks VALUES (3, 'medium')")
+
+	out := run("SELECT * FROM tasks ORDER BY p")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var dataLines []string
+	for _, l := range lines {
+		if strings.Contains(l, "low") || strings.Contains(l, "medium") || strings.Contains(l, "high") {
+			dataLines = append(dataLines, l)
+		}
+	}
+	if len(dataLines) != 3 {
+		t.Fatalf("expected 3 data rows, got %d: %s", len(dataLines), out)
+	}
+	if !strings.Contains(dataLines[0], "low") ||
+		!strings.Contains(dataLines[1], "medium") ||
+		!strings.Contains(dataLines[2], "high") {
+		t.Fatalf("expected enum ordering low < medium < high, got:\n%s", out)
+	}
+}
+
+func TestCLI_DomainUpdateValidation(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "domain_upd.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	run("CREATE DOMAIN positive_int AS INTEGER CHECK (VALUE > 0)")
+	run("CREATE TABLE vals (id INTEGER, v positive_int)")
+	run("INSERT INTO vals VALUES (1, 10)")
+
+	out := runFail("UPDATE vals SET v = -1 WHERE id = 1")
+	if !strings.Contains(out, "violates check constraint") {
+		t.Fatalf("expected CHECK violation on UPDATE, got: %s", out)
+	}
+
+	run("UPDATE vals SET v = 20 WHERE id = 1")
+	out = run("SELECT * FROM vals")
+	if !strings.Contains(out, "20") {
+		t.Fatalf("expected updated value 20, got: %s", out)
+	}
+}
+
+func TestCLI_CreateSchema(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "schema.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	out := run("CREATE SCHEMA myapp")
+	if !strings.Contains(out, "CREATE SCHEMA") {
+		t.Fatalf("expected CREATE SCHEMA, got: %s", out)
+	}
+
+	run("CREATE SCHEMA IF NOT EXISTS myapp")
+
+	out = run("SELECT nspname FROM pg_namespace")
+	if !strings.Contains(out, "myapp") {
+		t.Fatalf("expected 'myapp' in pg_namespace, got: %s", out)
+	}
+	if !strings.Contains(out, "public") {
+		t.Fatalf("expected 'public' in pg_namespace, got: %s", out)
+	}
+}
+
+func TestCLI_DropSchema(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "drop_schema.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	run("CREATE SCHEMA temp_schema")
+	run("DROP SCHEMA temp_schema")
+	run("DROP SCHEMA IF EXISTS temp_schema")
+
+	out := runFail("DROP SCHEMA public")
+	if !strings.Contains(out, "required by the database") {
+		t.Fatalf("expected error dropping public, got: %s", out)
+	}
+
+	out = runFail("DROP SCHEMA pg_catalog")
+	if !strings.Contains(out, "required by the database") {
+		t.Fatalf("expected error dropping pg_catalog, got: %s", out)
+	}
+}
+
+func TestCLI_SchemaQualifiedTable(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "schema_qual.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE SCHEMA sales")
+	run("CREATE TABLE sales.orders (id INTEGER, amount INTEGER)")
+	run("INSERT INTO sales.orders VALUES (1, 100)")
+	run("INSERT INTO sales.orders VALUES (2, 200)")
+
+	out := run("SELECT * FROM sales.orders")
+	if !strings.Contains(out, "100") || !strings.Contains(out, "200") {
+		t.Fatalf("expected order amounts, got: %s", out)
+	}
+
+	run("CREATE TABLE orders (id INTEGER, note TEXT)")
+	run("INSERT INTO orders VALUES (1, 'public order')")
+
+	out = run("SELECT * FROM orders")
+	if !strings.Contains(out, "public order") {
+		t.Fatalf("expected public order, got: %s", out)
+	}
+
+	out = run("SELECT * FROM sales.orders")
+	if !strings.Contains(out, "100") {
+		t.Fatalf("expected sales order, got: %s", out)
+	}
+}
+
+func TestCLI_SetSearchPath(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "search_path.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	out := run("SHOW search_path")
+	if !strings.Contains(out, "public") {
+		t.Fatalf("expected 'public' in search_path, got: %s", out)
+	}
+
+	out = run("SELECT current_schema")
+	if !strings.Contains(out, "public") {
+		t.Fatalf("expected current_schema = public, got: %s", out)
+	}
+}
+
+func TestCLI_SchemaReservedPrefix(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "schema_reserved.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	out := runFail("CREATE SCHEMA pg_test")
+	if !strings.Contains(out, "reserved") {
+		t.Fatalf("expected reserved error for pg_ prefix, got: %s", out)
+	}
+}
+
+func TestCLI_DropSchemaWithObjects(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "drop_schema_obj.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	run("CREATE SCHEMA myschema")
+	run("CREATE TABLE myschema.t1 (id INTEGER)")
+
+	out := runFail("DROP SCHEMA myschema")
+	if !strings.Contains(out, "other objects depend on it") {
+		t.Fatalf("expected dependency error, got: %s", out)
+	}
+}
+
+

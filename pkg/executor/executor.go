@@ -256,6 +256,10 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execDropType(n)
 	case *planner.PhysAlterEnum:
 		return ex.execAlterEnum(n)
+	case *planner.PhysCreateSchema:
+		return ex.execCreateSchema(n)
+	case *planner.PhysDropSchema:
+		return ex.execDropSchema(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
 	default:
@@ -1062,7 +1066,7 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 			ownerOID = role.OID
 		}
 	}
-	_, err := ex.Cat.CreateTableOwned(n.Table, cols, ownerOID)
+	_, err := ex.Cat.CreateTableInSchema(n.Table, cols, ownerOID, n.Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -1529,7 +1533,7 @@ func (ex *Executor) validateCustomTypes(cols []catalog.Column, values []tuple.Da
 					return fmt.Errorf("check expression returned no result")
 				}
 				d := res.Rows[0][0]
-				if d.Type == tuple.TypeBool && d.I32 == 0 {
+				if d.Type == tuple.TypeBool && !d.Bool {
 					return fmt.Errorf("check constraint is not satisfied")
 				}
 				return nil
@@ -1665,6 +1669,32 @@ func (ex *Executor) execAlterEnum(n *planner.PhysAlterEnum) (*Result, error) {
 		return nil, err
 	}
 	return &Result{Message: "ALTER TYPE"}, nil
+}
+
+func (ex *Executor) execCreateSchema(n *planner.PhysCreateSchema) (*Result, error) {
+	var ownerOID int32
+	if n.AuthRole != "" {
+		role, _ := ex.Cat.FindRole(n.AuthRole)
+		if role != nil {
+			ownerOID = role.OID
+		}
+	} else if ex.CurrentUser != "" {
+		role, _ := ex.Cat.FindRole(ex.CurrentUser)
+		if role != nil {
+			ownerOID = role.OID
+		}
+	}
+	if err := ex.Cat.CreateSchema(n.Name, n.IfNotExists, ownerOID); err != nil {
+		return nil, err
+	}
+	return &Result{Message: fmt.Sprintf("CREATE SCHEMA %s", n.Name)}, nil
+}
+
+func (ex *Executor) execDropSchema(n *planner.PhysDropSchema) (*Result, error) {
+	if err := ex.Cat.DropSchema(n.Name, n.MissingOk); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "DROP SCHEMA"}, nil
 }
 
 func (ex *Executor) execDropTrigger(n *planner.PhysDropTrigger) (*Result, error) {

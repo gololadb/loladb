@@ -172,6 +172,7 @@ func (n *LogicalUpdate) OutputColumns() []string { return nil }
 
 type LogicalCreateTable struct {
 	Table   string
+	Schema  string // target schema (empty = current)
 	Columns []ColDef
 }
 
@@ -436,6 +437,25 @@ type LogicalAlterEnum struct {
 
 func (n *LogicalAlterEnum) String() string         { return fmt.Sprintf("AlterEnum(%s)", n.Name) }
 func (n *LogicalAlterEnum) OutputColumns() []string { return nil }
+
+// LogicalCreateSchema represents CREATE SCHEMA.
+type LogicalCreateSchema struct {
+	Name        string
+	IfNotExists bool
+	AuthRole    string
+}
+
+func (n *LogicalCreateSchema) String() string         { return fmt.Sprintf("CreateSchema(%s)", n.Name) }
+func (n *LogicalCreateSchema) OutputColumns() []string { return nil }
+
+// LogicalDropSchema represents DROP SCHEMA.
+type LogicalDropSchema struct {
+	Name      string
+	MissingOk bool
+}
+
+func (n *LogicalDropSchema) String() string         { return fmt.Sprintf("DropSchema(%s)", n.Name) }
+func (n *LogicalDropSchema) OutputColumns() []string { return nil }
 
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
 type LogicalResult struct {
