@@ -94,6 +94,8 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		return a.transformCreateDomainStmt(n)
 	case *parser.CreateEnumStmt:
 		return a.transformCreateEnumStmt(n)
+	case *parser.AlterEnumStmt:
+		return a.transformAlterEnumStmt(n)
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported statement %T", stmt)
 	}
@@ -807,8 +809,9 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		if !ok {
 			continue
 		}
-		dt := a.resolveColumnType(typeNameToString(colDef.TypeName))
-		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt})
+		sqlType := typeNameToString(colDef.TypeName)
+		dt := a.resolveColumnType(sqlType)
+		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType})
 	}
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
 		Type: UtilCreateTable, TableName: tableName, Columns: cols,
@@ -1452,6 +1455,16 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 			TrigTable:     tableName,
 			DropMissingOk: n.MissingOk,
 		}), nil
+	case parser.OBJECT_TYPE, parser.OBJECT_DOMAIN:
+		typeName := ""
+		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
+			typeName = n.Objects[0][len(n.Objects[0])-1]
+		}
+		return a.makeUtilityQuery(UtilDropType, &UtilityStmt{
+			Type:          UtilDropType,
+			DropTypeName:  typeName,
+			DropMissingOk: n.MissingOk,
+		}), nil
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported DROP object type %d", n.RemoveType)
 	}
@@ -1484,11 +1497,22 @@ func (a *Analyzer) transformAlterFunctionStmt(n *parser.AlterFunctionStmt) (*Que
 func (a *Analyzer) transformCreateDomainStmt(n *parser.CreateDomainStmt) (*Query, error) {
 	name := lastNamePart(n.Domainname)
 	baseType := typeNameToString(n.TypeName)
-	return a.makeUtilityQuery(UtilCreateDomain, &UtilityStmt{
+	u := &UtilityStmt{
 		Type:           UtilCreateDomain,
 		DomainName:     name,
 		DomainBaseType: baseType,
-	}), nil
+	}
+	for _, c := range n.Constraints {
+		switch c.Contype {
+		case parser.CONSTR_NOTNULL:
+			u.DomainNotNull = true
+		case parser.CONSTR_CHECK:
+			if c.RawExpr != nil {
+				u.DomainCheck = parser.DeparseExpr(c.RawExpr)
+			}
+		}
+	}
+	return a.makeUtilityQuery(UtilCreateDomain, u), nil
 }
 
 func (a *Analyzer) transformCreateEnumStmt(n *parser.CreateEnumStmt) (*Query, error) {
@@ -1497,5 +1521,14 @@ func (a *Analyzer) transformCreateEnumStmt(n *parser.CreateEnumStmt) (*Query, er
 		Type:     UtilCreateEnum,
 		EnumName: name,
 		EnumVals: n.Vals,
+	}), nil
+}
+
+func (a *Analyzer) transformAlterEnumStmt(n *parser.AlterEnumStmt) (*Query, error) {
+	name := lastNamePart(n.TypeName)
+	return a.makeUtilityQuery(UtilAlterEnum, &UtilityStmt{
+		Type:          UtilAlterEnum,
+		AlterEnumName: name,
+		AlterEnumVal:  n.NewVal,
 	}), nil
 }

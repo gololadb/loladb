@@ -37,11 +37,15 @@ type TriggerContext struct {
 	ColNames []string
 }
 
+// SQLExecFunc executes a SQL statement and returns the result.
+type SQLExecFunc func(sql string) (*Result, error)
+
 // Executor runs physical plan trees against the catalog/engine.
 type Executor struct {
 	Cat         *catalog.Catalog
 	CurrentUser string // session user for privilege checks
 	TriggerExec TriggerExecFunc // optional PL/pgSQL trigger executor
+	SQLExec     SQLExecFunc     // optional SQL executor for constraint evaluation
 }
 
 // NewExecutor creates a plan executor.
@@ -248,6 +252,10 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execCreateDomain(n)
 	case *planner.PhysCreateEnum:
 		return ex.execCreateEnum(n)
+	case *planner.PhysDropType:
+		return ex.execDropType(n)
+	case *planner.PhysAlterEnum:
+		return ex.execAlterEnum(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
 	default:
@@ -808,7 +816,11 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		return nil, err
 	}
 
-	colNames := ex.getTableColNames(n.Table)
+	tableCols := ex.getTableColumns(n.Table)
+	colNames := make([]string, len(tableCols))
+	for i, c := range tableCols {
+		colNames[i] = c.Name
+	}
 	hasTriggers := len(ex.Cat.GetTableTriggers(n.Table)) > 0 && ex.TriggerExec != nil
 
 	if hasTriggers {
@@ -839,6 +851,11 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 				continue // trigger suppressed the insert
 			}
 			values = mapToRow(colNames, modifiedNew)
+		}
+
+		// Validate domain/enum constraints.
+		if err := ex.validateCustomTypes(tableCols, values); err != nil {
+			return nil, err
 		}
 
 		_, err := ex.Cat.InsertInto(n.Table, values)
@@ -947,7 +964,11 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 		return nil, fmt.Errorf("executor: table %q not found", n.Table)
 	}
 
-	colNames := ex.getTableColNames(n.Table)
+	tableCols := ex.getTableColumns(n.Table)
+	colNames := make([]string, len(tableCols))
+	for i, c := range tableCols {
+		colNames[i] = c.Name
+	}
 	hasTriggers := len(ex.Cat.GetTableTriggers(n.Table)) > 0 && ex.TriggerExec != nil
 
 	if hasTriggers {
@@ -1003,6 +1024,11 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 			newVals = mapToRow(colNames, modifiedNew)
 		}
 
+		// Validate domain/enum constraints.
+		if err := ex.validateCustomTypes(tableCols, newVals); err != nil {
+			return nil, err
+		}
+
 		ex.Cat.Update(n.Table, t.id, newVals)
 
 		if hasTriggers {
@@ -1026,7 +1052,7 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error) {
 	cols := make([]catalog.ColumnDef, len(n.Columns))
 	for i, c := range n.Columns {
-		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type}
+		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName}
 	}
 	// Set the owner to the current session user.
 	var ownerOID int32
@@ -1163,7 +1189,7 @@ func (ex *Executor) execCreateView(n *planner.PhysCreateView) (*Result, error) {
 	// Convert planner.ColDef to catalog.ColumnDef.
 	cols := make([]catalog.ColumnDef, len(n.Columns))
 	for i, c := range n.Columns {
-		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type}
+		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName}
 	}
 
 	_, err := ex.Cat.CreateView(n.Name, cols, n.Definition)
@@ -1465,6 +1491,72 @@ func mapToRow(colNames []string, m map[string]tuple.Datum) []tuple.Datum {
 	return row
 }
 
+// getTableColumns returns the catalog columns for a table.
+func (ex *Executor) getTableColumns(tableName string) []catalog.Column {
+	rel, err := ex.Cat.FindRelation(tableName)
+	if err != nil || rel == nil {
+		return nil
+	}
+	cols, err := ex.Cat.GetColumns(rel.OID)
+	if err != nil {
+		return nil
+	}
+	return cols
+}
+
+// validateCustomTypes checks each value against domain/enum constraints.
+func (ex *Executor) validateCustomTypes(cols []catalog.Column, values []tuple.Datum) error {
+	for i, col := range cols {
+		if i >= len(values) {
+			break
+		}
+		ct := ex.Cat.FindTypeByOID(col.TypeOID)
+		if ct == nil {
+			continue
+		}
+		switch ct.TypType {
+		case "d":
+			// Domain: validate NOT NULL and CHECK constraints.
+			err := ex.Cat.ValidateDomainValue(ct.Name, values[i], func(sql string) error {
+				if ex.SQLExec == nil {
+					return nil // no SQL executor available, skip CHECK
+				}
+				res, execErr := ex.SQLExec(sql)
+				if execErr != nil {
+					return execErr
+				}
+				if len(res.Rows) == 0 || len(res.Rows[0]) == 0 {
+					return fmt.Errorf("check expression returned no result")
+				}
+				d := res.Rows[0][0]
+				if d.Type == tuple.TypeBool && d.I32 == 0 {
+					return fmt.Errorf("check constraint is not satisfied")
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		case "e":
+			// Enum: check that the value is one of the allowed values.
+			if values[i].Type == tuple.TypeNull {
+				continue
+			}
+			found := false
+			for _, ev := range ct.EnumVals {
+				if ev == values[i].Text {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("invalid input value for enum %q: %q", ct.Name, values[i].Text)
+			}
+		}
+	}
+	return nil
+}
+
 // getTableColNames returns the column names for a table.
 func (ex *Executor) getTableColNames(tableName string) []string {
 	rel, err := ex.Cat.FindRelation(tableName)
@@ -1548,7 +1640,7 @@ func (ex *Executor) execAlterFunction(n *planner.PhysAlterFunction) (*Result, er
 
 func (ex *Executor) execCreateDomain(n *planner.PhysCreateDomain) (*Result, error) {
 	baseType := planner.MapSQLType(n.BaseType)
-	if err := ex.Cat.CreateDomain(n.Name, baseType); err != nil {
+	if err := ex.Cat.CreateDomain(n.Name, baseType, n.NotNull, n.CheckExpr); err != nil {
 		return nil, err
 	}
 	return &Result{Message: fmt.Sprintf("CREATE DOMAIN %s", n.Name)}, nil
@@ -1559,6 +1651,20 @@ func (ex *Executor) execCreateEnum(n *planner.PhysCreateEnum) (*Result, error) {
 		return nil, err
 	}
 	return &Result{Message: fmt.Sprintf("CREATE TYPE %s", n.Name)}, nil
+}
+
+func (ex *Executor) execDropType(n *planner.PhysDropType) (*Result, error) {
+	if err := ex.Cat.DropType(n.Name, n.MissingOk); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "DROP TYPE"}, nil
+}
+
+func (ex *Executor) execAlterEnum(n *planner.PhysAlterEnum) (*Result, error) {
+	if err := ex.Cat.AlterEnumAddValue(n.Name, n.NewVal); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "ALTER TYPE"}, nil
 }
 
 func (ex *Executor) execDropTrigger(n *planner.PhysDropTrigger) (*Result, error) {

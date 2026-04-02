@@ -29,8 +29,9 @@ const (
 
 // ColumnDef describes a column in a table.
 type ColumnDef struct {
-	Name string
-	Type tuple.DatumType
+	Name     string
+	Type     tuple.DatumType
+	TypeName string // original SQL type name (for domain/enum validation)
 }
 
 // Relation holds metadata about a table or index (a row from pg_class).
@@ -45,10 +46,11 @@ type Relation struct {
 
 // Column holds metadata about a column (a row from pg_attribute).
 type Column struct {
-	RelID  int32
-	Name   string
-	Num    int32 // 1-based
-	Type   int32 // maps to tuple.DatumType
+	RelID   int32
+	Name    string
+	Num     int32 // 1-based
+	Type    int32 // maps to tuple.DatumType
+	TypeOID int32 // raw pg_type OID (for custom type lookup)
 }
 
 // IndexInfo holds metadata about an index (extra fields in the pg_class
@@ -198,8 +200,15 @@ func (c *Catalog) CreateTableOwned(name string, cols []ColumnDef, ownerOID int32
 
 	// Insert into pg_attribute (new 8-column format).
 	for i, col := range cols {
+		typeOID := datumTypeToPgTypeOID(col.Type)
+		// If the column uses a custom type (domain/enum), store its OID instead.
+		if col.TypeName != "" {
+			if ct := c.Types.findByName(col.TypeName); ct != nil {
+				typeOID = ct.OID
+			}
+		}
 		_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, pgAttributeRow(
-			oid, col.Name, datumTypeToPgTypeOID(col.Type), -1, int16(i+1),
+			oid, col.Name, typeOID, -1, int16(i+1),
 		))
 		if err != nil {
 			c.Eng.TxMgr.Abort(xid)
@@ -618,11 +627,18 @@ func (c *Catalog) getColumnsWithSnapshot(oid int32, snap *mvcc.Snapshot) ([]Colu
 		if len(tup.Columns) < 8 || tup.Columns[0].I32 != oid {
 			return true
 		}
+		rawOID := tup.Columns[2].I32
+		dt := pgTypeOIDToDatumType(rawOID)
+		// If the OID is a custom type, resolve to its base storage type.
+		if ct := c.Types.findByOID(rawOID); ct != nil {
+			dt = int32(ct.BaseType)
+		}
 		cols = append(cols, Column{
-			RelID: tup.Columns[0].I32,
-			Name:  tup.Columns[1].Text,
-			Num:   tup.Columns[4].I32,
-			Type:  pgTypeOIDToDatumType(tup.Columns[2].I32),
+			RelID:   tup.Columns[0].I32,
+			Name:    tup.Columns[1].Text,
+			Num:     tup.Columns[4].I32,
+			Type:    dt,
+			TypeOID: rawOID,
 		})
 		return true
 	})

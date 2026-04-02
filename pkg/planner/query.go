@@ -241,8 +241,15 @@ type UtilityStmt struct {
 	// CREATE DOMAIN / CREATE TYPE AS ENUM fields
 	DomainName     string
 	DomainBaseType string // SQL type name for the base type
+	DomainNotNull  bool
+	DomainCheck    string // CHECK expression (raw SQL)
 	EnumName       string
 	EnumVals       []string
+
+	// DROP TYPE / ALTER TYPE fields
+	DropTypeName  string
+	AlterEnumName string
+	AlterEnumVal  string // new value to add
 
 	// CREATE TRIGGER fields
 	TrigName       string
@@ -279,6 +286,8 @@ const (
 	UtilAlterFunction
 	UtilCreateDomain
 	UtilCreateEnum
+	UtilDropType
+	UtilAlterEnum
 	UtilNoOp
 )
 

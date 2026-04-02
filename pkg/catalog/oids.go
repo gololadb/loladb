@@ -82,7 +82,10 @@ const (
 	PgTypeTyplen       = 3 // typlen INT
 	PgTypeTyptype      = 4 // typtype TEXT ('b'=base, 'c'=composite, etc.)
 	PgTypeTypbasetype  = 5 // typbasetype INT (base type OID for domains, 0 otherwise)
-	PgTypeNumCols      = 6
+	PgTypeTypnotnull   = 6 // typnotnull INT (1 if domain has NOT NULL, 0 otherwise)
+	PgTypeTypcheck     = 7 // typcheck TEXT (CHECK expression for domains)
+	PgTypeTypenumvals  = 8 // typenumvals TEXT (comma-separated enum values)
+	PgTypeNumCols      = 9
 )
 
 // pg_namespace column positions.

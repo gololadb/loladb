@@ -112,9 +112,13 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 	case *LogicalAlterFunction:
 		return &PhysAlterFunction{Name: n.Name, NewName: n.NewName, NewOwner: n.NewOwner}, nil
 	case *LogicalCreateDomain:
-		return &PhysCreateDomain{Name: n.Name, BaseType: n.BaseType}, nil
+		return &PhysCreateDomain{Name: n.Name, BaseType: n.BaseType, NotNull: n.NotNull, CheckExpr: n.CheckExpr}, nil
 	case *LogicalCreateEnum:
 		return &PhysCreateEnum{Name: n.Name, Vals: n.Vals}, nil
+	case *LogicalDropType:
+		return &PhysDropType{Name: n.Name, MissingOk: n.MissingOk}, nil
+	case *LogicalAlterEnum:
+		return &PhysAlterEnum{Name: n.Name, NewVal: n.NewVal}, nil
 	case *LogicalResult:
 		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
 	default:

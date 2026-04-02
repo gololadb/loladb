@@ -329,6 +329,11 @@ func datumToBool(d tuple.Datum) bool {
 	}
 }
 
+// EnumOrdinalFunc resolves an enum value to its ordinal position.
+// Returns 0 if the value is not an enum member. Set by the executor
+// to enable enum-aware comparisons.
+var EnumOrdinalFunc func(val string) int
+
 // CompareDatums returns -1, 0, or 1 comparing two datums.
 func CompareDatums(a, b tuple.Datum) int {
 	// Coerce int32/int64
@@ -350,6 +355,21 @@ func CompareDatums(a, b tuple.Datum) int {
 
 	switch a.Type {
 	case tuple.TypeText:
+		// Try enum-aware comparison: if both values have ordinals,
+		// compare by ordinal position instead of lexicographically.
+		if EnumOrdinalFunc != nil {
+			ao := EnumOrdinalFunc(a.Text)
+			bo := EnumOrdinalFunc(b.Text)
+			if ao > 0 && bo > 0 {
+				if ao < bo {
+					return -1
+				}
+				if ao > bo {
+					return 1
+				}
+				return 0
+			}
+		}
 		if a.Text < b.Text {
 			return -1
 		}

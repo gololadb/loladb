@@ -194,6 +194,9 @@ func builtinTypes() [][]tuple.Datum {
 			tuple.DInt32(t.len),
 			tuple.DText("b"), // base type
 			tuple.DInt32(0),  // typbasetype (0 for base types)
+			tuple.DInt32(0),  // typnotnull (0 for base types)
+			tuple.DText(""),  // typcheck (empty for base types)
+			tuple.DText(""),  // typenumvals (empty for base types)
 		})
 	}
 	return rows
@@ -222,6 +225,9 @@ func catalogColumnDefs() [][]tuple.Datum {
 		{OIDPgType, "typlen", OIDInt4, 4, 4},
 		{OIDPgType, "typtype", OIDText, -1, 5},
 		{OIDPgType, "typbasetype", OIDInt4, 4, 6},
+		{OIDPgType, "typnotnull", OIDInt4, 4, 7},
+		{OIDPgType, "typcheck", OIDText, -1, 8},
+		{OIDPgType, "typenumvals", OIDText, -1, 9},
 
 		// pg_class columns
 		{OIDPgClass, "oid", OIDInt4, 4, 1},

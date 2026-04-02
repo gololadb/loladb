@@ -44,6 +44,25 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 		exec:      executor.NewExecutor(cat),
 	}
 
+	// Wire enum ordinal resolver for enum-aware comparisons.
+	planner.EnumOrdinalFunc = func(val string) int {
+		// Check all enum types for this value.
+		// This is O(enums * values) but fine for typical catalog sizes.
+		cat.Types.RLock()
+		defer cat.Types.RUnlock()
+		for _, ct := range cat.Types.All() {
+			if ct.TypType != "e" {
+				continue
+			}
+			for i, v := range ct.EnumVals {
+				if v == val {
+					return i + 1
+				}
+			}
+		}
+		return 0
+	}
+
 	// Wire PL/pgSQL interpreter for trigger execution.
 	interp := plpgsql.New(func(sql string) (*plpgsql.SQLResult, error) {
 		r, err := ex.Exec(sql)
@@ -73,6 +92,20 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 			return nil, err
 		}
 		return result.TriggerRow, nil
+	}
+
+	// Wire SQL executor for domain CHECK constraint evaluation.
+	ex.exec.SQLExec = func(sql string) (*executor.Result, error) {
+		r, err := ex.Exec(sql)
+		if err != nil {
+			return nil, err
+		}
+		return &executor.Result{
+			Columns:      r.Columns,
+			Rows:         r.Rows,
+			RowsAffected: r.RowsAffected,
+			Message:      r.Message,
+		}, nil
 	}
 
 	return ex

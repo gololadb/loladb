@@ -593,3 +593,4 @@ func TestCLI_CreateEnum(t *testing.T) {
 		t.Fatalf("expected enum values, got: %s", out)
 	}
 }
+

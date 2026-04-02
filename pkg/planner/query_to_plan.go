@@ -234,9 +234,13 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 	case UtilAlterFunction:
 		return &LogicalAlterFunction{Name: u.FuncName, NewName: u.FuncNewName, NewOwner: u.FuncNewOwner}, nil
 	case UtilCreateDomain:
-		return &LogicalCreateDomain{Name: u.DomainName, BaseType: u.DomainBaseType}, nil
+		return &LogicalCreateDomain{Name: u.DomainName, BaseType: u.DomainBaseType, NotNull: u.DomainNotNull, CheckExpr: u.DomainCheck}, nil
 	case UtilCreateEnum:
 		return &LogicalCreateEnum{Name: u.EnumName, Vals: u.EnumVals}, nil
+	case UtilDropType:
+		return &LogicalDropType{Name: u.DropTypeName, MissingOk: u.DropMissingOk}, nil
+	case UtilAlterEnum:
+		return &LogicalAlterEnum{Name: u.AlterEnumName, NewVal: u.AlterEnumVal}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

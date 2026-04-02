@@ -176,8 +176,9 @@ type LogicalCreateTable struct {
 }
 
 type ColDef struct {
-	Name string
-	Type tuple.DatumType
+	Name     string
+	Type     tuple.DatumType
+	TypeName string // original SQL type name (for domain/enum validation)
 }
 
 func (n *LogicalCreateTable) String() string        { return fmt.Sprintf("CreateTable(%s)", n.Table) }
@@ -400,8 +401,10 @@ func (n *LogicalAlterFunction) OutputColumns() []string { return nil }
 
 // LogicalCreateDomain represents CREATE DOMAIN.
 type LogicalCreateDomain struct {
-	Name     string
-	BaseType string
+	Name      string
+	BaseType  string
+	NotNull   bool
+	CheckExpr string
 }
 
 func (n *LogicalCreateDomain) String() string         { return fmt.Sprintf("CreateDomain(%s)", n.Name) }
@@ -415,6 +418,24 @@ type LogicalCreateEnum struct {
 
 func (n *LogicalCreateEnum) String() string         { return fmt.Sprintf("CreateEnum(%s)", n.Name) }
 func (n *LogicalCreateEnum) OutputColumns() []string { return nil }
+
+// LogicalDropType represents DROP TYPE / DROP DOMAIN.
+type LogicalDropType struct {
+	Name      string
+	MissingOk bool
+}
+
+func (n *LogicalDropType) String() string         { return fmt.Sprintf("DropType(%s)", n.Name) }
+func (n *LogicalDropType) OutputColumns() []string { return nil }
+
+// LogicalAlterEnum represents ALTER TYPE ... ADD VALUE.
+type LogicalAlterEnum struct {
+	Name   string
+	NewVal string
+}
+
+func (n *LogicalAlterEnum) String() string         { return fmt.Sprintf("AlterEnum(%s)", n.Name) }
+func (n *LogicalAlterEnum) OutputColumns() []string { return nil }
 
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
 type LogicalResult struct {

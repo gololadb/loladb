@@ -479,8 +479,10 @@ func (n *PhysAlterFunction) Children() []PhysicalNode  { return nil }
 
 // PhysCreateDomain represents CREATE DOMAIN.
 type PhysCreateDomain struct {
-	Name     string
-	BaseType string
+	Name      string
+	BaseType  string
+	NotNull   bool
+	CheckExpr string
 }
 
 func (n *PhysCreateDomain) String() string            { return fmt.Sprintf("CreateDomain %s", n.Name) }
@@ -496,6 +498,26 @@ type PhysCreateEnum struct {
 func (n *PhysCreateEnum) String() string            { return fmt.Sprintf("CreateEnum %s", n.Name) }
 func (n *PhysCreateEnum) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysCreateEnum) Children() []PhysicalNode  { return nil }
+
+// PhysDropType represents DROP TYPE / DROP DOMAIN.
+type PhysDropType struct {
+	Name      string
+	MissingOk bool
+}
+
+func (n *PhysDropType) String() string            { return fmt.Sprintf("DropType %s", n.Name) }
+func (n *PhysDropType) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropType) Children() []PhysicalNode  { return nil }
+
+// PhysAlterEnum represents ALTER TYPE ... ADD VALUE.
+type PhysAlterEnum struct {
+	Name   string
+	NewVal string
+}
+
+func (n *PhysAlterEnum) String() string            { return fmt.Sprintf("AlterEnum %s", n.Name) }
+func (n *PhysAlterEnum) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysAlterEnum) Children() []PhysicalNode  { return nil }
 
 // PhysResult produces a single row by evaluating expressions (SELECT without FROM).
 type PhysResult struct {
