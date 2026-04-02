@@ -1,10 +1,12 @@
-[![Built with Ona](https://ona.com/build-with-ona.svg)](https://app.ona.com/#https://github.com/gololadb/loladb)
-
 <p align="center">
   <img src="https://avatars.githubusercontent.com/u/273080010?s=400&u=5164ad871271a9e1101fe26ea09386d6c04b668b&v=4" alt="LolaDB" width="200">
 </p>
 
-# LolaDB
+<h1 align="center">LolaDB</h1>
+
+<p align="center">
+  <a href="https://app.ona.com/#https://github.com/gololadb/loladb"><img src="https://ona.com/build-with-ona.svg" alt="Built with Ona"></a>
+</p>
 
 A PostgreSQL-inspired relational database written in pure Go. No C dependencies, no CGo, no embedded database libraries — every layer from page I/O to the SQL optimizer is implemented from scratch.
 
