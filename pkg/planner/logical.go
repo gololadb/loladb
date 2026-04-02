@@ -388,6 +388,16 @@ type LogicalDropTrigger struct {
 func (n *LogicalDropTrigger) String() string         { return fmt.Sprintf("DropTrigger(%s ON %s)", n.TrigName, n.Table) }
 func (n *LogicalDropTrigger) OutputColumns() []string { return nil }
 
+// LogicalAlterFunction represents ALTER FUNCTION.
+type LogicalAlterFunction struct {
+	Name     string
+	NewName  string
+	NewOwner string
+}
+
+func (n *LogicalAlterFunction) String() string         { return fmt.Sprintf("AlterFunction(%s)", n.Name) }
+func (n *LogicalAlterFunction) OutputColumns() []string { return nil }
+
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
 type LogicalResult struct {
 	Exprs []Expr

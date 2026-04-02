@@ -510,3 +510,33 @@ func TestCLI_DropFunctionAndTrigger(t *testing.T) {
 		t.Fatalf("expected 'does not exist' error, got: %s", errOut)
 	}
 }
+
+func TestCLI_AlterFunction(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "alter_func.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE items (id INTEGER, price INTEGER)")
+	run(`CREATE FUNCTION double_price() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN NEW.price := NEW.price * 2; RETURN NEW; END'`)
+
+	// Rename the function.
+	run("ALTER FUNCTION double_price RENAME TO multiply_price")
+
+	// The old name should no longer work for CREATE TRIGGER.
+	// The new name should work.
+	run("CREATE TRIGGER trg BEFORE INSERT ON items FOR EACH ROW EXECUTE FUNCTION multiply_price()")
+	run("INSERT INTO items VALUES (1, 50)")
+	out := run("SELECT * FROM items")
+	if !strings.Contains(out, "100") {
+		t.Fatalf("expected price=100 after trigger with renamed function, got: %s", out)
+	}
+}

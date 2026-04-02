@@ -242,6 +242,8 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execDropFunction(n)
 	case *planner.PhysDropTrigger:
 		return ex.execDropTrigger(n)
+	case *planner.PhysAlterFunction:
+		return ex.execAlterFunction(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
 	default:
@@ -1524,6 +1526,20 @@ func (ex *Executor) execDropFunction(n *planner.PhysDropFunction) (*Result, erro
 		return nil, err
 	}
 	return &Result{Message: "DROP FUNCTION"}, nil
+}
+
+func (ex *Executor) execAlterFunction(n *planner.PhysAlterFunction) (*Result, error) {
+	if n.NewName != "" {
+		if err := ex.Cat.AlterFunctionRename(n.Name, n.NewName); err != nil {
+			return nil, err
+		}
+	}
+	if n.NewOwner != "" {
+		if err := ex.Cat.AlterFunctionOwner(n.Name, n.NewOwner); err != nil {
+			return nil, err
+		}
+	}
+	return &Result{Message: "ALTER FUNCTION"}, nil
 }
 
 func (ex *Executor) execDropTrigger(n *planner.PhysDropTrigger) (*Result, error) {

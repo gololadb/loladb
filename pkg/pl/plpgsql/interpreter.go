@@ -557,7 +557,16 @@ func (interp *Interpreter) execDynExecute(sc *scope, s *plparser.StmtDynExecute)
 	}
 	sql := datumToString(queryVal)
 
-	// TODO: handle USING params by substituting $1, $2, etc.
+	// Substitute USING parameters: evaluate each expression and replace
+	// $1, $2, ... placeholders with their literal SQL values.
+	for i, param := range s.Params {
+		val, err := interp.evalExpr(sc, param)
+		if err != nil {
+			return fmt.Errorf("plpgsql: EXECUTE USING param %d: %w", i+1, err)
+		}
+		placeholder := fmt.Sprintf("$%d", i+1)
+		sql = strings.ReplaceAll(sql, placeholder, datumToLiteral(val))
+	}
 
 	result, err := interp.execSQL(sql)
 	if err != nil {

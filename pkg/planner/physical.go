@@ -466,6 +466,17 @@ func (n *PhysDropTrigger) String() string            { return fmt.Sprintf("DropT
 func (n *PhysDropTrigger) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysDropTrigger) Children() []PhysicalNode  { return nil }
 
+// PhysAlterFunction represents ALTER FUNCTION.
+type PhysAlterFunction struct {
+	Name     string
+	NewName  string
+	NewOwner string
+}
+
+func (n *PhysAlterFunction) String() string            { return fmt.Sprintf("AlterFunction %s", n.Name) }
+func (n *PhysAlterFunction) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysAlterFunction) Children() []PhysicalNode  { return nil }
+
 // PhysResult produces a single row by evaluating expressions (SELECT without FROM).
 type PhysResult struct {
 	Exprs []Expr

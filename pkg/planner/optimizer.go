@@ -109,6 +109,8 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysDropFunction{Name: n.Name, MissingOk: n.MissingOk}, nil
 	case *LogicalDropTrigger:
 		return &PhysDropTrigger{TrigName: n.TrigName, Table: n.Table, MissingOk: n.MissingOk}, nil
+	case *LogicalAlterFunction:
+		return &PhysAlterFunction{Name: n.Name, NewName: n.NewName, NewOwner: n.NewOwner}, nil
 	case *LogicalResult:
 		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
 	default:

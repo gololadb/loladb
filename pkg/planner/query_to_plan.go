@@ -231,6 +231,8 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 		return &LogicalDropFunction{Name: u.FuncName, MissingOk: u.DropMissingOk}, nil
 	case UtilDropTrigger:
 		return &LogicalDropTrigger{TrigName: u.TrigName, Table: u.TrigTable, MissingOk: u.DropMissingOk}, nil
+	case UtilAlterFunction:
+		return &LogicalAlterFunction{Name: u.FuncName, NewName: u.FuncNewName, NewOwner: u.FuncNewOwner}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

@@ -234,6 +234,10 @@ type UtilityStmt struct {
 	FuncParamTypes []string
 	FuncReplace    bool
 
+	// ALTER FUNCTION fields
+	FuncNewName  string // RENAME TO
+	FuncNewOwner string // OWNER TO
+
 	// CREATE TRIGGER fields
 	TrigName       string
 	TrigTable      string
@@ -266,6 +270,7 @@ const (
 	UtilCreateTrigger
 	UtilDropFunction
 	UtilDropTrigger
+	UtilAlterFunction
 	UtilNoOp
 )
 

@@ -88,6 +88,8 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		return a.transformDropFunctionStmt(n)
 	case *parser.DropStmt:
 		return a.transformDropStmt(n)
+	case *parser.AlterFunctionStmt:
+		return a.transformAlterFunctionStmt(n)
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported statement %T", stmt)
 	}
@@ -1439,4 +1441,28 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported DROP object type %d", n.RemoveType)
 	}
+}
+
+func (a *Analyzer) transformAlterFunctionStmt(n *parser.AlterFunctionStmt) (*Query, error) {
+	name := ""
+	if n.Func != nil && len(n.Func.Funcname) > 0 {
+		name = n.Func.Funcname[len(n.Func.Funcname)-1]
+	}
+	u := &UtilityStmt{
+		Type:     UtilAlterFunction,
+		FuncName: name,
+	}
+	for _, act := range n.Actions {
+		switch strings.ToLower(act.Defname) {
+		case "rename":
+			if s, ok := act.Arg.(*parser.String); ok {
+				u.FuncNewName = s.Str
+			}
+		case "owner":
+			if s, ok := act.Arg.(*parser.String); ok {
+				u.FuncNewOwner = s.Str
+			}
+		}
+	}
+	return a.makeUtilityQuery(UtilAlterFunction, u), nil
 }

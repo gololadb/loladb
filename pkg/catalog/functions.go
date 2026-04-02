@@ -179,8 +179,7 @@ func (c *Catalog) DropFunction(name string, missingOk bool) error {
 		}
 		return fmt.Errorf("function %q does not exist", name)
 	}
-	// Remove from pg_proc heap page by rewriting without the dropped function.
-	return c.rewritePgProc()
+	return c.deletePgProcByOID(f.OID)
 }
 
 // DropTrigger removes a trigger by name from a table.
@@ -199,62 +198,79 @@ func (c *Catalog) DropTrigger(trigName, tableName string, missingOk bool) error 
 		}
 		return fmt.Errorf("trigger %q on table %q does not exist", trigName, tableName)
 	}
-	return c.rewritePgTrigger()
+	return c.deletePgTriggerByOID(t.OID)
 }
 
-// rewritePgProc rewrites the pg_proc heap page from the in-memory store.
-func (c *Catalog) rewritePgProc() error {
+// deletePgProcByOID deletes a single row from pg_proc matching the given OID.
+func (c *Catalog) deletePgProcByOID(oid int32) error {
 	pgProcPage := c.Eng.Super.PgProcPage
 	if pgProcPage == 0 {
 		return nil
 	}
 	xid := c.Eng.TxMgr.Begin()
 	snap := c.Eng.TxMgr.Snapshot(xid)
-	var ids []slottedpage.ItemID
+	var target *slottedpage.ItemID
 	c.Eng.SeqScan(pgProcPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		ids = append(ids, id)
+		if len(tup.Columns) > 0 && tup.Columns[0].I32 == oid {
+			target = &id
+			return false
+		}
 		return true
 	})
-	for _, id := range ids {
-		c.Eng.Delete(xid, id)
+	if target != nil {
+		c.Eng.Delete(xid, *target)
 	}
 	c.Eng.TxMgr.Commit(xid)
-
-	c.Funcs.mu.RLock()
-	defer c.Funcs.mu.RUnlock()
-	for _, f := range c.Funcs.byOID {
-		if err := c.persistFunction(f); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
-// rewritePgTrigger rewrites the pg_trigger heap page from the in-memory store.
-func (c *Catalog) rewritePgTrigger() error {
+// deletePgTriggerByOID deletes a single row from pg_trigger matching the given OID.
+func (c *Catalog) deletePgTriggerByOID(oid int32) error {
 	pgTriggerPage := c.Eng.Super.PgTriggerPage
 	if pgTriggerPage == 0 {
 		return nil
 	}
 	xid := c.Eng.TxMgr.Begin()
 	snap := c.Eng.TxMgr.Snapshot(xid)
-	var ids []slottedpage.ItemID
+	var target *slottedpage.ItemID
 	c.Eng.SeqScan(pgTriggerPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		ids = append(ids, id)
+		if len(tup.Columns) > 0 && tup.Columns[0].I32 == oid {
+			target = &id
+			return false
+		}
 		return true
 	})
-	for _, id := range ids {
-		c.Eng.Delete(xid, id)
+	if target != nil {
+		c.Eng.Delete(xid, *target)
 	}
 	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
 
-	c.Triggers.mu.RLock()
-	defer c.Triggers.mu.RUnlock()
-	for _, t := range c.Triggers.byOID {
-		if err := c.persistTrigger(t); err != nil {
-			return err
-		}
+// AlterFunctionRename renames a function.
+func (c *Catalog) AlterFunctionRename(oldName, newName string) error {
+	f := c.Funcs.findByName(oldName)
+	if f == nil {
+		return fmt.Errorf("function %q does not exist", oldName)
 	}
+	c.Funcs.remove(oldName)
+	f.Name = newName
+	c.Funcs.add(f)
+	// Delete old row and persist updated definition.
+	if err := c.deletePgProcByOID(f.OID); err != nil {
+		return err
+	}
+	return c.persistFunction(f)
+}
+
+// AlterFunctionOwner changes the owner of a function (no-op for now since
+// functions don't track ownership, but accepted for compatibility).
+func (c *Catalog) AlterFunctionOwner(name, newOwner string) error {
+	f := c.Funcs.findByName(name)
+	if f == nil {
+		return fmt.Errorf("function %q does not exist", name)
+	}
+	// Functions don't currently store owner — accept silently.
 	return nil
 }
 

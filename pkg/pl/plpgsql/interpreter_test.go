@@ -25,6 +25,15 @@ func mockExecSQL() SQLExecFunc {
 				}, nil
 			}
 
+			// String literals (check before arithmetic to avoid
+			// false matches on operators inside quoted strings).
+			if strings.HasPrefix(expr, "'") && strings.HasSuffix(expr, "'") {
+				return &SQLResult{
+					Columns: []string{"?column?"},
+					Rows:    [][]tuple.Datum{{tuple.DText(expr[1 : len(expr)-1])}},
+				}, nil
+			}
+
 			// Simple arithmetic: a + b, a * b, a - b.
 			if parts := splitArith(expr); parts != nil {
 				a, _ := parseInt(parts[0])
@@ -78,14 +87,6 @@ func mockExecSQL() SQLExecFunc {
 				return &SQLResult{
 					Columns: []string{"?column?"},
 					Rows:    [][]tuple.Datum{{tuple.DBool(result)}},
-				}, nil
-			}
-
-			// String literals.
-			if strings.HasPrefix(expr, "'") && strings.HasSuffix(expr, "'") {
-				return &SQLResult{
-					Columns: []string{"?column?"},
-					Rows:    [][]tuple.Datum{{tuple.DText(expr[1 : len(expr)-1])}},
 				}, nil
 			}
 
@@ -293,6 +294,30 @@ func TestExecFunction_DynExecute(t *testing.T) {
 			RETURN val;
 		END
 	`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Value.I32 != 42 {
+		t.Fatalf("expected 42, got %v", result.Value)
+	}
+}
+
+func TestExecFunction_DynExecuteUsing(t *testing.T) {
+	interp := New(mockExecSQL())
+	params := map[string]tuple.Datum{
+		"x": tuple.DInt32(10),
+		"y": tuple.DInt32(32),
+	}
+	result, err := interp.ExecFunction(`
+		DECLARE
+			sql_text text;
+			val integer;
+		BEGIN
+			sql_text := 'SELECT $1 + $2';
+			EXECUTE sql_text INTO val USING x, y;
+			RETURN val;
+		END
+	`, params)
 	if err != nil {
 		t.Fatal(err)
 	}
