@@ -59,6 +59,7 @@ type Superblock struct {
 	PgACLPage         uint32
 	PgProcPage        uint32
 	PgTriggerPage     uint32
+	SearchPath        string // comma-separated schema names (persisted, max 254 bytes)
 }
 
 const serializedSize = 16 * 4 // 64 bytes
@@ -98,6 +99,15 @@ func (sb *Superblock) Serialize() []byte {
 	binary.LittleEndian.PutUint32(buf[52:56], sb.PgACLPage)
 	binary.LittleEndian.PutUint32(buf[56:60], sb.PgProcPage)
 	binary.LittleEndian.PutUint32(buf[60:64], sb.PgTriggerPage)
+	// SearchPath: length-prefixed string at offset 64 (max 254 bytes).
+	if sb.SearchPath != "" {
+		sp := sb.SearchPath
+		if len(sp) > 254 {
+			sp = sp[:254]
+		}
+		binary.LittleEndian.PutUint16(buf[64:66], uint16(len(sp)))
+		copy(buf[66:66+len(sp)], sp)
+	}
 	return buf
 }
 
@@ -124,6 +134,14 @@ func Deserialize(buf []byte) (*Superblock, error) {
 		PgACLPage:         binary.LittleEndian.Uint32(buf[52:56]),
 		PgProcPage:        binary.LittleEndian.Uint32(buf[56:60]),
 		PgTriggerPage:     binary.LittleEndian.Uint32(buf[60:64]),
+	}
+
+	// SearchPath: length-prefixed string at offset 64.
+	if len(buf) >= 66 {
+		spLen := binary.LittleEndian.Uint16(buf[64:66])
+		if spLen > 0 && int(66+spLen) <= len(buf) {
+			sb.SearchPath = string(buf[66 : 66+spLen])
+		}
 	}
 
 	if sb.Magic != Magic {

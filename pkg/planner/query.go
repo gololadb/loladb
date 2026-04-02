@@ -213,6 +213,7 @@ type UtilityStmt struct {
 	RoleStmtType   string                // "ROLE", "USER", "GROUP"
 	DropRoles      []string
 	DropMissingOk  bool
+	DropCascade    bool
 
 	// GRANT/REVOKE role membership
 	GrantedRoles   []string

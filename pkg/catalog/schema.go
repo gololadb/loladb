@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gololadb/loladb/pkg/mvcc"
 	"github.com/gololadb/loladb/pkg/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -111,7 +112,8 @@ func (c *Catalog) CreateSchema(name string, ifNotExists bool, ownerOID int32) er
 }
 
 // DropSchema removes a schema from pg_namespace.
-func (c *Catalog) DropSchema(name string, missingOk bool) error {
+// If cascade is true, all objects in the schema are dropped first.
+func (c *Catalog) DropSchema(name string, missingOk bool, cascade bool) error {
 	if name == "pg_catalog" || name == "public" {
 		return fmt.Errorf("cannot drop schema %q: it is required by the database system", name)
 	}
@@ -147,20 +149,41 @@ func (c *Catalog) DropSchema(name string, missingOk bool) error {
 		return fmt.Errorf("schema %q does not exist", name)
 	}
 
-	// Check that no relations exist in this schema.
-	var hasRelations bool
-	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(_ slottedpage.ItemID, tup *tuple.Tuple) bool {
-		if len(tup.Columns) >= 3 && tup.Columns[2].I32 == schemaOID {
-			hasRelations = true
-			return false
+	// Collect relations in this schema.
+	type relItem struct {
+		id  slottedpage.ItemID
+		rel *Relation
+	}
+	var schemaRels []relItem
+	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		r := tupleToRelation(tup)
+		if r != nil && r.NamespaceOID == schemaOID {
+			schemaRels = append(schemaRels, relItem{id: id, rel: r})
 		}
 		return true
 	})
-	if hasRelations {
+
+	if len(schemaRels) > 0 && !cascade {
 		c.Eng.TxMgr.Commit(xid)
 		return fmt.Errorf("cannot drop schema %q because other objects depend on it", name)
 	}
 
+	// CASCADE: drop all relations in the schema.
+	// Drop indexes first, then tables/views.
+	for _, ri := range schemaRels {
+		if ri.rel.Kind == 1 { // RelKindIndex
+			c.Eng.Delete(xid, ri.id)
+		}
+	}
+	for _, ri := range schemaRels {
+		if ri.rel.Kind != 1 { // not index
+			// Delete pg_attribute rows for this relation.
+			c.deleteAttributesForRel(xid, snap, ri.rel.OID)
+			c.Eng.Delete(xid, ri.id)
+		}
+	}
+
+	// Delete the schema row.
 	c.Eng.Delete(xid, *target)
 	c.Eng.TxMgr.Commit(xid)
 	c.cache.invalidate()
@@ -259,4 +282,25 @@ func (c *Catalog) FindRelationQualified(schema, name string) (*Relation, error) 
 		}
 	}
 	return nil, nil
+}
+
+// SetSearchPath updates the search path and persists it to the superblock.
+func (c *Catalog) SetSearchPath(schemas []string) error {
+	c.SearchPath = schemas
+	c.Eng.Super.SearchPath = strings.Join(schemas, ",")
+	return c.Eng.Super.Save(c.Eng.IO)
+}
+
+// deleteAttributesForRel deletes all pg_attribute rows for a given relation OID.
+func (c *Catalog) deleteAttributesForRel(xid uint32, snap *mvcc.Snapshot, relOID int32) {
+	var toDelete []slottedpage.ItemID
+	c.Eng.SeqScan(c.Eng.Super.PgAttrPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) > 0 && tup.Columns[0].I32 == relOID {
+			toDelete = append(toDelete, id)
+		}
+		return true
+	})
+	for _, id := range toDelete {
+		c.Eng.Delete(xid, id)
+	}
 }

@@ -149,7 +149,9 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 				}
 			}
 			if len(schemas) > 0 {
-				ex.Cat.SearchPath = schemas
+				if err := ex.Cat.SetSearchPath(schemas); err != nil {
+					return nil, err
+				}
 				return &Result{Message: fmt.Sprintf("SET search_path = %s", strings.Join(schemas, ", "))}, nil
 			}
 		}

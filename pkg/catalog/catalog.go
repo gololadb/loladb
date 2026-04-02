@@ -102,12 +102,17 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		"gist":   gist.NewAM(alloc),
 		"spgist": spgist.NewAM(alloc),
 	}
+	// Load search path from superblock, or default to ["public"].
+	searchPath := []string{"public"}
+	if eng.Super.SearchPath != "" {
+		searchPath = strings.Split(eng.Super.SearchPath, ",")
+	}
 	c := &Catalog{
 		Eng: eng, alloc: alloc, IdxAMs: ams,
 		Rules: newRuleStore(), Policies: newPolicyStore(), ACLs: newACLStore(),
 		Funcs: newFuncStore(), Triggers: newTriggerStore(), Types: newTypeStore(),
 		cache:      newSyscache(),
-		SearchPath: []string{"public"},
+		SearchPath: searchPath,
 	}
 
 	if eng.Super.PgClassPage == 0 {

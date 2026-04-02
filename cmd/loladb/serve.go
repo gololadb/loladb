@@ -90,6 +90,10 @@ func (a *sqlAdapter) ListTables() []pgwire.TableInfo {
 	return result
 }
 
+func (a *sqlAdapter) GetSearchPath() []string {
+	return a.cat.SearchPath
+}
+
 func (a *sqlAdapter) ListIndexes() []pgwire.IndexMeta {
 	indexes, err := a.cat.ListAllIndexes()
 	if err != nil {

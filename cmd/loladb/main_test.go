@@ -988,9 +988,88 @@ func TestCLI_DropSchemaWithObjects(t *testing.T) {
 	run("CREATE SCHEMA myschema")
 	run("CREATE TABLE myschema.t1 (id INTEGER)")
 
+	// RESTRICT (default) should fail.
 	out := runFail("DROP SCHEMA myschema")
 	if !strings.Contains(out, "other objects depend on it") {
 		t.Fatalf("expected dependency error, got: %s", out)
+	}
+}
+
+func TestCLI_DropSchemaCascade(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "drop_cascade.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runFail := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	run("CREATE SCHEMA temp")
+	run("CREATE TABLE temp.t1 (id INTEGER, name TEXT)")
+	run("INSERT INTO temp.t1 VALUES (1, 'hello')")
+	run("CREATE TABLE temp.t2 (id INTEGER)")
+
+	// CASCADE should drop the schema and all its objects.
+	run("DROP SCHEMA temp CASCADE")
+
+	// Schema should be gone.
+	run("DROP SCHEMA IF EXISTS temp")
+
+	// Tables should be gone — trying to query them should fail.
+	out := runFail("SELECT * FROM temp.t1")
+	if !strings.Contains(out, "does not exist") {
+		t.Fatalf("expected relation not found after CASCADE, got: %s", out)
+	}
+}
+
+func TestCLI_SearchPathPersistence(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "sp_persist.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Create a schema and set search_path.
+	run("CREATE SCHEMA myapp")
+	run("SET search_path = myapp, public")
+
+	// In a new invocation, search_path should be persisted.
+	out := run("SHOW search_path")
+	if !strings.Contains(out, "myapp") {
+		t.Fatalf("expected persisted search_path to contain 'myapp', got: %s", out)
+	}
+
+	// current_schema should reflect the persisted path.
+	out = run("SELECT current_schema")
+	if !strings.Contains(out, "myapp") {
+		t.Fatalf("expected current_schema = myapp, got: %s", out)
+	}
+
+	// Create a table — should go into myapp schema.
+	run("CREATE TABLE items (id INTEGER)")
+	run("INSERT INTO items VALUES (42)")
+
+	// Query via qualified name should work.
+	out = run("SELECT * FROM myapp.items")
+	if !strings.Contains(out, "42") {
+		t.Fatalf("expected 42 in myapp.items, got: %s", out)
 	}
 }
 

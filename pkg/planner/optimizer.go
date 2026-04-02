@@ -122,7 +122,7 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 	case *LogicalCreateSchema:
 		return &PhysCreateSchema{Name: n.Name, IfNotExists: n.IfNotExists, AuthRole: n.AuthRole}, nil
 	case *LogicalDropSchema:
-		return &PhysDropSchema{Name: n.Name, MissingOk: n.MissingOk}, nil
+		return &PhysDropSchema{Name: n.Name, MissingOk: n.MissingOk, Cascade: n.Cascade}, nil
 	case *LogicalResult:
 		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
 	default:

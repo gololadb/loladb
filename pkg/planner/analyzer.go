@@ -1491,6 +1491,7 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 			Type:          UtilDropSchema,
 			SchemaName:    schemaName,
 			DropMissingOk: n.MissingOk,
+			DropCascade:   n.Behavior == parser.DROP_CASCADE,
 		}), nil
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported DROP object type %d", n.RemoveType)

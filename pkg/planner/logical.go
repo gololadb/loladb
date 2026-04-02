@@ -452,6 +452,7 @@ func (n *LogicalCreateSchema) OutputColumns() []string { return nil }
 type LogicalDropSchema struct {
 	Name      string
 	MissingOk bool
+	Cascade   bool
 }
 
 func (n *LogicalDropSchema) String() string         { return fmt.Sprintf("DropSchema(%s)", n.Name) }

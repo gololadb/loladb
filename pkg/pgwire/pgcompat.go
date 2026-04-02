@@ -11,6 +11,7 @@ import (
 type CatalogProvider interface {
 	ListTables() []TableInfo
 	ListIndexes() []IndexMeta
+	GetSearchPath() []string
 }
 
 type TableInfo struct {
@@ -42,7 +43,10 @@ func interceptQuery(sql string, provider CatalogProvider) (*QueryResult, bool) {
 
 
 	// Protocol commands.
-	if strings.HasPrefix(upper, "SET ") {
+	// Let SET search_path and SET role pass through to the SQL executor.
+	if strings.HasPrefix(upper, "SET ") &&
+		!strings.Contains(upper, "SEARCH_PATH") &&
+		!strings.Contains(upper, "ROLE") {
 		return &QueryResult{Message: "SET"}, true
 	}
 	if upper == "BEGIN" || strings.HasPrefix(upper, "BEGIN ") {
@@ -101,19 +105,25 @@ func interceptQuery(sql string, provider CatalogProvider) (*QueryResult, bool) {
 		}, true
 	}
 	if strings.Contains(upper, "CURRENT_SCHEMAS") {
+		// current_schemas(bool) is a function call not yet supported by the
+		// SQL executor. Build the result from the catalog search path.
+		if provider != nil {
+			schemas := provider.GetSearchPath()
+			// Format as PostgreSQL array literal: {schema1,schema2}
+			val := "{" + strings.Join(schemas, ",") + "}"
+			return &QueryResult{
+				Columns: []string{"current_schemas"},
+				Rows:    [][]tuple.Datum{{tuple.DText(val)}},
+				Message: "SELECT 1",
+			}, true
+		}
 		return &QueryResult{
 			Columns: []string{"current_schemas"},
 			Rows:    [][]tuple.Datum{{tuple.DText("{public}")}},
 			Message: "SELECT 1",
 		}, true
 	}
-	if strings.Contains(upper, "CURRENT_SCHEMA") {
-		return &QueryResult{
-			Columns: []string{"current_schema"},
-			Rows:    [][]tuple.Datum{{tuple.DText("public")}},
-			Message: "SELECT 1",
-		}, true
-	}
+	// Let SELECT current_schema pass through to the SQL executor.
 
 	// WITH RECURSIVE / WITH queries — pg_dump uses these for
 	// materialized view dependencies. Return empty results.

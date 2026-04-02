@@ -244,7 +244,7 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 	case UtilCreateSchema:
 		return &LogicalCreateSchema{Name: u.SchemaName, IfNotExists: u.SchemaIfNotExists, AuthRole: u.SchemaAuthRole}, nil
 	case UtilDropSchema:
-		return &LogicalDropSchema{Name: u.SchemaName, MissingOk: u.DropMissingOk}, nil
+		return &LogicalDropSchema{Name: u.SchemaName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

@@ -535,6 +535,7 @@ func (n *PhysCreateSchema) Children() []PhysicalNode  { return nil }
 type PhysDropSchema struct {
 	Name      string
 	MissingOk bool
+	Cascade   bool
 }
 
 func (n *PhysDropSchema) String() string            { return fmt.Sprintf("DropSchema %s", n.Name) }

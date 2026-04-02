@@ -1691,7 +1691,7 @@ func (ex *Executor) execCreateSchema(n *planner.PhysCreateSchema) (*Result, erro
 }
 
 func (ex *Executor) execDropSchema(n *planner.PhysDropSchema) (*Result, error) {
-	if err := ex.Cat.DropSchema(n.Name, n.MissingOk); err != nil {
+	if err := ex.Cat.DropSchema(n.Name, n.MissingOk, n.Cascade); err != nil {
 		return nil, err
 	}
 	return &Result{Message: "DROP SCHEMA"}, nil
