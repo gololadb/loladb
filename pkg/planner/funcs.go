@@ -1,9 +1,14 @@
 package planner
 
 import (
+	cryptoRand "crypto/rand"
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/rand"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -475,6 +480,651 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		}
 		return tuple.DText(parts[idx]), nil
 
+	case "concat_ws":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("concat_ws requires at least 1 argument")
+		}
+		sepVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if sepVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		sep := datumToString(sepVal)
+		var parts []string
+		for _, a := range args[1:] {
+			val, err := a.Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if val.Type != tuple.TypeNull {
+				parts = append(parts, datumToString(val))
+			}
+		}
+		return tuple.DText(strings.Join(parts, sep)), nil
+
+	case "initcap":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("initcap requires 1 argument")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		s := datumToString(val)
+		runes := []rune(s)
+		wordStart := true
+		for i, r := range runes {
+			if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+				wordStart = true
+			} else if wordStart {
+				runes[i] = []rune(strings.ToUpper(string(r)))[0]
+				wordStart = false
+			} else {
+				runes[i] = []rune(strings.ToLower(string(r)))[0]
+			}
+		}
+		return tuple.DText(string(runes)), nil
+
+	case "translate":
+		if len(args) < 3 {
+			return tuple.DNull(), fmt.Errorf("translate requires 3 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		fromVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		toVal, err := args[2].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		s := datumToString(val)
+		fromChars := []rune(datumToString(fromVal))
+		toChars := []rune(datumToString(toVal))
+		// Build mapping
+		mapping := make(map[rune]rune)
+		deleteSet := make(map[rune]bool)
+		for i, r := range fromChars {
+			if _, exists := mapping[r]; exists {
+				continue // first occurrence wins
+			}
+			if i < len(toChars) {
+				mapping[r] = toChars[i]
+			} else {
+				deleteSet[r] = true
+			}
+		}
+		var sb strings.Builder
+		for _, r := range s {
+			if deleteSet[r] {
+				continue
+			}
+			if rep, ok := mapping[r]; ok {
+				sb.WriteRune(rep)
+			} else {
+				sb.WriteRune(r)
+			}
+		}
+		return tuple.DText(sb.String()), nil
+
+	case "ascii":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("ascii requires 1 argument")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		s := datumToString(val)
+		if len(s) == 0 {
+			return tuple.DInt64(0), nil
+		}
+		return tuple.DInt64(int64([]rune(s)[0])), nil
+
+	case "chr":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("chr requires 1 argument")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		code, _ := toFloat64Func(val)
+		return tuple.DText(string(rune(int(code)))), nil
+
+	case "octet_length":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("octet_length requires 1 argument")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		return tuple.DInt64(int64(len(datumToString(val)))), nil
+
+	case "bit_length":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("bit_length requires 1 argument")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		return tuple.DInt64(int64(len(datumToString(val))) * 8), nil
+
+	case "md5":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("md5 requires 1 argument")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		hash := md5.Sum([]byte(datumToString(val)))
+		return tuple.DText(hex.EncodeToString(hash[:])), nil
+
+	case "gen_random_uuid":
+		var uuid [16]byte
+		cryptoRand.Read(uuid[:])
+		uuid[6] = (uuid[6] & 0x0f) | 0x40 // version 4
+		uuid[8] = (uuid[8] & 0x3f) | 0x80 // variant 10
+		return tuple.DText(fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+			uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])), nil
+
+	case "overlay":
+		// overlay(str, replacement, start [, count])
+		if len(args) < 3 {
+			return tuple.DNull(), fmt.Errorf("overlay requires 3 or 4 arguments")
+		}
+		strVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if strVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		replVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		startVal, err := args[2].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		s := []rune(datumToString(strVal))
+		repl := []rune(datumToString(replVal))
+		start := int(startVal.I64) - 1 // 1-based
+		if start < 0 {
+			start = 0
+		}
+		count := len(repl) // default: replace length of replacement
+		if len(args) >= 4 {
+			countVal, err := args[3].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			count = int(countVal.I64)
+		}
+		if start > len(s) {
+			start = len(s)
+		}
+		end := start + count
+		if end > len(s) {
+			end = len(s)
+		}
+		var sb strings.Builder
+		sb.WriteString(string(s[:start]))
+		sb.WriteString(string(repl))
+		sb.WriteString(string(s[end:]))
+		return tuple.DText(sb.String()), nil
+
+	case "extract", "date_part":
+		// extract(field, source) — field is a text constant like 'year'
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("%s requires 2 arguments", name)
+		}
+		fieldVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		srcVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if srcVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		field := strings.ToLower(datumToString(fieldVal))
+		src := datumToString(srcVal)
+		t, err := parseTimestamp(src)
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("%s: cannot parse timestamp %q: %v", name, src, err)
+		}
+		return extractField(field, t)
+
+	case "date_trunc":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("date_trunc requires 2 arguments")
+		}
+		fieldVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		srcVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if srcVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		field := strings.ToLower(datumToString(fieldVal))
+		src := datumToString(srcVal)
+		t, err := parseTimestamp(src)
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("date_trunc: cannot parse timestamp %q: %v", src, err)
+		}
+		return truncTimestamp(field, t)
+
+	case "age":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("age requires 1 or 2 arguments")
+		}
+		var t1, t2 time.Time
+		v1, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if v1.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		t1, err = parseTimestamp(datumToString(v1))
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("age: cannot parse timestamp: %v", err)
+		}
+		if len(args) >= 2 {
+			v2, err := args[1].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if v2.Type == tuple.TypeNull {
+				return tuple.DNull(), nil
+			}
+			t2, err = parseTimestamp(datumToString(v2))
+			if err != nil {
+				return tuple.DNull(), fmt.Errorf("age: cannot parse timestamp: %v", err)
+			}
+		} else {
+			t2 = t1
+			t1 = time.Now().UTC()
+		}
+		return tuple.DText(formatAge(t1, t2)), nil
+
+	case "regexp_replace":
+		// regexp_replace(source, pattern, replacement [, flags])
+		if len(args) < 3 {
+			return tuple.DNull(), fmt.Errorf("regexp_replace requires 3 or 4 arguments")
+		}
+		srcVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if srcVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		patVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		replVal, err := args[2].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		flags := ""
+		if len(args) >= 4 {
+			fVal, err := args[3].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			flags = datumToString(fVal)
+		}
+		pattern := datumToString(patVal)
+		if strings.Contains(flags, "i") {
+			pattern = "(?i)" + pattern
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("regexp_replace: invalid pattern: %v", err)
+		}
+		src := datumToString(srcVal)
+		repl := datumToString(replVal)
+		if strings.Contains(flags, "g") {
+			return tuple.DText(re.ReplaceAllString(src, repl)), nil
+		}
+		// Default: replace first occurrence only
+		loc := re.FindStringIndex(src)
+		if loc == nil {
+			return tuple.DText(src), nil
+		}
+		matched := src[loc[0]:loc[1]]
+		expanded := re.ReplaceAllString(matched, repl)
+		return tuple.DText(src[:loc[0]] + expanded + src[loc[1]:]), nil
+
+	case "regexp_match":
+		// regexp_match(source, pattern [, flags]) — returns first match as text (simplified)
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("regexp_match requires 2 or 3 arguments")
+		}
+		srcVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if srcVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		patVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		flags := ""
+		if len(args) >= 3 {
+			fVal, err := args[2].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			flags = datumToString(fVal)
+		}
+		pattern := datumToString(patVal)
+		if strings.Contains(flags, "i") {
+			pattern = "(?i)" + pattern
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("regexp_match: invalid pattern: %v", err)
+		}
+		matches := re.FindStringSubmatch(datumToString(srcVal))
+		if matches == nil {
+			return tuple.DNull(), nil
+		}
+		// If there are capture groups, return the first group; otherwise the whole match
+		if len(matches) > 1 {
+			return tuple.DText(matches[1]), nil
+		}
+		return tuple.DText(matches[0]), nil
+
+	case "to_char":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("to_char requires 2 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		fmtVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		pgFmt := datumToString(fmtVal)
+		// Numeric to_char
+		if val.Type == tuple.TypeInt32 || val.Type == tuple.TypeInt64 || val.Type == tuple.TypeFloat64 {
+			f, _ := toFloat64Func(val)
+			return tuple.DText(pgNumericToChar(f, pgFmt)), nil
+		}
+		// Timestamp to_char
+		t, err := parseTimestamp(datumToString(val))
+		if err != nil {
+			// Fallback: treat as string
+			return tuple.DText(datumToString(val)), nil
+		}
+		return tuple.DText(pgTimestampToChar(t, pgFmt)), nil
+
+	case "to_number":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("to_number requires 2 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		// Strip non-numeric characters based on format, then parse
+		s := datumToString(val)
+		s = strings.ReplaceAll(s, ",", "")
+		s = strings.ReplaceAll(s, "$", "")
+		s = strings.ReplaceAll(s, " ", "")
+		var f float64
+		if _, err := fmt.Sscanf(s, "%f", &f); err != nil {
+			return tuple.DNull(), fmt.Errorf("to_number: invalid input %q", datumToString(val))
+		}
+		return tuple.DFloat64(f), nil
+
+	case "to_date":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("to_date requires 2 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		fmtVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		goFmt := pgDateFormatToGo(datumToString(fmtVal))
+		t, err := time.Parse(goFmt, datumToString(val))
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("to_date: cannot parse %q with format %q: %v", datumToString(val), datumToString(fmtVal), err)
+		}
+		return tuple.DText(t.Format("2006-01-02")), nil
+
+	case "to_timestamp":
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("to_timestamp requires 1 or 2 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		// Single-arg: epoch seconds
+		if len(args) == 1 {
+			f, ok := toFloat64Func(val)
+			if !ok {
+				return tuple.DNull(), fmt.Errorf("to_timestamp: non-numeric argument")
+			}
+			sec := int64(f)
+			nsec := int64((f - float64(sec)) * 1e9)
+			t := time.Unix(sec, nsec).UTC()
+			return tuple.DText(t.Format("2006-01-02 15:04:05")), nil
+		}
+		// Two-arg: string + format
+		fmtVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		goFmt := pgDateFormatToGo(datumToString(fmtVal))
+		t, err := time.Parse(goFmt, datumToString(val))
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("to_timestamp: cannot parse %q with format %q: %v", datumToString(val), datumToString(fmtVal), err)
+		}
+		return tuple.DText(t.Format("2006-01-02 15:04:05")), nil
+
+	case "encode":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("encode requires 2 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		fmtVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		data := []byte(datumToString(val))
+		switch strings.ToLower(datumToString(fmtVal)) {
+		case "hex":
+			return tuple.DText(hex.EncodeToString(data)), nil
+		case "base64":
+			return tuple.DText(base64.StdEncoding.EncodeToString(data)), nil
+		case "escape":
+			return tuple.DText(string(data)), nil
+		default:
+			return tuple.DNull(), fmt.Errorf("encode: unsupported format %q", datumToString(fmtVal))
+		}
+
+	case "decode":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("decode requires 2 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		fmtVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		s := datumToString(val)
+		switch strings.ToLower(datumToString(fmtVal)) {
+		case "hex":
+			decoded, err := hex.DecodeString(s)
+			if err != nil {
+				return tuple.DNull(), fmt.Errorf("decode: invalid hex: %v", err)
+			}
+			return tuple.DText(string(decoded)), nil
+		case "base64":
+			decoded, err := base64.StdEncoding.DecodeString(s)
+			if err != nil {
+				return tuple.DNull(), fmt.Errorf("decode: invalid base64: %v", err)
+			}
+			return tuple.DText(string(decoded)), nil
+		case "escape":
+			return tuple.DText(s), nil
+		default:
+			return tuple.DNull(), fmt.Errorf("decode: unsupported format %q", datumToString(fmtVal))
+		}
+
+	case "format":
+		// format(formatstr, val1, val2, ...) — simplified PG format()
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("format requires at least 1 argument")
+		}
+		fmtVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if fmtVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		fmtStr := datumToString(fmtVal)
+		// Evaluate remaining args
+		vals := make([]string, len(args)-1)
+		for i, a := range args[1:] {
+			v, err := a.Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			vals[i] = datumToString(v)
+		}
+		// Replace %s, %I, %L with positional args (simplified)
+		result := pgFormat(fmtStr, vals)
+		return tuple.DText(result), nil
+
+	case "string_to_array":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("string_to_array requires 2 or 3 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		delimVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		s := datumToString(val)
+		delim := datumToString(delimVal)
+		parts := strings.Split(s, delim)
+		// Optional null-string argument
+		if len(args) >= 3 {
+			nullVal, err := args[2].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			nullStr := datumToString(nullVal)
+			for i, p := range parts {
+				if p == nullStr {
+					parts[i] = "NULL"
+				}
+			}
+		}
+		return tuple.DText("{" + strings.Join(parts, ",") + "}"), nil
+
+	case "array_length":
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("array_length requires 2 arguments")
+		}
+		val, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if val.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		s := datumToString(val)
+		// Parse {a,b,c} format
+		s = strings.TrimPrefix(s, "{")
+		s = strings.TrimSuffix(s, "}")
+		if s == "" {
+			return tuple.DInt64(0), nil
+		}
+		return tuple.DInt64(int64(len(strings.Split(s, ",")))), nil
+
 	// --- Math functions ---
 	case "abs":
 		if len(args) < 1 {
@@ -892,6 +1542,253 @@ func numericResult(f float64, origType tuple.DatumType) tuple.Datum {
 	default:
 		return tuple.DFloat64(f)
 	}
+}
+
+// parseTimestamp tries several common timestamp/date formats.
+func parseTimestamp(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	formats := []string{
+		"2006-01-02 15:04:05.999999-07",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+		"01/02/2006",
+		"Jan 2, 2006",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognized timestamp format: %q", s)
+}
+
+// extractField extracts a date/time field from a time.Time.
+func extractField(field string, t time.Time) (tuple.Datum, error) {
+	switch field {
+	case "year":
+		return tuple.DFloat64(float64(t.Year())), nil
+	case "month":
+		return tuple.DFloat64(float64(t.Month())), nil
+	case "day":
+		return tuple.DFloat64(float64(t.Day())), nil
+	case "hour":
+		return tuple.DFloat64(float64(t.Hour())), nil
+	case "minute":
+		return tuple.DFloat64(float64(t.Minute())), nil
+	case "second":
+		return tuple.DFloat64(float64(t.Second()) + float64(t.Nanosecond())/1e9), nil
+	case "dow":
+		return tuple.DFloat64(float64(t.Weekday())), nil
+	case "doy":
+		return tuple.DFloat64(float64(t.YearDay())), nil
+	case "week":
+		_, w := t.ISOWeek()
+		return tuple.DFloat64(float64(w)), nil
+	case "quarter":
+		return tuple.DFloat64(float64((t.Month()-1)/3 + 1)), nil
+	case "epoch":
+		return tuple.DFloat64(float64(t.Unix()) + float64(t.Nanosecond())/1e9), nil
+	case "milliseconds", "millisecond":
+		return tuple.DFloat64(float64(t.Second())*1000 + float64(t.Nanosecond())/1e6), nil
+	case "microseconds", "microsecond":
+		return tuple.DFloat64(float64(t.Second())*1e6 + float64(t.Nanosecond())/1e3), nil
+	default:
+		return tuple.DNull(), fmt.Errorf("extract: unsupported field %q", field)
+	}
+}
+
+// truncTimestamp truncates a timestamp to the given precision.
+func truncTimestamp(field string, t time.Time) (tuple.Datum, error) {
+	var result time.Time
+	switch field {
+	case "microseconds", "microsecond":
+		result = t.Truncate(time.Microsecond)
+	case "milliseconds", "millisecond":
+		result = t.Truncate(time.Millisecond)
+	case "second":
+		result = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location())
+	case "minute":
+		result = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location())
+	case "hour":
+		result = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location())
+	case "day":
+		result = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	case "week":
+		// Truncate to Monday of the ISO week
+		weekday := int(t.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		result = time.Date(t.Year(), t.Month(), t.Day()-(weekday-1), 0, 0, 0, 0, t.Location())
+	case "month":
+		result = time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
+	case "quarter":
+		q := (t.Month() - 1) / 3
+		result = time.Date(t.Year(), q*3+1, 1, 0, 0, 0, 0, t.Location())
+	case "year":
+		result = time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location())
+	default:
+		return tuple.DNull(), fmt.Errorf("date_trunc: unsupported field %q", field)
+	}
+	return tuple.DText(result.Format("2006-01-02 15:04:05")), nil
+}
+
+// formatAge formats the difference between two timestamps as a PG-style interval string.
+func formatAge(t1, t2 time.Time) string {
+	if t1.Before(t2) {
+		return "-" + formatAge(t2, t1)
+	}
+	years := t1.Year() - t2.Year()
+	months := int(t1.Month()) - int(t2.Month())
+	days := t1.Day() - t2.Day()
+	if days < 0 {
+		months--
+		// Days in previous month
+		prev := time.Date(t1.Year(), t1.Month(), 0, 0, 0, 0, 0, t1.Location())
+		days += prev.Day()
+	}
+	if months < 0 {
+		years--
+		months += 12
+	}
+	var parts []string
+	if years != 0 {
+		parts = append(parts, fmt.Sprintf("%d years", years))
+	}
+	if months != 0 {
+		parts = append(parts, fmt.Sprintf("%d mons", months))
+	}
+	if days != 0 {
+		parts = append(parts, fmt.Sprintf("%d days", days))
+	}
+	if len(parts) == 0 {
+		return "0 days"
+	}
+	return strings.Join(parts, " ")
+}
+
+// pgDateFormatToGo converts a PG date format string to a Go time layout.
+func pgDateFormatToGo(pgFmt string) string {
+	r := strings.NewReplacer(
+		"YYYY", "2006", "YY", "06",
+		"MM", "01", "DD", "02",
+		"HH24", "15", "HH12", "03", "HH", "03",
+		"MI", "04", "SS", "05",
+		"MS", "000", "US", "000000",
+		"AM", "PM", "am", "pm",
+		"TZ", "MST",
+		"Month", "January", "Mon", "Jan",
+		"Day", "Monday", "Dy", "Mon",
+		"D", "2", // day of week
+	)
+	return r.Replace(pgFmt)
+}
+
+// pgTimestampToChar formats a time.Time using a PG-style format string.
+func pgTimestampToChar(t time.Time, pgFmt string) string {
+	// Replace PG tokens with Go layout tokens, then format.
+	goFmt := pgDateFormatToGo(pgFmt)
+	result := t.Format(goFmt)
+	// Handle tokens that Go doesn't support natively.
+	result = strings.ReplaceAll(result, "Q", fmt.Sprintf("%d", (t.Month()-1)/3+1))
+	return result
+}
+
+// pgNumericToChar formats a number using a PG-style numeric format string.
+func pgNumericToChar(f float64, pgFmt string) string {
+	// Count decimal places from format
+	dotIdx := strings.Index(pgFmt, ".")
+	if dotIdx < 0 {
+		// No decimal: format as integer
+		return fmt.Sprintf("%d", int64(f))
+	}
+	decimals := 0
+	for _, c := range pgFmt[dotIdx+1:] {
+		if c == '9' || c == '0' {
+			decimals++
+		}
+	}
+	result := fmt.Sprintf("%.*f", decimals, f)
+	// Handle comma grouping if format contains commas
+	if strings.Contains(pgFmt, ",") {
+		parts := strings.SplitN(result, ".", 2)
+		intPart := parts[0]
+		negative := false
+		if len(intPart) > 0 && intPart[0] == '-' {
+			negative = true
+			intPart = intPart[1:]
+		}
+		var grouped []byte
+		for i, j := len(intPart)-1, 0; i >= 0; i, j = i-1, j+1 {
+			if j > 0 && j%3 == 0 {
+				grouped = append(grouped, ',')
+			}
+			grouped = append(grouped, intPart[i])
+		}
+		// Reverse
+		for i, j := 0, len(grouped)-1; i < j; i, j = i+1, j-1 {
+			grouped[i], grouped[j] = grouped[j], grouped[i]
+		}
+		if negative {
+			result = "-" + string(grouped)
+		} else {
+			result = string(grouped)
+		}
+		if len(parts) > 1 {
+			result += "." + parts[1]
+		}
+	}
+	return result
+}
+
+// pgFormat implements a simplified PG format() function.
+// Supports %s (string), %I (identifier), %L (literal), and %% (literal %).
+func pgFormat(fmtStr string, vals []string) string {
+	var sb strings.Builder
+	argIdx := 0
+	i := 0
+	for i < len(fmtStr) {
+		if fmtStr[i] == '%' && i+1 < len(fmtStr) {
+			next := fmtStr[i+1]
+			switch next {
+			case 's':
+				if argIdx < len(vals) {
+					sb.WriteString(vals[argIdx])
+					argIdx++
+				}
+				i += 2
+			case 'I':
+				if argIdx < len(vals) {
+					sb.WriteByte('"')
+					sb.WriteString(strings.ReplaceAll(vals[argIdx], "\"", "\"\""))
+					sb.WriteByte('"')
+					argIdx++
+				}
+				i += 2
+			case 'L':
+				if argIdx < len(vals) {
+					sb.WriteByte('\'')
+					sb.WriteString(strings.ReplaceAll(vals[argIdx], "'", "''"))
+					sb.WriteByte('\'')
+					argIdx++
+				}
+				i += 2
+			case '%':
+				sb.WriteByte('%')
+				i += 2
+			default:
+				sb.WriteByte(fmtStr[i])
+				i++
+			}
+		} else {
+			sb.WriteByte(fmtStr[i])
+			i++
+		}
+	}
+	return sb.String()
 }
 
 // evalMinMax evaluates GREATEST (least=false) or LEAST (least=true) across args.

@@ -385,3 +385,250 @@ func TestBuiltin_ModZero(t *testing.T) {
 		t.Fatalf("mod(10,0) should error with 'zero', got: %v", err)
 	}
 }
+
+// --- New string function tests ---
+
+func TestBuiltin_ConcatWs(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalText(t, ex, "concat_ws(', ', 'a', 'b', 'c')"); v != "a, b, c" {
+		t.Fatalf("concat_ws = %q, want 'a, b, c'", v)
+	}
+}
+
+func TestBuiltin_Initcap(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalText(t, ex, "initcap('hello world')"); v != "Hello World" {
+		t.Fatalf("initcap = %q, want 'Hello World'", v)
+	}
+}
+
+func TestBuiltin_Translate(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalText(t, ex, "translate('12345', '143', 'ax')"); v != "a2x5" {
+		t.Fatalf("translate = %q, want 'a2x5'", v)
+	}
+}
+
+func TestBuiltin_Ascii(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalInt(t, ex, "ascii('A')"); v != 65 {
+		t.Fatalf("ascii('A') = %d, want 65", v)
+	}
+}
+
+func TestBuiltin_Chr(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalText(t, ex, "chr(65)"); v != "A" {
+		t.Fatalf("chr(65) = %q, want 'A'", v)
+	}
+}
+
+func TestBuiltin_OctetLength(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalInt(t, ex, "octet_length('hello')"); v != 5 {
+		t.Fatalf("octet_length('hello') = %d, want 5", v)
+	}
+}
+
+func TestBuiltin_BitLength(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalInt(t, ex, "bit_length('hello')"); v != 40 {
+		t.Fatalf("bit_length('hello') = %d, want 40", v)
+	}
+}
+
+func TestBuiltin_Md5(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "md5('hello')")
+	if v != "5d41402abc4b2a76b9719d911017c592" {
+		t.Fatalf("md5('hello') = %q", v)
+	}
+}
+
+func TestBuiltin_GenRandomUuid(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "gen_random_uuid()")
+	// UUID v4 format: 8-4-4-4-12 hex chars
+	if len(v) != 36 || v[8] != '-' || v[13] != '-' || v[18] != '-' || v[23] != '-' {
+		t.Fatalf("gen_random_uuid() = %q, not valid UUID format", v)
+	}
+}
+
+// --- Overlay ---
+
+func TestBuiltin_Overlay(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "overlay('Txxxxas' PLACING 'hom' FROM 2 FOR 4)")
+	if v != "Thomas" {
+		t.Fatalf("overlay = %q, want 'Thomas'", v)
+	}
+}
+
+// --- Extract / date_part ---
+
+func TestBuiltin_Extract(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalFloat(t, ex, "extract(year FROM '2024-03-15 10:30:00')"); v != 2024 {
+		t.Fatalf("extract year = %v, want 2024", v)
+	}
+	if v := evalFloat(t, ex, "extract(month FROM '2024-03-15 10:30:00')"); v != 3 {
+		t.Fatalf("extract month = %v, want 3", v)
+	}
+	if v := evalFloat(t, ex, "extract(day FROM '2024-03-15 10:30:00')"); v != 15 {
+		t.Fatalf("extract day = %v, want 15", v)
+	}
+	if v := evalFloat(t, ex, "extract(hour FROM '2024-03-15 10:30:00')"); v != 10 {
+		t.Fatalf("extract hour = %v, want 10", v)
+	}
+}
+
+func TestBuiltin_DatePart(t *testing.T) {
+	ex := newTestExecutor(t)
+	if v := evalFloat(t, ex, "date_part('year', '2024-03-15')"); v != 2024 {
+		t.Fatalf("date_part year = %v, want 2024", v)
+	}
+}
+
+// --- date_trunc ---
+
+func TestBuiltin_DateTrunc(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "date_trunc('month', '2024-03-15 10:30:00')")
+	if v != "2024-03-01 00:00:00" {
+		t.Fatalf("date_trunc month = %q, want '2024-03-01 00:00:00'", v)
+	}
+	v = evalText(t, ex, "date_trunc('year', '2024-03-15 10:30:00')")
+	if v != "2024-01-01 00:00:00" {
+		t.Fatalf("date_trunc year = %q, want '2024-01-01 00:00:00'", v)
+	}
+}
+
+// --- age ---
+
+func TestBuiltin_Age(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "age('2024-06-15', '2024-03-15')")
+	if v != "3 mons" {
+		t.Fatalf("age = %q, want '3 mons'", v)
+	}
+}
+
+// --- Regex ---
+
+func TestBuiltin_RegexpReplace(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "regexp_replace('hello world', 'world', 'there')")
+	if v != "hello there" {
+		t.Fatalf("regexp_replace = %q, want 'hello there'", v)
+	}
+	// With global flag
+	v = evalText(t, ex, "regexp_replace('aaa', 'a', 'b', 'g')")
+	if v != "bbb" {
+		t.Fatalf("regexp_replace global = %q, want 'bbb'", v)
+	}
+}
+
+func TestBuiltin_RegexpMatch(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "regexp_match('abc123def', '[0-9]+')")
+	if v != "123" {
+		t.Fatalf("regexp_match = %q, want '123'", v)
+	}
+	// No match → NULL
+	if !evalNull(t, ex, "regexp_match('abc', '[0-9]+')") {
+		t.Fatal("regexp_match no match should be NULL")
+	}
+}
+
+// --- Formatting ---
+
+func TestBuiltin_ToChar_Timestamp(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "to_char('2024-03-15 10:30:00', 'YYYY-MM-DD')")
+	if v != "2024-03-15" {
+		t.Fatalf("to_char timestamp = %q, want '2024-03-15'", v)
+	}
+}
+
+func TestBuiltin_ToChar_Numeric(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "to_char(1234.5, '9999.99')")
+	if v != "1234.50" {
+		t.Fatalf("to_char numeric = %q, want '1234.50'", v)
+	}
+}
+
+func TestBuiltin_ToNumber(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalFloat(t, ex, "to_number('1,234.56', '9,999.99')")
+	if v != 1234.56 {
+		t.Fatalf("to_number = %v, want 1234.56", v)
+	}
+}
+
+func TestBuiltin_ToDate(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "to_date('15 03 2024', 'DD MM YYYY')")
+	if v != "2024-03-15" {
+		t.Fatalf("to_date = %q, want '2024-03-15'", v)
+	}
+}
+
+func TestBuiltin_ToTimestamp(t *testing.T) {
+	ex := newTestExecutor(t)
+	// Epoch form
+	v := evalText(t, ex, "to_timestamp(0.0)")
+	if v != "1970-01-01 00:00:00" {
+		t.Fatalf("to_timestamp(0) = %q, want '1970-01-01 00:00:00'", v)
+	}
+}
+
+// --- Encode/Decode ---
+
+func TestBuiltin_Encode(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "encode('hello', 'hex')")
+	if v != "68656c6c6f" {
+		t.Fatalf("encode hex = %q, want '68656c6c6f'", v)
+	}
+	v = evalText(t, ex, "encode('hello', 'base64')")
+	if v != "aGVsbG8=" {
+		t.Fatalf("encode base64 = %q, want 'aGVsbG8='", v)
+	}
+}
+
+func TestBuiltin_Decode(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "decode('68656c6c6f', 'hex')")
+	if v != "hello" {
+		t.Fatalf("decode hex = %q, want 'hello'", v)
+	}
+}
+
+// --- Format ---
+
+func TestBuiltin_Format(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "format('Hello %s, you are %s', 'world', 'great')")
+	if v != "Hello world, you are great" {
+		t.Fatalf("format = %q", v)
+	}
+}
+
+// --- Array functions ---
+
+func TestBuiltin_StringToArray(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalText(t, ex, "string_to_array('a,b,c', ',')")
+	if v != "{a,b,c}" {
+		t.Fatalf("string_to_array = %q, want '{a,b,c}'", v)
+	}
+}
+
+func TestBuiltin_ArrayLength(t *testing.T) {
+	ex := newTestExecutor(t)
+	v := evalInt(t, ex, "array_length(string_to_array('a,b,c', ','), 1)")
+	if v != 3 {
+		t.Fatalf("array_length = %d, want 3", v)
+	}
+}

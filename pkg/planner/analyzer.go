@@ -1860,21 +1860,36 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 	// Determine return type based on function name.
 	var retType tuple.DatumType
 	switch name {
-	case "now", "current_timestamp", "current_date":
+	// Date/time → text
+	case "now", "current_timestamp", "current_date",
+		"to_char", "to_date", "to_timestamp", "date_trunc", "age":
 		retType = tuple.TypeText
+	// Sequence / integer-returning
 	case "nextval", "currval", "setval":
 		retType = tuple.TypeInt64
-	case "length", "char_length", "character_length":
+	case "length", "char_length", "character_length",
+		"octet_length", "bit_length", "ascii", "position", "array_length":
 		retType = tuple.TypeInt64
-	case "upper", "lower", "concat":
+	// String-returning
+	case "upper", "lower", "concat", "concat_ws",
+		"substring", "substr", "trim", "btrim", "ltrim", "rtrim",
+		"replace", "overlay", "left", "right",
+		"lpad", "rpad", "repeat", "reverse", "split_part",
+		"initcap", "translate", "chr",
+		"md5", "gen_random_uuid", "encode", "decode", "format",
+		"regexp_replace", "string_to_array":
 		retType = tuple.TypeText
-	case "coalesce":
-		if len(args) > 0 {
-			retType = args[0].ResultType()
-		} else {
-			retType = tuple.TypeNull
-		}
-	case "nullif":
+	// Float-returning
+	case "abs", "ceil", "ceiling", "floor", "round", "trunc", "truncate",
+		"mod", "power", "pow", "sqrt", "cbrt", "sign",
+		"random", "pi", "log", "ln", "log10", "exp",
+		"extract", "date_part", "to_number":
+		retType = tuple.TypeFloat64
+	// Bool-returning
+	case "regexp_match":
+		retType = tuple.TypeText // returns matched text or NULL
+	// Preserve input type
+	case "coalesce", "nullif", "greatest", "least":
 		if len(args) > 0 {
 			retType = args[0].ResultType()
 		} else {
