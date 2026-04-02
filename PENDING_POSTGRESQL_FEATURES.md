@@ -19,7 +19,8 @@ For context, here is what is currently implemented:
   CREATE DOMAIN, CREATE TYPE (enum), CREATE POLICY (RLS)
 - **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, GROUP BY, HAVING,
   JOIN (INNER, LEFT, RIGHT, CROSS), DISTINCT, UNION/INTERSECT/EXCEPT,
-  WITH / WITH RECURSIVE (CTEs), subqueries in FROM
+  WITH / WITH RECURSIVE (CTEs), subqueries in FROM,
+  subqueries in expressions (IN, EXISTS, NOT IN, ANY, ALL, scalar, correlated)
 - **Expressions:** Arithmetic (+, -, *, /, %), comparison (=, <>, <, >, <=, >=),
   AND/OR/NOT, IS [NOT] NULL, IS TRUE/FALSE/UNKNOWN, CASE (simple + searched),
   CAST, COALESCE, NULLIF, GREATEST, LEAST, LIKE/ILIKE/NOT LIKE/NOT ILIKE,
@@ -40,17 +41,6 @@ For context, here is what is currently implemented:
 ---
 
 ## 1. SQL Expressions and Operators
-
-### 🔴 Subqueries (IN, EXISTS, ANY, ALL, scalar subqueries)
-
-```sql
-SELECT * FROM orders WHERE customer_id IN (SELECT id FROM vip_customers);
-SELECT * FROM t WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.fk = t.id);
-SELECT name, (SELECT count(*) FROM orders o WHERE o.uid = u.id) FROM users u;
-```
-
-No subquery support at all — no `SubLink`/`SubPlan` handling in the analyzer or
-executor. This is a fundamental SQL feature.
 
 ### 🟡 SIMILAR TO
 
@@ -621,7 +611,6 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| Subqueries (IN, EXISTS, scalar) | Queries |
 | Window functions | Queries |
 | INSERT ... ON CONFLICT | DML |
 | UPDATE ... FROM | DML |

@@ -45,17 +45,41 @@ func (e *ExprColumn) Eval(row *Row) (tuple.Datum, error) {
 	if e.Index >= 0 && e.Index < len(row.Columns) {
 		return row.Columns[e.Index], nil
 	}
-	// Fallback: search by name
-	target := e.Column
-	if e.Table != "" {
-		target = e.Table + "." + e.Column
+	// Fallback: search by name.
+	if d, ok := findColumnInRow(e.Table, e.Column, row); ok {
+		return d, nil
 	}
-	for i, name := range row.Names {
-		if strings.EqualFold(name, target) || strings.HasSuffix(strings.ToLower(name), "."+strings.ToLower(e.Column)) {
-			return row.Columns[i], nil
+	// Check the outer row context for correlated subquery references.
+	if OuterRowContext != nil {
+		if d, ok := findColumnInRow(e.Table, e.Column, OuterRowContext); ok {
+			return d, nil
 		}
 	}
 	return tuple.DNull(), fmt.Errorf("column %s not found in row", e)
+}
+
+// findColumnInRow searches for a column by name in a row.
+// When table is non-empty, requires an exact qualified match (table.column).
+// When table is empty, matches either unqualified or any table's column.
+func findColumnInRow(table, column string, row *Row) (tuple.Datum, bool) {
+	if table != "" {
+		target := strings.ToLower(table + "." + column)
+		for i, name := range row.Names {
+			if strings.EqualFold(name, target) {
+				return row.Columns[i], true
+			}
+		}
+		return tuple.DNull(), false
+	}
+	// Unqualified: match exact or suffix.
+	colLower := strings.ToLower(column)
+	for i, name := range row.Names {
+		nameLower := strings.ToLower(name)
+		if nameLower == colLower || strings.HasSuffix(nameLower, "."+colLower) {
+			return row.Columns[i], true
+		}
+	}
+	return tuple.DNull(), false
 }
 
 // ExprLiteral is a constant value.
@@ -1022,6 +1046,168 @@ func EvalBool(expr Expr, row *Row) bool {
 		return false
 	}
 	return datumToBool(v)
+}
+
+// SubqueryExecFunc is a callback that executes a subquery and returns
+// the result rows. The outer row is provided for correlated subqueries.
+// The implementation is injected by the SQL executor.
+type SubqueryExecFunc func(subQuery *Query, outerRow *Row) (cols []string, rows [][]tuple.Datum, err error)
+
+// SubqueryExecutor is set by the SQL executor to provide subquery
+// execution capability. This avoids a circular dependency between
+// the planner and executor packages.
+var SubqueryExecutor SubqueryExecFunc
+
+// OuterRowContext holds the current outer row for correlated subquery evaluation.
+// It is set by the filter/project executor before evaluating expressions that
+// may contain subqueries, and checked by ExprColumn as a fallback.
+var OuterRowContext *Row
+
+// ExprSubLink evaluates a subquery expression (EXISTS, IN, ANY, ALL, scalar).
+type ExprSubLink struct {
+	LinkType SubLinkType
+	TestExpr Expr   // outer expression for comparison (nil for EXISTS/scalar)
+	OpName   string // comparison operator
+	Subquery *Query // analyzed sub-SELECT
+}
+
+func (e *ExprSubLink) String() string {
+	switch e.LinkType {
+	case SubLinkExists:
+		return "EXISTS(...)"
+	case SubLinkAny:
+		return "IN(...)"
+	case SubLinkAll:
+		return "NOT IN(...)"
+	case SubLinkExprSubquery:
+		return "(SELECT ...)"
+	}
+	return "SUBLINK"
+}
+
+func (e *ExprSubLink) Eval(row *Row) (tuple.Datum, error) {
+	if SubqueryExecutor == nil {
+		return tuple.DNull(), fmt.Errorf("subquery execution not available")
+	}
+
+	// Set the outer row context so correlated column references can resolve.
+	savedOuter := OuterRowContext
+	OuterRowContext = row
+	defer func() { OuterRowContext = savedOuter }()
+
+	// Execute the subquery.
+	_, subRows, err := SubqueryExecutor(e.Subquery, row)
+	if err != nil {
+		return tuple.DNull(), fmt.Errorf("subquery: %w", err)
+	}
+
+	switch e.LinkType {
+	case SubLinkExists:
+		return tuple.DBool(len(subRows) > 0), nil
+
+	case SubLinkExprSubquery:
+		// Scalar subquery: return the first column of the first row.
+		if len(subRows) == 0 {
+			return tuple.DNull(), nil
+		}
+		if len(subRows) > 1 {
+			return tuple.DNull(), fmt.Errorf("scalar subquery returned more than one row")
+		}
+		if len(subRows[0]) == 0 {
+			return tuple.DNull(), nil
+		}
+		return subRows[0][0], nil
+
+	case SubLinkAny:
+		// expr IN (SELECT ...) / expr = ANY (SELECT ...)
+		// True if any row matches, false if none match (and no NULLs),
+		// NULL if no match but NULLs were present.
+		if e.TestExpr == nil {
+			return tuple.DNull(), fmt.Errorf("ANY/IN subquery missing test expression")
+		}
+		testVal, err := e.TestExpr.Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if testVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		hasNull := false
+		for _, subRow := range subRows {
+			if len(subRow) == 0 {
+				continue
+			}
+			subVal := subRow[0]
+			if subVal.Type == tuple.TypeNull {
+				hasNull = true
+				continue
+			}
+			if sublinkCompare(e.OpName, testVal, subVal) {
+				return tuple.DBool(true), nil
+			}
+		}
+		if hasNull {
+			return tuple.DNull(), nil
+		}
+		return tuple.DBool(false), nil
+
+	case SubLinkAll:
+		// NOT IN (SELECT ...) is parsed as ALL_SUBLINK with OpName "=".
+		// Semantics: true if the test value does NOT match ANY subquery row.
+		// This is the negation of ANY_SUBLINK with the same operator.
+		if e.TestExpr == nil {
+			return tuple.DNull(), fmt.Errorf("ALL subquery missing test expression")
+		}
+		testVal, err := e.TestExpr.Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if testVal.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		hasNull := false
+		for _, subRow := range subRows {
+			if len(subRow) == 0 {
+				continue
+			}
+			subVal := subRow[0]
+			if subVal.Type == tuple.TypeNull {
+				hasNull = true
+				continue
+			}
+			if sublinkCompare(e.OpName, testVal, subVal) {
+				// Found a match → NOT IN is false.
+				return tuple.DBool(false), nil
+			}
+		}
+		if hasNull {
+			return tuple.DNull(), nil
+		}
+		return tuple.DBool(true), nil
+	}
+
+	return tuple.DNull(), nil
+}
+
+// sublinkCompare applies a comparison operator between two datums.
+func sublinkCompare(op string, a, b tuple.Datum) bool {
+	cmp := CompareDatums(a, b)
+	switch op {
+	case "=":
+		return cmp == 0
+	case "<>", "!=":
+		return cmp != 0
+	case "<":
+		return cmp < 0
+	case "<=":
+		return cmp <= 0
+	case ">":
+		return cmp > 0
+	case ">=":
+		return cmp >= 0
+	default:
+		return cmp == 0
+	}
 }
 
 // ReferencedTables returns the set of table names referenced by column

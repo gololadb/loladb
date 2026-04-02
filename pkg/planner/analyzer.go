@@ -829,6 +829,9 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 		}
 		return &FuncCallExpr{FuncName: funcName, Args: args, ReturnType: retType}, nil
 
+	case *parser.SubLink:
+		return a.transformSubLink(e)
+
 	case *parser.ParamRef:
 		return nil, fmt.Errorf("analyzer: parameter references ($%d) not supported", e.Number)
 	default:
@@ -1225,6 +1228,215 @@ func (a *Analyzer) transformBoolExpr(e *parser.BoolExpr) (AnalyzedExpr, error) {
 
 // transformNullTest resolves IS [NOT] NULL.
 // Mirrors PostgreSQL's transformNullTest() in parse_expr.c.
+// transformSubLink handles subquery expressions: EXISTS, IN, NOT IN, ANY, ALL, scalar.
+func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
+	selectStmt, ok := sl.Subselect.(*parser.SelectStmt)
+	if !ok {
+		return nil, fmt.Errorf("analyzer: sublink subquery must be a SELECT")
+	}
+
+	// Analyze the subquery with the outer range table visible so
+	// correlated references (e.g., WHERE t2.fk = t.id) can resolve.
+	// The subquery adds its own entries; we restore the outer RT after.
+	savedRT := a.rangeTable
+	outerRTLen := len(savedRT) // RTEs with index <= this are outer refs
+	subQuery, err := a.transformSelectStmt(selectStmt)
+	if err != nil {
+		a.rangeTable = savedRT
+		return nil, fmt.Errorf("analyzer: subquery: %w", err)
+	}
+	a.rangeTable = savedRT
+
+	// Strip outer RTEs from the subquery's range table so the planner
+	// only sees the subquery's own tables. Mark outer column references
+	// with AttIndex = -1 so they resolve via name-based lookup against
+	// OuterRowContext at execution time. Adjust inner AttIndex values
+	// to account for the removed outer columns.
+	if outerRTLen > 0 && subQuery.RangeTable != nil {
+		// Count total columns in outer RTEs to adjust inner AttIndex.
+		outerColCount := 0
+		for i := 0; i < outerRTLen && i < len(subQuery.RangeTable); i++ {
+			outerColCount += len(subQuery.RangeTable[i].Columns)
+		}
+		markOuterColumnVars(subQuery, outerRTLen, outerColCount)
+		subQuery.RangeTable = subQuery.RangeTable[outerRTLen:]
+		// Re-number RTIndex in the remaining RTEs.
+		for i, rte := range subQuery.RangeTable {
+			rte.RTIndex = i + 1
+		}
+	}
+
+	// Determine the return type from the subquery's first target column.
+	subRetType := tuple.TypeNull
+	if len(subQuery.TargetList) > 0 {
+		subRetType = subQuery.TargetList[0].Expr.ResultType()
+	}
+
+	switch sl.SubLinkType {
+	case parser.EXISTS_SUBLINK:
+		return &SubLinkExpr{
+			LinkType:      SubLinkExists,
+			Subquery:      subQuery,
+			SubReturnType: subRetType,
+		}, nil
+
+	case parser.ANY_SUBLINK:
+		// expr IN (SELECT ...) or expr = ANY (SELECT ...)
+		var testExpr AnalyzedExpr
+		if sl.Testexpr != nil {
+			testExpr, err = a.transformExpr(sl.Testexpr)
+			if err != nil {
+				return nil, fmt.Errorf("analyzer: IN subquery test expr: %w", err)
+			}
+		}
+		opName := "="
+		if len(sl.OperName) > 0 {
+			opName = sl.OperName[0]
+		}
+		return &SubLinkExpr{
+			LinkType:      SubLinkAny,
+			TestExpr:      testExpr,
+			OpName:        opName,
+			Subquery:      subQuery,
+			SubReturnType: subRetType,
+		}, nil
+
+	case parser.ALL_SUBLINK:
+		// expr NOT IN (SELECT ...) or expr <> ALL (SELECT ...)
+		var testExpr AnalyzedExpr
+		if sl.Testexpr != nil {
+			testExpr, err = a.transformExpr(sl.Testexpr)
+			if err != nil {
+				return nil, fmt.Errorf("analyzer: ALL subquery test expr: %w", err)
+			}
+		}
+		opName := "="
+		if len(sl.OperName) > 0 {
+			opName = sl.OperName[0]
+		}
+		return &SubLinkExpr{
+			LinkType:      SubLinkAll,
+			TestExpr:      testExpr,
+			OpName:        opName,
+			Subquery:      subQuery,
+			SubReturnType: subRetType,
+		}, nil
+
+	case parser.EXPR_SUBLINK:
+		// Scalar subquery: (SELECT count(*) FROM ...)
+		return &SubLinkExpr{
+			LinkType:      SubLinkExprSubquery,
+			Subquery:      subQuery,
+			SubReturnType: subRetType,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("analyzer: unsupported sublink type %d", sl.SubLinkType)
+	}
+}
+
+// markOuterColumnVars walks the subquery's expression trees and marks
+// ColumnVar nodes that reference outer RTEs (RTIndex <= outerRTLen)
+// with AttIndex = -1 for name-based resolution. It also adjusts
+// RTIndex and AttIndex for inner references to account for the
+// stripped outer RTEs and their columns.
+func markOuterColumnVars(q *Query, outerRTLen int, outerColCount int) {
+	if q == nil {
+		return
+	}
+	for _, te := range q.TargetList {
+		markOuterCV(te.Expr, outerRTLen, outerColCount)
+	}
+	if q.JoinTree != nil {
+		if q.JoinTree.Quals != nil {
+			markOuterCV(q.JoinTree.Quals, outerRTLen, outerColCount)
+		}
+		for _, item := range q.JoinTree.FromList {
+			markOuterCVJoinTree(item, outerRTLen, outerColCount)
+		}
+	}
+	if q.HavingQual != nil {
+		markOuterCV(q.HavingQual, outerRTLen, outerColCount)
+	}
+	for _, sc := range q.SortClause {
+		markOuterCV(sc.Expr, outerRTLen, outerColCount)
+	}
+}
+
+func markOuterCVJoinTree(node JoinTreeNode, outerRTLen int, outerColCount int) {
+	switch n := node.(type) {
+	case *RangeTblRef:
+		if n.RTIndex > outerRTLen {
+			n.RTIndex -= outerRTLen
+		}
+	case *JoinNode:
+		markOuterCVJoinTree(n.Left, outerRTLen, outerColCount)
+		markOuterCVJoinTree(n.Right, outerRTLen, outerColCount)
+		if n.Quals != nil {
+			markOuterCV(n.Quals, outerRTLen, outerColCount)
+		}
+		if n.LeftRTI > outerRTLen {
+			n.LeftRTI -= outerRTLen
+		}
+		if n.RightRTI > outerRTLen {
+			n.RightRTI -= outerRTLen
+		}
+	}
+}
+
+func markOuterCV(ae AnalyzedExpr, outerRTLen int, outerColCount int) {
+	if ae == nil {
+		return
+	}
+	switch e := ae.(type) {
+	case *ColumnVar:
+		if e.RTIndex > 0 && e.RTIndex <= outerRTLen {
+			// Outer reference: force name-based resolution.
+			e.AttIndex = -1
+		} else if e.RTIndex > outerRTLen {
+			// Inner reference: adjust RTIndex and AttIndex.
+			e.RTIndex -= outerRTLen
+			if e.AttIndex >= outerColCount {
+				e.AttIndex -= outerColCount
+			}
+		}
+	case *OpExpr:
+		markOuterCV(e.Left, outerRTLen, outerColCount)
+		markOuterCV(e.Right, outerRTLen, outerColCount)
+	case *BoolExprNode:
+		for _, arg := range e.Args {
+			markOuterCV(arg, outerRTLen, outerColCount)
+		}
+	case *NullTestExpr:
+		markOuterCV(e.Arg, outerRTLen, outerColCount)
+	case *FuncCallExpr:
+		for _, arg := range e.Args {
+			markOuterCV(arg, outerRTLen, outerColCount)
+		}
+	case *TypeCastExpr:
+		markOuterCV(e.Arg, outerRTLen, outerColCount)
+	case *AggRef:
+		for _, arg := range e.Args {
+			markOuterCV(arg, outerRTLen, outerColCount)
+		}
+	case *CaseExprNode:
+		if e.Arg != nil {
+			markOuterCV(e.Arg, outerRTLen, outerColCount)
+		}
+		for _, w := range e.Whens {
+			markOuterCV(w.Cond, outerRTLen, outerColCount)
+			markOuterCV(w.Result, outerRTLen, outerColCount)
+		}
+		if e.ElseExpr != nil {
+			markOuterCV(e.ElseExpr, outerRTLen, outerColCount)
+		}
+	case *SubLinkExpr:
+		// Do NOT process TestExpr here — it belongs to the parent query,
+		// not the subquery. The subquery's own outer refs are handled
+		// when transformSubLink processes the inner subquery.
+	}
+}
+
 func (a *Analyzer) transformNullTest(e *parser.NullTest) (AnalyzedExpr, error) {
 	arg, err := a.transformExpr(e.Arg)
 	if err != nil {

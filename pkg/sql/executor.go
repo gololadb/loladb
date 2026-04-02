@@ -44,6 +44,23 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 		exec:      executor.NewExecutor(cat),
 	}
 
+	// Wire subquery executor so ExprSubLink can execute sub-SELECTs.
+	planner.SubqueryExecutor = func(subQuery *planner.Query, outerRow *planner.Row) ([]string, [][]tuple.Datum, error) {
+		logical, err := planner.QueryToLogicalPlan(subQuery)
+		if err != nil {
+			return nil, nil, err
+		}
+		physical, err := ex.optimizer.Optimize(logical)
+		if err != nil {
+			return nil, nil, err
+		}
+		r, err := ex.exec.Execute(physical)
+		if err != nil {
+			return nil, nil, err
+		}
+		return r.Columns, r.Rows, nil
+	}
+
 	// Wire enum ordinal resolver for enum-aware comparisons.
 	planner.EnumOrdinalFunc = func(val string) int {
 		// Check all enum types for this value.

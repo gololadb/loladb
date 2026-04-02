@@ -884,6 +884,65 @@ func (b *BooleanTestExpr) Eval(row *Row) (tuple.Datum, error) {
 
 func (b *BooleanTestExpr) ResultType() tuple.DatumType { return tuple.TypeBool }
 
+// SubLinkType identifies the kind of subquery expression.
+type SubLinkType int
+
+const (
+	SubLinkExists SubLinkType = iota // EXISTS (SELECT ...)
+	SubLinkAny                       // expr IN (SELECT ...) / expr = ANY (SELECT ...)
+	SubLinkAll                       // expr NOT IN (SELECT ...) / expr <> ALL (SELECT ...)
+	SubLinkExprSubquery              // (SELECT ...) as a scalar value
+)
+
+// SubLinkExpr represents a subquery expression (EXISTS, IN, ANY, ALL, scalar).
+// The subquery is stored as an analyzed Query and re-executed for each
+// evaluation (necessary for correlated subqueries).
+type SubLinkExpr struct {
+	LinkType SubLinkType
+	TestExpr AnalyzedExpr // outer expression for comparison (nil for EXISTS/scalar)
+	OpName   string       // comparison operator ("=" for IN, "<>" for NOT IN, etc.)
+	Subquery *Query       // the analyzed sub-SELECT
+	// SubReturnType is the result type of the subquery's first column
+	// (used for scalar subqueries).
+	SubReturnType tuple.DatumType
+}
+
+func (s *SubLinkExpr) String() string {
+	switch s.LinkType {
+	case SubLinkExists:
+		return "EXISTS(...)"
+	case SubLinkAny:
+		if s.TestExpr != nil {
+			return s.TestExpr.String() + " IN (...)"
+		}
+		return "ANY(...)"
+	case SubLinkAll:
+		if s.TestExpr != nil {
+			return s.TestExpr.String() + " NOT IN (...)"
+		}
+		return "ALL(...)"
+	case SubLinkExprSubquery:
+		return "(SELECT ...)"
+	}
+	return "SUBLINK"
+}
+
+func (s *SubLinkExpr) Eval(row *Row) (tuple.Datum, error) {
+	// SubLinkExpr is not directly evaluated — it is converted to an
+	// ExprSubLink by analyzedToExpr, which holds the execution machinery.
+	return tuple.DNull(), fmt.Errorf("SubLinkExpr.Eval: should not be called directly")
+}
+
+func (s *SubLinkExpr) ResultType() tuple.DatumType {
+	switch s.LinkType {
+	case SubLinkExists, SubLinkAny, SubLinkAll:
+		return tuple.TypeBool
+	case SubLinkExprSubquery:
+		return s.SubReturnType
+	}
+	return tuple.TypeNull
+}
+
 // ---------------------------------------------------------------------------
 // JSON operator evaluation
 // ---------------------------------------------------------------------------

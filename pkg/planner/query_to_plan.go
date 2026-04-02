@@ -555,6 +555,16 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 			Arg:  analyzedToExpr(e.Arg, rtes),
 			Test: e.Test,
 		}
+	case *SubLinkExpr:
+		sl := &ExprSubLink{
+			LinkType: e.LinkType,
+			OpName:   e.OpName,
+			Subquery: e.Subquery,
+		}
+		if e.TestExpr != nil {
+			sl.TestExpr = analyzedToExpr(e.TestExpr, rtes)
+		}
+		return sl
 	default:
 		// Fallback: AnalyzedExpr already implements Expr.
 		return ae
