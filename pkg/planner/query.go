@@ -83,6 +83,16 @@ type Query struct {
 	// InsertColumns is the explicit column list for INSERT (nil = all).
 	InsertColumns []string
 
+	// GroupClause holds GROUP BY expressions.
+	GroupClause []AnalyzedExpr
+
+	// HasAggs is true when the target list contains aggregate functions.
+	HasAggs bool
+
+	// AggRefs collects all AggRef nodes found in the target list,
+	// in order. The planner uses this to build the aggregate node.
+	AggRefs []*AggRef
+
 	// Assignments holds SET col = expr for UPDATE.
 	Assignments []*UpdateAssignment
 
@@ -364,6 +374,18 @@ type NullTestExpr struct {
 	IsNot  bool // true for IS NOT NULL
 }
 
+// AggRef represents a reference to an aggregate function in the target
+// list. During execution, the aggregate executor replaces these with
+// the accumulated result for each group.
+type AggRef struct {
+	AggFunc    string         // e.g. "count", "sum", "avg", "min", "max"
+	Args       []AnalyzedExpr // arguments (empty for count(*))
+	Star       bool           // true for count(*)
+	Distinct   bool           // true for count(DISTINCT ...)
+	AggIndex   int            // index into the aggregate list (set by planner)
+	ReturnTyp  tuple.DatumType
+}
+
 // FuncCallExpr represents a resolved function call.
 type FuncCallExpr struct {
 	FuncName   string         // unqualified function name (lowercase)
@@ -588,6 +610,26 @@ func (n *NullTestExpr) Eval(row *Row) (tuple.Datum, error) {
 func (n *NullTestExpr) ResultType() tuple.DatumType { return tuple.TypeBool }
 
 // --- StarExpr implements AnalyzedExpr ---
+
+func (a *AggRef) String() string {
+	if a.Star {
+		return a.AggFunc + "(*)"
+	}
+	args := make([]string, len(a.Args))
+	for i, arg := range a.Args {
+		args[i] = arg.String()
+	}
+	return a.AggFunc + "(" + strings.Join(args, ", ") + ")"
+}
+func (a *AggRef) Eval(row *Row) (tuple.Datum, error) {
+	// AggRef is replaced by the aggregate executor; if we reach here,
+	// the value is stored in the row at the aggregate's output index.
+	if a.AggIndex >= 0 && a.AggIndex < len(row.Columns) {
+		return row.Columns[a.AggIndex], nil
+	}
+	return tuple.DNull(), nil
+}
+func (a *AggRef) ResultType() tuple.DatumType { return a.ReturnTyp }
 
 func (tc *TypeCastExpr) String() string {
 	return tc.Arg.String() + "::" + tc.TargetType

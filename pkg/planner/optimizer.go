@@ -57,6 +57,8 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return o.optimizeLimit(n)
 	case *LogicalSort:
 		return o.optimizeSort(n)
+	case *LogicalAggregate:
+		return o.optimizeAggregate(n)
 	case *LogicalInsert:
 		return o.optimizeInsert(n)
 	case *LogicalDelete:
@@ -1069,6 +1071,18 @@ func (o *Optimizer) optimizeSort(n *LogicalSort) (PhysicalNode, error) {
 	return &PhysSort{
 		Keys: n.Keys, Child: child,
 		Estimate: PlanCost{Startup: childCost.Total + sortCost, Total: childCost.Total + sortCost, Rows: rows, Width: childCost.Width},
+	}, nil
+}
+
+func (o *Optimizer) optimizeAggregate(n *LogicalAggregate) (PhysicalNode, error) {
+	child, err := o.optimize(n.Child)
+	if err != nil {
+		return nil, err
+	}
+	return &PhysAggregate{
+		GroupExprs: n.GroupExprs,
+		AggDescs:   n.AggDescs,
+		Child:      child,
 	}, nil
 }
 

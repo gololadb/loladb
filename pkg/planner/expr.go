@@ -306,6 +306,24 @@ func (e *ExprIsNull) Eval(row *Row) (tuple.Datum, error) {
 	return tuple.DBool(isNull), nil
 }
 
+// ExprAggRef references an aggregate result by index. During execution,
+// the aggregate node outputs rows where group-by columns come first,
+// followed by aggregate results. ExprAggRef reads the aggregate value
+// at offset NumGroupExprs + AggIndex.
+type ExprAggRef struct {
+	AggIndex      int // index into the aggregate descriptor list
+	NumGroupExprs int // number of group-by columns (set by optimizer)
+}
+
+func (e *ExprAggRef) String() string { return fmt.Sprintf("agg[%d]", e.AggIndex) }
+func (e *ExprAggRef) Eval(row *Row) (tuple.Datum, error) {
+	idx := e.NumGroupExprs + e.AggIndex
+	if idx >= 0 && idx < len(row.Columns) {
+		return row.Columns[idx], nil
+	}
+	return tuple.DNull(), nil
+}
+
 // ExprCast represents a type cast expression (e.g., expr::integer).
 type ExprCast struct {
 	Inner      Expr

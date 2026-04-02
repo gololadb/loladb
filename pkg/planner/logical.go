@@ -462,6 +462,38 @@ func (n *LogicalDropSchema) String() string         { return fmt.Sprintf("DropSc
 func (n *LogicalDropSchema) OutputColumns() []string { return nil }
 
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
+// LogicalAggregate groups input rows and computes aggregate functions.
+type LogicalAggregate struct {
+	GroupExprs []Expr    // GROUP BY expressions (empty = single group)
+	AggDescs   []AggDesc // aggregate function descriptors
+	Child      LogicalNode
+}
+
+// AggDesc describes a single aggregate computation.
+type AggDesc struct {
+	Func     string // "count", "sum", "avg", "min", "max"
+	ArgExprs []Expr // argument expressions (empty for count(*))
+	Star     bool   // true for count(*)
+	Distinct bool
+}
+
+func (n *LogicalAggregate) String() string { return "Aggregate" }
+func (n *LogicalAggregate) OutputColumns() []string {
+	// Output columns: group-by columns + aggregate results.
+	var cols []string
+	for i := range n.GroupExprs {
+		cols = append(cols, fmt.Sprintf("group%d", i))
+	}
+	for i, ad := range n.AggDescs {
+		if ad.Star {
+			cols = append(cols, fmt.Sprintf("%s_%d", ad.Func, i))
+		} else {
+			cols = append(cols, fmt.Sprintf("%s_%d", ad.Func, i))
+		}
+	}
+	return cols
+}
+
 type LogicalResult struct {
 	Exprs []Expr
 	Names []string

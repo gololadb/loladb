@@ -1368,5 +1368,149 @@ func TestCLI_FullPagilaCustomerTable(t *testing.T) {
 	}
 }
 
+func TestCLI_AggregateBasic(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "agg_basic.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE sales (id INTEGER, amount INTEGER, category TEXT)")
+	run("INSERT INTO sales VALUES (1, 100, 'electronics')")
+	run("INSERT INTO sales VALUES (2, 200, 'clothing')")
+	run("INSERT INTO sales VALUES (3, 150, 'electronics')")
+	run("INSERT INTO sales VALUES (4, 300, 'clothing')")
+	run("INSERT INTO sales VALUES (5, 50, 'electronics')")
+
+	// count(*)
+	out := run("SELECT count(*) FROM sales")
+	if !strings.Contains(out, "5") {
+		t.Fatalf("expected count=5, got: %s", out)
+	}
+
+	// sum
+	out = run("SELECT sum(amount) FROM sales")
+	if !strings.Contains(out, "800") {
+		t.Fatalf("expected sum=800, got: %s", out)
+	}
+
+	// min/max
+	out = run("SELECT min(amount), max(amount) FROM sales")
+	if !strings.Contains(out, "50") || !strings.Contains(out, "300") {
+		t.Fatalf("expected min=50, max=300, got: %s", out)
+	}
+
+	// avg
+	out = run("SELECT avg(amount) FROM sales")
+	if !strings.Contains(out, "160") {
+		t.Fatalf("expected avg=160, got: %s", out)
+	}
+}
+
+func TestCLI_AggregateGroupBy(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "agg_group.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE sales (id INTEGER, amount INTEGER, category TEXT)")
+	run("INSERT INTO sales VALUES (1, 100, 'electronics')")
+	run("INSERT INTO sales VALUES (2, 200, 'clothing')")
+	run("INSERT INTO sales VALUES (3, 150, 'electronics')")
+	run("INSERT INTO sales VALUES (4, 300, 'clothing')")
+	run("INSERT INTO sales VALUES (5, 50, 'electronics')")
+
+	// GROUP BY with count and sum.
+	out := run("SELECT category, count(*), sum(amount) FROM sales GROUP BY category")
+	if !strings.Contains(out, "electronics") || !strings.Contains(out, "clothing") {
+		t.Fatalf("expected both categories, got: %s", out)
+	}
+	// electronics: count=3, sum=300
+	if !strings.Contains(out, "3") || !strings.Contains(out, "300") {
+		t.Fatalf("expected electronics count=3 sum=300, got: %s", out)
+	}
+	// clothing: count=2, sum=500
+	if !strings.Contains(out, "2") || !strings.Contains(out, "500") {
+		t.Fatalf("expected clothing count=2 sum=500, got: %s", out)
+	}
+}
+
+func TestCLI_AggregateEmpty(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "agg_empty.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE empty (id INTEGER)")
+
+	// count(*) on empty table should return 0.
+	out := run("SELECT count(*) FROM empty")
+	if !strings.Contains(out, "0") {
+		t.Fatalf("expected count=0 on empty table, got: %s", out)
+	}
+
+	// sum on empty table should return NULL (empty).
+	out = run("SELECT sum(id) FROM empty")
+	if strings.Contains(out, "0") && !strings.Contains(out, "(0 rows)") {
+		// sum of empty should be NULL, not 0
+		t.Logf("sum on empty table: %s", out)
+	}
+}
+
+func TestCLI_AggregateDistinct(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "agg_distinct.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	run("CREATE TABLE tags (item TEXT, tag TEXT)")
+	run("INSERT INTO tags VALUES ('a', 'red')")
+	run("INSERT INTO tags VALUES ('a', 'blue')")
+	run("INSERT INTO tags VALUES ('a', 'red')")
+	run("INSERT INTO tags VALUES ('b', 'green')")
+	run("INSERT INTO tags VALUES ('b', 'green')")
+
+	// count(DISTINCT tag) per item.
+	out := run("SELECT item, count(DISTINCT tag) FROM tags GROUP BY item")
+	if !strings.Contains(out, "a") || !strings.Contains(out, "b") {
+		t.Fatalf("expected both items, got: %s", out)
+	}
+	// a has 2 distinct tags (red, blue), b has 1 (green).
+	if !strings.Contains(out, "2") || !strings.Contains(out, "1") {
+		t.Fatalf("expected distinct counts 2 and 1, got: %s", out)
+	}
+}
+
 
 

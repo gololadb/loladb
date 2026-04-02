@@ -199,6 +199,8 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execHashJoin(n)
 	case *planner.PhysLimit:
 		return ex.execLimit(n)
+	case *planner.PhysAggregate:
+		return ex.execAggregate(n)
 	case *planner.PhysSort:
 		return ex.execSort(n)
 	case *planner.PhysInsert:
@@ -782,6 +784,219 @@ func (ex *Executor) execLimit(n *planner.PhysLimit) (*Result, error) {
 	}
 	result.Rows = child.Rows[start:end]
 	return result, nil
+}
+
+// execAggregate implements hash-based aggregation. It reads all rows
+// from the child, groups them by the GROUP BY expressions, and
+// computes aggregate functions for each group.
+func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
+	child, err := ex.Execute(n.Child)
+	if err != nil {
+		return nil, err
+	}
+
+	type aggState struct {
+		count int64
+		sum   float64
+		hasVal bool
+		min   tuple.Datum
+		max   tuple.Datum
+		vals  []tuple.Datum // for DISTINCT
+	}
+
+	type groupEntry struct {
+		groupKey []tuple.Datum
+		aggs     []aggState
+	}
+
+	// Use ordered slice of groups to preserve insertion order.
+	var groups []*groupEntry
+	groupIndex := map[string]*groupEntry{} // hash key → entry
+
+	for _, row := range child.Rows {
+		r := &planner.Row{Columns: row, Names: child.Columns}
+
+		// Compute group key.
+		groupKey := make([]tuple.Datum, len(n.GroupExprs))
+		var keyBuf strings.Builder
+		for i, expr := range n.GroupExprs {
+			val, err := expr.Eval(r)
+			if err != nil {
+				return nil, err
+			}
+			groupKey[i] = val
+			if i > 0 {
+				keyBuf.WriteByte(0)
+			}
+			keyBuf.WriteString(datumHashKey(val))
+		}
+		hashKey := keyBuf.String()
+
+		entry, ok := groupIndex[hashKey]
+		if !ok {
+			entry = &groupEntry{
+				groupKey: groupKey,
+				aggs:     make([]aggState, len(n.AggDescs)),
+			}
+			groups = append(groups, entry)
+			groupIndex[hashKey] = entry
+		}
+
+		// Feed row into each aggregate.
+		for i, ad := range n.AggDescs {
+			st := &entry.aggs[i]
+			if ad.Star {
+				// count(*)
+				st.count++
+				continue
+			}
+			if len(ad.ArgExprs) == 0 {
+				st.count++
+				continue
+			}
+			val, err := ad.ArgExprs[0].Eval(r)
+			if err != nil {
+				return nil, err
+			}
+			// Skip NULLs for all aggregates except count(*).
+			if val.Type == tuple.TypeNull {
+				continue
+			}
+
+			// DISTINCT: track values and skip duplicates.
+			if ad.Distinct {
+				dup := false
+				for _, prev := range st.vals {
+					if planner.CompareDatums(prev, val) == 0 {
+						dup = true
+						break
+					}
+				}
+				if dup {
+					continue
+				}
+				st.vals = append(st.vals, val)
+			}
+
+			st.count++
+			switch ad.Func {
+			case "sum", "avg":
+				st.sum += datumToFloat64(val)
+			case "min":
+				if !st.hasVal || planner.CompareDatums(val, st.min) < 0 {
+					st.min = val
+				}
+			case "max":
+				if !st.hasVal || planner.CompareDatums(val, st.max) > 0 {
+					st.max = val
+				}
+			}
+			st.hasVal = true
+		}
+	}
+
+	// If no rows and no GROUP BY, produce a single row with default agg values.
+	if len(groups) == 0 && len(n.GroupExprs) == 0 {
+		entry := &groupEntry{
+			groupKey: nil,
+			aggs:     make([]aggState, len(n.AggDescs)),
+		}
+		groups = append(groups, entry)
+	}
+
+	// Build output columns: group columns + aggregate results.
+	// For group-by columns, use the child's column name if the
+	// expression is a simple column reference, so the Project above
+	// can resolve references by name.
+	var outCols []string
+	for _, expr := range n.GroupExprs {
+		name := expr.String()
+		// Try to match against child column names for better resolution.
+		if ec, ok := expr.(*planner.ExprColumn); ok {
+			for _, cn := range child.Columns {
+				bare := cn
+				if idx := strings.LastIndex(cn, "."); idx >= 0 {
+					bare = cn[idx+1:]
+				}
+				if strings.EqualFold(bare, ec.Column) {
+					name = cn
+					break
+				}
+			}
+		}
+		outCols = append(outCols, name)
+	}
+	for i, ad := range n.AggDescs {
+		outCols = append(outCols, fmt.Sprintf("%s_%d", ad.Func, i))
+	}
+
+	result := &Result{Columns: outCols}
+	for _, entry := range groups {
+		var row []tuple.Datum
+		// Group-by columns first.
+		row = append(row, entry.groupKey...)
+		// Then aggregate results.
+		for i, ad := range n.AggDescs {
+			st := &entry.aggs[i]
+			switch ad.Func {
+			case "count":
+				row = append(row, tuple.DInt64(st.count))
+			case "sum":
+				if st.count == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, tuple.DFloat64(st.sum))
+				}
+			case "avg":
+				if st.count == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, tuple.DFloat64(st.sum/float64(st.count)))
+				}
+			case "min":
+				if !st.hasVal {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, st.min)
+				}
+			case "max":
+				if !st.hasVal {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, st.max)
+				}
+			case "bool_and", "every":
+				if !st.hasVal {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, st.min) // min of bools = AND
+				}
+			case "bool_or":
+				if !st.hasVal {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, st.max) // max of bools = OR
+				}
+			default:
+				row = append(row, tuple.DNull())
+			}
+		}
+		result.Rows = append(result.Rows, row)
+	}
+	return result, nil
+}
+
+func datumToFloat64(d tuple.Datum) float64 {
+	switch d.Type {
+	case tuple.TypeInt32:
+		return float64(d.I32)
+	case tuple.TypeInt64:
+		return float64(d.I64)
+	case tuple.TypeFloat64:
+		return d.F64
+	default:
+		return 0
+	}
 }
 
 func (ex *Executor) execSort(n *planner.PhysSort) (*Result, error) {

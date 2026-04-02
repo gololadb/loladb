@@ -63,6 +63,32 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 		}
 	}
 
+	// Aggregate node (GROUP BY / aggregate functions).
+	if q.HasAggs || len(q.GroupClause) > 0 {
+		var groupExprs []Expr
+		for _, g := range q.GroupClause {
+			groupExprs = append(groupExprs, analyzedToExpr(g, q.RangeTable))
+		}
+		var aggDescs []AggDesc
+		for _, ref := range q.AggRefs {
+			var argExprs []Expr
+			for _, a := range ref.Args {
+				argExprs = append(argExprs, analyzedToExpr(a, q.RangeTable))
+			}
+			aggDescs = append(aggDescs, AggDesc{
+				Func:     ref.AggFunc,
+				ArgExprs: argExprs,
+				Star:     ref.Star,
+				Distinct: ref.Distinct,
+			})
+		}
+		plan = &LogicalAggregate{
+			GroupExprs: groupExprs,
+			AggDescs:   aggDescs,
+			Child:      plan,
+		}
+	}
+
 	// Target list → Project (unless it's SELECT *).
 	if !isSelectStar(q.TargetList, q.RangeTable) {
 		var exprs []Expr
@@ -70,6 +96,16 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 		for _, te := range q.TargetList {
 			exprs = append(exprs, analyzedToExpr(te.Expr, q.RangeTable))
 			names = append(names, te.Name)
+		}
+		// When there's an aggregate below, patch expressions:
+		// - ExprAggRef: set NumGroupExprs so they read from the right offset
+		// - ExprColumn: reset Index to -1 to force name-based lookup
+		//   (the aggregate output has a different column layout)
+		if q.HasAggs || len(q.GroupClause) > 0 {
+			numGroups := len(q.GroupClause)
+			for _, expr := range exprs {
+				patchAggExprs(expr, numGroups)
+			}
 		}
 		plan = &LogicalProject{Exprs: exprs, Names: names, Child: plan}
 	}
@@ -339,6 +375,8 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 			Child: analyzedToExpr(e.Arg, rtes),
 			Not:   e.IsNot,
 		}
+	case *AggRef:
+		return &ExprAggRef{AggIndex: e.AggIndex, NumGroupExprs: 0} // patched by queryToSelectPlan
 	case *TypeCastExpr:
 		return &ExprCast{
 			Inner:      analyzedToExpr(e.Arg, rtes),
@@ -453,6 +491,33 @@ func splitQualified(name string) []string {
 
 func equalFold(a, b string) bool {
 	return len(a) == len(b) && (a == b || foldEqual(a, b))
+}
+
+// patchAggExprs patches expressions in a Project that sits above an
+// Aggregate node:
+// - ExprAggRef: sets NumGroupExprs so they read from the right offset
+// - ExprColumn: resets Index to -1 to force name-based lookup (the
+//   aggregate output has a different column layout than the scan)
+func patchAggExprs(expr Expr, numGroupExprs int) {
+	switch e := expr.(type) {
+	case *ExprAggRef:
+		e.NumGroupExprs = numGroupExprs
+	case *ExprColumn:
+		e.Index = -1
+	case *ExprBinOp:
+		patchAggExprs(e.Left, numGroupExprs)
+		patchAggExprs(e.Right, numGroupExprs)
+	case *ExprNot:
+		patchAggExprs(e.Child, numGroupExprs)
+	case *ExprIsNull:
+		patchAggExprs(e.Child, numGroupExprs)
+	case *ExprFunc:
+		for _, a := range e.Args {
+			patchAggExprs(a, numGroupExprs)
+		}
+	case *ExprCast:
+		patchAggExprs(e.Inner, numGroupExprs)
+	}
 }
 
 func foldEqual(a, b string) bool {

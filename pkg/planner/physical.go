@@ -267,6 +267,17 @@ func (n *PhysCreateIndex) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysCreateIndex) Children() []PhysicalNode  { return nil }
 
 // PhysNoOp is a physical node that produces a message but does no real work.
+// PhysAggregate performs hash-based aggregation.
+type PhysAggregate struct {
+	GroupExprs []Expr    // GROUP BY expressions
+	AggDescs   []AggDesc // aggregate descriptors
+	Child      PhysicalNode
+}
+
+func (n *PhysAggregate) String() string           { return "HashAggregate" }
+func (n *PhysAggregate) Cost() PlanCost           { return PlanCost{} }
+func (n *PhysAggregate) Children() []PhysicalNode { return []PhysicalNode{n.Child} }
+
 type PhysNoOp struct {
 	Message string
 }

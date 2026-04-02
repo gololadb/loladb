@@ -230,7 +230,29 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		return nil, err
 	}
 
-	// Step 4: Transform ORDER BY.
+	// Step 4: Transform GROUP BY.
+	if len(n.GroupClause) > 0 {
+		for _, g := range n.GroupClause {
+			expr, err := a.transformExpr(g)
+			if err != nil {
+				return nil, fmt.Errorf("analyzer: GROUP BY: %w", err)
+			}
+			q.GroupClause = append(q.GroupClause, expr)
+		}
+	}
+
+	// Step 5: Collect aggregate references from the target list.
+	for _, te := range q.TargetList {
+		collectAggRefs(te.Expr, &q.AggRefs)
+	}
+	if len(q.AggRefs) > 0 {
+		q.HasAggs = true
+		for i, ref := range q.AggRefs {
+			ref.AggIndex = i
+		}
+	}
+
+	// Step 6: Transform ORDER BY.
 	// Mirrors transformSortClause().
 	if len(n.SortClause) > 0 {
 		for _, sb := range n.SortClause {
@@ -245,7 +267,7 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		}
 	}
 
-	// Step 5: Transform LIMIT/OFFSET.
+	// Step 7: Transform LIMIT/OFFSET.
 	if n.LimitCount != nil {
 		q.LimitCount, err = a.transformExpr(n.LimitCount)
 		if err != nil {
@@ -1000,6 +1022,21 @@ func exprString(expr parser.Expr) string {
 		default:
 			return e.Val.Str
 		}
+	case *parser.FuncCall:
+		name := ""
+		if len(e.Funcname) > 0 {
+			name = e.Funcname[len(e.Funcname)-1]
+		}
+		if e.AggStar {
+			return name + "(*)"
+		}
+		var args []string
+		for _, arg := range e.Args {
+			args = append(args, exprString(arg))
+		}
+		return name + "(" + strings.Join(args, ", ") + ")"
+	case *parser.TypeCast:
+		return exprString(e.Arg) + "::" + typeNameToString(e.TypeName)
 	default:
 		return fmt.Sprintf("%v", expr)
 	}
@@ -1617,6 +1654,44 @@ func (a *Analyzer) transformCreateSchemaStmt(n *parser.CreateSchemaStmt) (*Query
 	}), nil
 }
 
+// collectAggRefs walks an analyzed expression tree and appends any
+// AggRef nodes found to the provided slice.
+func collectAggRefs(expr AnalyzedExpr, refs *[]*AggRef) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *AggRef:
+		*refs = append(*refs, e)
+	case *OpExpr:
+		collectAggRefs(e.Left, refs)
+		collectAggRefs(e.Right, refs)
+	case *BoolExprNode:
+		for _, a := range e.Args {
+			collectAggRefs(a, refs)
+		}
+	case *NullTestExpr:
+		collectAggRefs(e.Arg, refs)
+	case *FuncCallExpr:
+		for _, a := range e.Args {
+			collectAggRefs(a, refs)
+		}
+	case *TypeCastExpr:
+		collectAggRefs(e.Arg, refs)
+	}
+}
+
+// isAggregateFunc returns true if the function name is a known aggregate.
+func isAggregateFunc(name string) bool {
+	switch strings.ToLower(name) {
+	case "count", "sum", "avg", "min", "max",
+		"bool_and", "bool_or", "every",
+		"string_agg", "array_agg":
+		return true
+	}
+	return false
+}
+
 // transformFuncCall resolves a function call expression.
 func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 	// Get the unqualified function name.
@@ -1633,6 +1708,43 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 			return nil, err
 		}
 		args = append(args, resolved)
+	}
+
+	// Aggregate functions produce AggRef nodes.
+	if isAggregateFunc(name) {
+		var retType tuple.DatumType
+		switch name {
+		case "count":
+			retType = tuple.TypeInt64
+		case "sum":
+			if len(args) > 0 {
+				retType = args[0].ResultType()
+			} else {
+				retType = tuple.TypeInt64
+			}
+		case "avg":
+			retType = tuple.TypeFloat64
+		case "min", "max":
+			if len(args) > 0 {
+				retType = args[0].ResultType()
+			} else {
+				retType = tuple.TypeText
+			}
+		case "bool_and", "bool_or", "every":
+			retType = tuple.TypeBool
+		case "string_agg":
+			retType = tuple.TypeText
+		default:
+			retType = tuple.TypeText
+		}
+		return &AggRef{
+			AggFunc:   name,
+			Args:      args,
+			Star:      f.AggStar,
+			Distinct:  f.AggDistinct,
+			AggIndex:  -1, // set later by the planner
+			ReturnTyp: retType,
+		}, nil
 	}
 
 	// Determine return type based on function name.
