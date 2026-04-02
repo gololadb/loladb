@@ -276,6 +276,8 @@ func (interp *Interpreter) execStmt(sc *scope, stmt plparser.Stmt) error {
 		return interp.execPerform(sc, s)
 	case *plparser.StmtBlock:
 		return interp.execBlock(sc, s)
+	case *plparser.StmtDynExecute:
+		return interp.execDynExecute(sc, s)
 	case *plparser.StmtNull:
 		return nil
 	default:
@@ -499,6 +501,10 @@ func (interp *Interpreter) execReturn(sc *scope, s *plparser.StmtReturn) error {
 
 func (interp *Interpreter) execRaise(sc *scope, s *plparser.StmtRaise) error {
 	msg := s.Message
+	// The parser re-quotes string literals, so strip surrounding quotes.
+	if len(msg) >= 2 && msg[0] == '\'' && msg[len(msg)-1] == '\'' {
+		msg = strings.ReplaceAll(msg[1:len(msg)-1], "''", "'")
+	}
 	// Substitute % placeholders with parameter values.
 	for _, param := range s.Params {
 		val, err := interp.evalExpr(sc, param)
@@ -541,6 +547,33 @@ func (interp *Interpreter) execPerform(sc *scope, s *plparser.StmtPerform) error
 	sql := "SELECT " + interp.substituteVars(sc, s.Expr)
 	_, err := interp.execSQL(sql)
 	return err
+}
+
+func (interp *Interpreter) execDynExecute(sc *scope, s *plparser.StmtDynExecute) error {
+	// Evaluate the query expression to get the SQL string.
+	queryVal, err := interp.evalExpr(sc, s.Query)
+	if err != nil {
+		return fmt.Errorf("plpgsql: EXECUTE expression error: %w", err)
+	}
+	sql := datumToString(queryVal)
+
+	// TODO: handle USING params by substituting $1, $2, etc.
+
+	result, err := interp.execSQL(sql)
+	if err != nil {
+		return fmt.Errorf("plpgsql: EXECUTE error: %w", err)
+	}
+
+	if s.Into && s.Target != "" && len(result.Rows) > 0 {
+		targets := strings.Split(s.Target, ",")
+		for i, t := range targets {
+			t = strings.TrimSpace(t)
+			if i < len(result.Rows[0]) {
+				sc.set(t, result.Rows[0][i])
+			}
+		}
+	}
+	return nil
 }
 
 // evalExpr evaluates a PL/pgSQL expression by wrapping it in SELECT and executing.

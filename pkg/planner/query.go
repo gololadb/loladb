@@ -264,6 +264,8 @@ const (
 	UtilRevokePrivilege
 	UtilCreateFunction
 	UtilCreateTrigger
+	UtilDropFunction
+	UtilDropTrigger
 	UtilNoOp
 )
 

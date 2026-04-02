@@ -281,6 +281,26 @@ func TestExecFunction_WithParams(t *testing.T) {
 	}
 }
 
+func TestExecFunction_DynExecute(t *testing.T) {
+	interp := New(mockExecSQL())
+	result, err := interp.ExecFunction(`
+		DECLARE
+			sql_text text;
+			val integer;
+		BEGIN
+			sql_text := 'SELECT 42';
+			EXECUTE sql_text INTO val;
+			RETURN val;
+		END
+	`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Value.I32 != 42 {
+		t.Fatalf("expected 42, got %v", result.Value)
+	}
+}
+
 func TestExecTrigger_ModifyNew(t *testing.T) {
 	interp := New(mockExecSQL())
 	td := &TriggerData{

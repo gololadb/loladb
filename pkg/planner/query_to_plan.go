@@ -227,6 +227,10 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 			Timing: u.TrigTiming, Events: u.TrigEvents, ForEach: u.TrigForEach,
 			Replace: u.TrigReplace,
 		}, nil
+	case UtilDropFunction:
+		return &LogicalDropFunction{Name: u.FuncName, MissingOk: u.DropMissingOk}, nil
+	case UtilDropTrigger:
+		return &LogicalDropTrigger{TrigName: u.TrigName, Table: u.TrigTable, MissingOk: u.DropMissingOk}, nil
 	case UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:

@@ -369,6 +369,25 @@ type LogicalCreateTrigger struct {
 func (n *LogicalCreateTrigger) String() string         { return fmt.Sprintf("CreateTrigger(%s ON %s)", n.TrigName, n.Table) }
 func (n *LogicalCreateTrigger) OutputColumns() []string { return nil }
 
+// LogicalDropFunction represents DROP FUNCTION.
+type LogicalDropFunction struct {
+	Name      string
+	MissingOk bool
+}
+
+func (n *LogicalDropFunction) String() string         { return fmt.Sprintf("DropFunction(%s)", n.Name) }
+func (n *LogicalDropFunction) OutputColumns() []string { return nil }
+
+// LogicalDropTrigger represents DROP TRIGGER ... ON table.
+type LogicalDropTrigger struct {
+	TrigName  string
+	Table     string
+	MissingOk bool
+}
+
+func (n *LogicalDropTrigger) String() string         { return fmt.Sprintf("DropTrigger(%s ON %s)", n.TrigName, n.Table) }
+func (n *LogicalDropTrigger) OutputColumns() []string { return nil }
+
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
 type LogicalResult struct {
 	Exprs []Expr

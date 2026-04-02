@@ -445,6 +445,27 @@ func (n *PhysCreateTrigger) String() string            { return fmt.Sprintf("Cre
 func (n *PhysCreateTrigger) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysCreateTrigger) Children() []PhysicalNode  { return nil }
 
+// PhysDropFunction represents DROP FUNCTION.
+type PhysDropFunction struct {
+	Name      string
+	MissingOk bool
+}
+
+func (n *PhysDropFunction) String() string            { return fmt.Sprintf("DropFunction %s", n.Name) }
+func (n *PhysDropFunction) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropFunction) Children() []PhysicalNode  { return nil }
+
+// PhysDropTrigger represents DROP TRIGGER ... ON table.
+type PhysDropTrigger struct {
+	TrigName  string
+	Table     string
+	MissingOk bool
+}
+
+func (n *PhysDropTrigger) String() string            { return fmt.Sprintf("DropTrigger %s ON %s", n.TrigName, n.Table) }
+func (n *PhysDropTrigger) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropTrigger) Children() []PhysicalNode  { return nil }
+
 // PhysResult produces a single row by evaluating expressions (SELECT without FROM).
 type PhysResult struct {
 	Exprs []Expr

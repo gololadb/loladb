@@ -238,6 +238,10 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execCreateFunction(n)
 	case *planner.PhysCreateTrigger:
 		return ex.execCreateTrigger(n)
+	case *planner.PhysDropFunction:
+		return ex.execDropFunction(n)
+	case *planner.PhysDropTrigger:
+		return ex.execDropTrigger(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
 	default:
@@ -801,6 +805,12 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 	colNames := ex.getTableColNames(n.Table)
 	hasTriggers := len(ex.Cat.GetTableTriggers(n.Table)) > 0 && ex.TriggerExec != nil
 
+	if hasTriggers {
+		if err := ex.fireStatementTriggers(n.Table, catalog.TrigBefore, catalog.TrigInsert); err != nil {
+			return nil, err
+		}
+	}
+
 	var count int64
 	for _, rowExprs := range n.Values {
 		values := make([]tuple.Datum, len(rowExprs))
@@ -839,6 +849,13 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 			}
 		}
 	}
+
+	if hasTriggers {
+		if err := ex.fireStatementTriggers(n.Table, catalog.TrigAfter, catalog.TrigInsert); err != nil {
+			return nil, err
+		}
+	}
+
 	return &Result{RowsAffected: count, Message: fmt.Sprintf("INSERT 0 %d", count)}, nil
 }
 
@@ -858,6 +875,12 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 
 	colNames := ex.getTableColNames(n.Table)
 	hasTriggers := len(ex.Cat.GetTableTriggers(n.Table)) > 0 && ex.TriggerExec != nil
+
+	if hasTriggers {
+		if err := ex.fireStatementTriggers(n.Table, catalog.TrigBefore, catalog.TrigDelete); err != nil {
+			return nil, err
+		}
+	}
 
 	type deleteTarget struct {
 		id  slottedpage.ItemID
@@ -895,6 +918,12 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 		}
 	}
 
+	if hasTriggers {
+		if err := ex.fireStatementTriggers(n.Table, catalog.TrigAfter, catalog.TrigDelete); err != nil {
+			return nil, err
+		}
+	}
+
 	return &Result{RowsAffected: int64(len(toDelete)), Message: fmt.Sprintf("DELETE %d", len(toDelete))}, nil
 }
 
@@ -914,6 +943,12 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 
 	colNames := ex.getTableColNames(n.Table)
 	hasTriggers := len(ex.Cat.GetTableTriggers(n.Table)) > 0 && ex.TriggerExec != nil
+
+	if hasTriggers {
+		if err := ex.fireStatementTriggers(n.Table, catalog.TrigBefore, catalog.TrigUpdate); err != nil {
+			return nil, err
+		}
+	}
 
 	type target struct {
 		id  slottedpage.ItemID
@@ -970,6 +1005,12 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 			if _, err := ex.fireTriggers(n.Table, catalog.TrigAfter, catalog.TrigUpdate, colNames, newMap, oldMap); err != nil {
 				return nil, err
 			}
+		}
+	}
+
+	if hasTriggers {
+		if err := ex.fireStatementTriggers(n.Table, catalog.TrigAfter, catalog.TrigUpdate); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1322,9 +1363,19 @@ func (ex *Executor) execRevokePrivilege(n *planner.PhysRevokePrivilege) (*Result
 }
 
 
-// fireTriggers fires matching triggers for a table/event/timing combination.
+// fireTriggers fires matching ROW-level triggers for a table/event/timing combination.
 // For BEFORE ROW triggers on INSERT/UPDATE, returns the (possibly modified) NEW row.
 func (ex *Executor) fireTriggers(tableName string, timing int, event int, colNames []string, newRow, oldRow map[string]tuple.Datum) (map[string]tuple.Datum, error) {
+	return ex.fireTriggersLevel(tableName, timing, event, "ROW", colNames, newRow, oldRow)
+}
+
+// fireStatementTriggers fires matching STATEMENT-level triggers.
+func (ex *Executor) fireStatementTriggers(tableName string, timing int, event int) error {
+	_, err := ex.fireTriggersLevel(tableName, timing, event, "STATEMENT", nil, nil, nil)
+	return err
+}
+
+func (ex *Executor) fireTriggersLevel(tableName string, timing int, event int, level string, colNames []string, newRow, oldRow map[string]tuple.Datum) (map[string]tuple.Datum, error) {
 	if ex.TriggerExec == nil {
 		return newRow, nil
 	}
@@ -1353,6 +1404,9 @@ func (ex *Executor) fireTriggers(tableName string, timing int, event int, colNam
 		if trig.Timing&timing == 0 || trig.Events&event == 0 {
 			continue
 		}
+		if trig.ForEach != level {
+			continue
+		}
 		fn := ex.Cat.FindFunctionByOID(trig.FuncOID)
 		if fn == nil {
 			continue
@@ -1374,7 +1428,7 @@ func (ex *Executor) fireTriggers(tableName string, timing int, event int, colNam
 			return nil, fmt.Errorf("trigger %q: %w", trig.Name, err)
 		}
 		// BEFORE ROW triggers can modify NEW.
-		if timing == catalog.TrigBefore && modifiedNew != nil {
+		if level == "ROW" && timing == catalog.TrigBefore && modifiedNew != nil {
 			currentNew = modifiedNew
 		}
 	}
@@ -1463,6 +1517,20 @@ func (ex *Executor) execCreateTrigger(n *planner.PhysCreateTrigger) (*Result, er
 		return nil, err
 	}
 	return &Result{Message: fmt.Sprintf("CREATE TRIGGER %s", n.TrigName)}, nil
+}
+
+func (ex *Executor) execDropFunction(n *planner.PhysDropFunction) (*Result, error) {
+	if err := ex.Cat.DropFunction(n.Name, n.MissingOk); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "DROP FUNCTION"}, nil
+}
+
+func (ex *Executor) execDropTrigger(n *planner.PhysDropTrigger) (*Result, error) {
+	if err := ex.Cat.DropTrigger(n.TrigName, n.Table, n.MissingOk); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "DROP TRIGGER"}, nil
 }
 
 func (ex *Executor) execResult(n *planner.PhysResult) (*Result, error) {

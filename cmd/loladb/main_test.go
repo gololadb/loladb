@@ -407,3 +407,106 @@ func TestCLI_Triggers(t *testing.T) {
 		t.Fatalf("expected price=60 (doubled from 30), got: %s", out)
 	}
 }
+
+func TestCLI_StatementTriggers(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "stmt_triggers.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+
+	// Create main table and audit log table.
+	run("CREATE TABLE orders (id INTEGER, amount INTEGER)")
+	run("CREATE TABLE audit_log (entry TEXT)")
+
+	// Create a STATEMENT-level trigger function that logs to audit_log.
+	run(`CREATE FUNCTION log_insert() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN INSERT INTO audit_log VALUES (''insert on orders''); RETURN NULL; END'`)
+
+	// Create AFTER STATEMENT trigger (no FOR EACH ROW = STATEMENT level).
+	run("CREATE TRIGGER trg_log AFTER INSERT ON orders EXECUTE FUNCTION log_insert()")
+
+	// Insert rows — the statement trigger should fire once per statement.
+	run("INSERT INTO orders VALUES (1, 100)")
+	run("INSERT INTO orders VALUES (2, 200)")
+
+	// Verify audit log has entries (one per INSERT statement).
+	out := run("SELECT * FROM audit_log")
+	count := strings.Count(out, "insert on orders")
+	if count != 2 {
+		t.Fatalf("expected 2 audit log entries (one per INSERT statement), got %d: %s", count, out)
+	}
+
+	// Verify the orders table is unaffected (STATEMENT triggers don't modify rows).
+	out = run("SELECT * FROM orders")
+	if !strings.Contains(out, "100") || !strings.Contains(out, "200") {
+		t.Fatalf("expected orders with amounts 100 and 200, got: %s", out)
+	}
+}
+
+func TestCLI_DropFunctionAndTrigger(t *testing.T) {
+	bin := buildBinary(t)
+	dbPath := filepath.Join(t.TempDir(), "drop_test.mcdb")
+	exec.Command(bin, "create", dbPath).Run()
+
+	run := func(sql string) string {
+		t.Helper()
+		out, err := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("SQL failed: %v\nSQL: %s\nOutput: %s", err, sql, out)
+		}
+		return string(out)
+	}
+	runExpectErr := func(sql string) string {
+		t.Helper()
+		out, _ := exec.Command(bin, "exec", dbPath, sql).CombinedOutput()
+		return string(out)
+	}
+
+	// Setup: table, function, trigger.
+	run("CREATE TABLE items (id INTEGER, price INTEGER)")
+	run(`CREATE FUNCTION double_price() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN NEW.price := NEW.price * 2; RETURN NEW; END'`)
+	run("CREATE TRIGGER trg_double BEFORE INSERT ON items FOR EACH ROW EXECUTE FUNCTION double_price()")
+
+	// Verify trigger works.
+	run("INSERT INTO items VALUES (1, 50)")
+	out := run("SELECT * FROM items")
+	if !strings.Contains(out, "100") {
+		t.Fatalf("expected price=100, got: %s", out)
+	}
+
+	// DROP TRIGGER — subsequent inserts should not double.
+	run("DROP TRIGGER trg_double ON items")
+	run("INSERT INTO items VALUES (2, 50)")
+	out = run("SELECT * FROM items")
+	if !strings.Contains(out, "50") {
+		t.Fatalf("expected undoubled price=50 after DROP TRIGGER, got: %s", out)
+	}
+
+	// DROP TRIGGER IF EXISTS on already-dropped trigger — should not error.
+	run("DROP TRIGGER IF EXISTS trg_double ON items")
+
+	// DROP TRIGGER without IF EXISTS on missing trigger — should error.
+	errOut := runExpectErr("DROP TRIGGER trg_double ON items")
+	if !strings.Contains(errOut, "does not exist") {
+		t.Fatalf("expected 'does not exist' error, got: %s", errOut)
+	}
+
+	// DROP FUNCTION.
+	run("DROP FUNCTION double_price")
+
+	// DROP FUNCTION IF EXISTS on already-dropped function — should not error.
+	run("DROP FUNCTION IF EXISTS double_price")
+
+	// DROP FUNCTION without IF EXISTS on missing function — should error.
+	errOut = runExpectErr("DROP FUNCTION double_price")
+	if !strings.Contains(errOut, "does not exist") {
+		t.Fatalf("expected 'does not exist' error, got: %s", errOut)
+	}
+}

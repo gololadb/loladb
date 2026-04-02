@@ -76,6 +76,18 @@ func (fs *funcStore) findByOID(oid int32) *FuncDef {
 	return fs.byOID[oid]
 }
 
+func (fs *funcStore) remove(name string) *FuncDef {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	key := strings.ToLower(name)
+	f := fs.byName[key]
+	if f != nil {
+		delete(fs.byName, key)
+		delete(fs.byOID, f.OID)
+	}
+	return f
+}
+
 // triggerStore holds in-memory trigger definitions.
 type triggerStore struct {
 	mu       sync.RWMutex
@@ -95,6 +107,21 @@ func (ts *triggerStore) add(t *TriggerDef) {
 	defer ts.mu.Unlock()
 	ts.byOID[t.OID] = t
 	ts.byTable[t.TableOID] = append(ts.byTable[t.TableOID], t)
+}
+
+func (ts *triggerStore) removeByName(name string, tableOID int32) *TriggerDef {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	nameLower := strings.ToLower(name)
+	triggers := ts.byTable[tableOID]
+	for i, t := range triggers {
+		if strings.ToLower(t.Name) == nameLower {
+			delete(ts.byOID, t.OID)
+			ts.byTable[tableOID] = append(triggers[:i], triggers[i+1:]...)
+			return t
+		}
+	}
+	return nil
 }
 
 func (ts *triggerStore) forTable(tableOID int32) []*TriggerDef {
@@ -141,6 +168,94 @@ func (c *Catalog) CreateTrigger(t *TriggerDef) error {
 	t.OID = int32(oid)
 	c.Triggers.add(t)
 	return c.persistTrigger(t)
+}
+
+// DropFunction removes a function by name.
+func (c *Catalog) DropFunction(name string, missingOk bool) error {
+	f := c.Funcs.remove(name)
+	if f == nil {
+		if missingOk {
+			return nil
+		}
+		return fmt.Errorf("function %q does not exist", name)
+	}
+	// Remove from pg_proc heap page by rewriting without the dropped function.
+	return c.rewritePgProc()
+}
+
+// DropTrigger removes a trigger by name from a table.
+func (c *Catalog) DropTrigger(trigName, tableName string, missingOk bool) error {
+	rel, err := c.FindRelation(tableName)
+	if err != nil || rel == nil {
+		if missingOk {
+			return nil
+		}
+		return fmt.Errorf("table %q does not exist", tableName)
+	}
+	t := c.Triggers.removeByName(trigName, rel.OID)
+	if t == nil {
+		if missingOk {
+			return nil
+		}
+		return fmt.Errorf("trigger %q on table %q does not exist", trigName, tableName)
+	}
+	return c.rewritePgTrigger()
+}
+
+// rewritePgProc rewrites the pg_proc heap page from the in-memory store.
+func (c *Catalog) rewritePgProc() error {
+	pgProcPage := c.Eng.Super.PgProcPage
+	if pgProcPage == 0 {
+		return nil
+	}
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	var ids []slottedpage.ItemID
+	c.Eng.SeqScan(pgProcPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		ids = append(ids, id)
+		return true
+	})
+	for _, id := range ids {
+		c.Eng.Delete(xid, id)
+	}
+	c.Eng.TxMgr.Commit(xid)
+
+	c.Funcs.mu.RLock()
+	defer c.Funcs.mu.RUnlock()
+	for _, f := range c.Funcs.byOID {
+		if err := c.persistFunction(f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rewritePgTrigger rewrites the pg_trigger heap page from the in-memory store.
+func (c *Catalog) rewritePgTrigger() error {
+	pgTriggerPage := c.Eng.Super.PgTriggerPage
+	if pgTriggerPage == 0 {
+		return nil
+	}
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	var ids []slottedpage.ItemID
+	c.Eng.SeqScan(pgTriggerPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		ids = append(ids, id)
+		return true
+	})
+	for _, id := range ids {
+		c.Eng.Delete(xid, id)
+	}
+	c.Eng.TxMgr.Commit(xid)
+
+	c.Triggers.mu.RLock()
+	defer c.Triggers.mu.RUnlock()
+	for _, t := range c.Triggers.byOID {
+		if err := c.persistTrigger(t); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetTableTriggers returns all triggers for a table.

@@ -84,6 +84,10 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 		return a.transformCreateFunctionStmt(n)
 	case *parser.CreateTrigStmt:
 		return a.transformCreateTrigStmt(n)
+	case *parser.RemoveFuncStmt:
+		return a.transformDropFunctionStmt(n)
+	case *parser.DropStmt:
+		return a.transformDropStmt(n)
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported statement %T", stmt)
 	}
@@ -594,24 +598,36 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 		resultTyp = tuple.TypeBool
 	case "+":
 		op = OpAdd
-		resultTyp = tuple.TypeInt64
+		resultTyp = inferArithType(left, right)
 	case "-":
 		op = OpSub
-		resultTyp = tuple.TypeInt64
+		resultTyp = inferArithType(left, right)
 	case "*":
 		op = OpMul
-		resultTyp = tuple.TypeInt64
+		resultTyp = inferArithType(left, right)
 	case "/":
 		op = OpDiv
-		resultTyp = tuple.TypeInt64
+		resultTyp = inferArithType(left, right)
 	case "%":
 		op = OpMod
-		resultTyp = tuple.TypeInt64
+		resultTyp = inferArithType(left, right)
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported operator %q", opName)
 	}
 
 	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: resultTyp}, nil
+}
+
+// inferArithType returns the result type for an arithmetic operation.
+// If either operand is float64, the result is float64. Otherwise int64
+// (promoting int32 to int64).
+func inferArithType(left, right AnalyzedExpr) tuple.DatumType {
+	lt := left.ResultType()
+	rt := right.ResultType()
+	if lt == tuple.TypeFloat64 || rt == tuple.TypeFloat64 {
+		return tuple.TypeFloat64
+	}
+	return tuple.TypeInt64
 }
 
 // transformBoolExpr resolves AND/OR/NOT expressions.
@@ -1389,4 +1405,38 @@ func (a *Analyzer) transformCreateTrigStmt(n *parser.CreateTrigStmt) (*Query, er
 		TrigForEach: forEach,
 		TrigReplace: n.Replace,
 	}), nil
+}
+
+func (a *Analyzer) transformDropFunctionStmt(n *parser.RemoveFuncStmt) (*Query, error) {
+	name := ""
+	if len(n.Funcname) > 0 {
+		name = n.Funcname[len(n.Funcname)-1]
+	}
+	return a.makeUtilityQuery(UtilDropFunction, &UtilityStmt{
+		Type:          UtilDropFunction,
+		FuncName:      name,
+		DropMissingOk: n.MissingOk,
+	}), nil
+}
+
+func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
+	switch n.RemoveType {
+	case parser.OBJECT_TRIGGER:
+		trigName := ""
+		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
+			trigName = n.Objects[0][len(n.Objects[0])-1]
+		}
+		tableName := ""
+		if len(n.Objects) > 1 && len(n.Objects[1]) > 0 {
+			tableName = n.Objects[1][len(n.Objects[1])-1]
+		}
+		return a.makeUtilityQuery(UtilDropTrigger, &UtilityStmt{
+			Type:          UtilDropTrigger,
+			TrigName:      trigName,
+			TrigTable:     tableName,
+			DropMissingOk: n.MissingOk,
+		}), nil
+	default:
+		return nil, fmt.Errorf("analyzer: unsupported DROP object type %d", n.RemoveType)
+	}
 }
