@@ -293,7 +293,8 @@ func queryToDeletePlan(q *Query) (LogicalNode, error) {
 	for i, c := range rte.Columns {
 		colNames[i] = c.Name
 	}
-	scan := &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames}
+	scan := &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames,
+		SampleMethod: rte.SampleMethod, SamplePercent: rte.SamplePercent}
 	var child LogicalNode = scan
 
 	if q.JoinTree != nil && q.JoinTree.Quals != nil {
@@ -326,7 +327,8 @@ func queryToUpdatePlan(q *Query) (LogicalNode, error) {
 			return nil, err
 		}
 	} else {
-		child = &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames}
+		child = &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames,
+			SampleMethod: rte.SampleMethod, SamplePercent: rte.SamplePercent}
 	}
 
 	if q.JoinTree != nil && q.JoinTree.Quals != nil {
@@ -529,7 +531,8 @@ func joinTreeNodeToPlan(node JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, 
 			}, nil
 		}
 
-		return &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames}, nil
+		return &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames,
+			SampleMethod: rte.SampleMethod, SamplePercent: rte.SamplePercent}, nil
 
 	case *JoinNode:
 		left, err := joinTreeNodeToPlan(n.Left, rtes)

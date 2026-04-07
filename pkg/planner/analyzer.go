@@ -596,6 +596,22 @@ func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 	case *parser.RangeSubselect:
 		return a.transformRangeSubselect(t)
 
+	case *parser.RangeTableSample:
+		// TABLESAMPLE: process the inner relation, then attach sampling info.
+		node, err := a.transformFromItem(t.Relation)
+		if err != nil {
+			return nil, err
+		}
+		// Attach sampling metadata to the RTE.
+		if ref, ok := node.(*RangeTblRef); ok && ref.RTIndex > 0 && ref.RTIndex <= len(a.rangeTable) {
+			rte := a.rangeTable[ref.RTIndex-1]
+			rte.SampleMethod = strings.ToLower(t.Method)
+			if len(t.Args) > 0 {
+				rte.SamplePercent = parser.DeparseExpr(t.Args[0])
+			}
+		}
+		return node, nil
+
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported FROM item %T", item)
 	}
@@ -1346,6 +1362,9 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 		resultTyp = tuple.TypeBool
 	case "^@":
 		op = OpStartsWith
+		resultTyp = tuple.TypeBool
+	case "@@":
+		op = OpTSMatch
 		resultTyp = tuple.TypeBool
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported operator %q", opName)

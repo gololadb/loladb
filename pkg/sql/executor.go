@@ -330,6 +330,16 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execAlterOwnerStmt(ao)
 	}
 
+	// Handle CREATE EXTENSION (accept, no-op).
+	if ce, ok := stmt.(*parser.CreateExtensionStmt); ok {
+		return &Result{Message: fmt.Sprintf("CREATE EXTENSION %s", ce.Extname)}, nil
+	}
+
+	// Handle CREATE TABLESPACE (accept, no-op).
+	if ct, ok := stmt.(*parser.CreateTableSpaceStmt); ok {
+		return &Result{Message: fmt.Sprintf("CREATE TABLESPACE %s", ct.Tablespacename)}, nil
+	}
+
 	// Handle COPY statements (bypass analyzer — COPY is a utility).
 	if cs, ok := stmt.(*parser.CopyStmt); ok {
 		return ex.execCopy(cs)

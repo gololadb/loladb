@@ -171,13 +171,19 @@ func (o *Optimizer) optimizeScan(n *LogicalScan, filter Expr) (PhysicalNode, err
 		// Table not in catalog — may be a CTE self-reference in a recursive query.
 		// Produce a SeqScan with default estimates; the executor resolves it
 		// at runtime via the CTE working table.
+		samplePct := 0.0
+		if n.SamplePercent != "" {
+			fmt.Sscanf(n.SamplePercent, "%f", &samplePct)
+		}
 		return &PhysSeqScan{
-			Table:    n.Table,
-			Alias:    n.Alias,
-			Columns:  n.Columns,
-			HeadPage: 0,
-			Estimate: PlanCost{Total: 10, Rows: 100, Width: 40},
-			Filter:   filter,
+			Table:         n.Table,
+			Alias:         n.Alias,
+			Columns:       n.Columns,
+			HeadPage:      0,
+			Estimate:      PlanCost{Total: 10, Rows: 100, Width: 40},
+			Filter:        filter,
+			SampleMethod:  n.SampleMethod,
+			SamplePercent: samplePct,
 		}, nil
 	}
 	stats, _ := o.Cat.Stats(n.Table)
@@ -205,13 +211,19 @@ func (o *Optimizer) optimizeScan(n *LogicalScan, filter Expr) (PhysicalNode, err
 
 	// SeqScan cost.
 	seqCost := pages*o.Costs.SeqPageCost + tupleCount*o.Costs.CPUTupleCost
+	samplePct := 0.0
+	if n.SamplePercent != "" {
+		fmt.Sscanf(n.SamplePercent, "%f", &samplePct)
+	}
 	node := &PhysSeqScan{
-		Table:    n.Table,
-		Alias:    n.Alias,
-		Columns:  n.Columns,
-		HeadPage: uint32(rel.HeadPage),
-		Estimate: PlanCost{Total: seqCost, Rows: tupleCount, Width: 40},
-		Filter:   filter,
+		Table:         n.Table,
+		Alias:         n.Alias,
+		Columns:       n.Columns,
+		HeadPage:      uint32(rel.HeadPage),
+		Estimate:      PlanCost{Total: seqCost, Rows: tupleCount, Width: 40},
+		Filter:        filter,
+		SampleMethod:  n.SampleMethod,
+		SamplePercent: samplePct,
 	}
 	if filter != nil {
 		// Apply selectivity using column stats when available.

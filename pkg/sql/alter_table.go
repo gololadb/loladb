@@ -140,6 +140,11 @@ func (ex *Executor) tryPreParse(sql string) (*Result, bool) {
 		return r, true
 	}
 
+	// CLUSTER [table [USING index]] — accept as no-op.
+	if reCluster.MatchString(upper) {
+		return &Result{Message: "CLUSTER"}, true
+	}
+
 	// ALTER TABLE ONLY ... — strip ONLY and re-execute.
 	if reAlterTableOnly.MatchString(sql) {
 		stripped := reAlterTableOnly.ReplaceAllString(sql, "ALTER TABLE $1")
@@ -154,6 +159,7 @@ func (ex *Executor) tryPreParse(sql string) (*Result, bool) {
 }
 
 var reAlterTableOnly = regexp.MustCompile(`(?i)^ALTER\s+TABLE\s+ONLY\s+(.+)$`)
+var reCluster = regexp.MustCompile(`(?i)^CLUSTER\b`)
 
 // Regex patterns for ATTACH PARTITION.
 var (

@@ -317,6 +317,7 @@ const (
 	OpArrayContains          // @> (array contains)
 	OpArrayContainedBy       // <@ (array contained by)
 	OpArrayOverlap           // && (array overlap)
+	OpTSMatch                // @@ (full-text search match)
 )
 
 func (op OpKind) String() string {
@@ -399,6 +400,8 @@ func (op OpKind) String() string {
 		return "!~*"
 	case OpStartsWith:
 		return "^@"
+	case OpTSMatch:
+		return "@@"
 	default:
 		return "?"
 	}
@@ -439,6 +442,9 @@ func (e *ExprBinOp) Eval(row *Row) (tuple.Datum, error) {
 	}
 	if e.Op == OpStartsWith {
 		return e.evalStartsWith(row)
+	}
+	if e.Op == OpTSMatch {
+		return e.evalTSMatch(row)
 	}
 	return e.evalComparison(row)
 }
@@ -1148,6 +1154,21 @@ func (e *ExprBinOp) evalStartsWith(row *Row) (tuple.Datum, error) {
 		return tuple.DNull(), nil
 	}
 	return tuple.DBool(strings.HasPrefix(datumToString(lv), datumToString(rv))), nil
+}
+
+func (e *ExprBinOp) evalTSMatch(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+		return tuple.DNull(), nil
+	}
+	return tuple.DBool(tsvectorMatchesTsquery(datumToString(lv), datumToString(rv))), nil
 }
 
 func datumToBool(d tuple.Datum) bool {

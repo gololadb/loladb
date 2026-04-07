@@ -44,9 +44,11 @@ type LogicalNode interface {
 
 // LogicalScan reads all rows from a table.
 type LogicalScan struct {
-	Table   string
-	Alias   string
-	Columns []string // column names from catalog
+	Table         string
+	Alias         string
+	Columns       []string // column names from catalog
+	SampleMethod  string   // "bernoulli", "system", or ""
+	SamplePercent string   // percentage as text
 }
 
 func (n *LogicalScan) String() string {

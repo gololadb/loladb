@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -544,7 +545,19 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 		return result, nil
 	}
 
+	// TABLESAMPLE: use Bernoulli sampling (each row independently included
+	// with probability samplePercent/100). SYSTEM method uses the same
+	// approach since page-level sampling isn't meaningful for in-memory storage.
+	sampleFrac := 0.0
+	doSample := n.SampleMethod != "" && n.SamplePercent > 0 && n.SamplePercent < 100
+	if doSample {
+		sampleFrac = n.SamplePercent / 100.0
+	}
+
 	ex.Cat.SeqScan(n.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if doSample && rand.Float64() >= sampleFrac {
+			return true // skip this row
+		}
 		row := &planner.Row{Columns: tup.Columns, Names: colNames}
 		if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
 			return true

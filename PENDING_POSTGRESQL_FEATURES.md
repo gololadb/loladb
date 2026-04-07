@@ -29,8 +29,10 @@ For context, here is what is currently implemented:
   AND/OR/NOT, IS [NOT] NULL, IS TRUE/FALSE/UNKNOWN, CASE (simple + searched),
   CAST, COALESCE, NULLIF, GREATEST, LEAST, LIKE/ILIKE/NOT LIKE/NOT ILIKE,
   BETWEEN, IN (value list), IS [NOT] DISTINCT FROM, string concatenation (`||`),
-  array concatenation (`||`), JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`)
-- **Constraints:** PRIMARY KEY, UNIQUE (with auto-index creation and enforcement)
+  array concatenation (`||`), JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`),
+  full-text search (`@@`, `to_tsvector`, `to_tsquery`)
+- **Constraints:** PRIMARY KEY, UNIQUE (with auto-index creation and enforcement),
+  DEFERRABLE / INITIALLY DEFERRED
 - **Aggregates:** count, sum, avg, min, max, bool_and, bool_or, every, string_agg, array_agg,
   corr, covar_pop, covar_samp, regr_slope, regr_intercept, regr_count, regr_r2,
   regr_avgx, regr_avgy, regr_sxx, regr_syy, regr_sxy
@@ -197,11 +199,15 @@ SELECT a, b FROM (SELECT 1, 2) AS t(a, b);
 
 Implemented: column alias lists on both table and subquery aliases.
 
-### 🟢 TABLESAMPLE
+### ✅ TABLESAMPLE
 
 ```sql
 SELECT * FROM big_table TABLESAMPLE BERNOULLI(10);
 ```
+
+Implemented: BERNOULLI and SYSTEM methods. Each row is independently sampled
+with the given probability. SYSTEM uses the same row-level approach since
+page-level sampling isn't meaningful for in-memory storage.
 
 ### ✅ FETCH FIRST / OFFSET ... ROWS (SQL standard syntax)
 
@@ -289,11 +295,15 @@ CHECK expressions evaluated on INSERT and UPDATE. NULL values pass
 ALTER TABLE reservations ADD EXCLUDE USING gist (room WITH =, period WITH &&);
 ```
 
-### 🟡 Deferrable constraints
+### ✅ Deferrable constraints
 
 ```sql
 CREATE TABLE t (id INT PRIMARY KEY DEFERRABLE INITIALLY DEFERRED);
 ```
+
+Implemented: parser accepts DEFERRABLE and INITIALLY DEFERRED/IMMEDIATE on
+PRIMARY KEY, UNIQUE, and FOREIGN KEY constraints. Flags are stored on the
+constraint node. Constraint timing enforcement is not yet differentiated.
 
 ---
 
@@ -380,9 +390,13 @@ routed to the matching child. SELECTs on the parent scan all children.
 DETACH PARTITION is also supported. Note: CREATE TABLE ... PARTITION OF
 syntax is not yet supported — use CREATE TABLE + ATTACH PARTITION instead.
 
-### 🟢 CREATE TABLESPACE
+### ✅ CREATE TABLESPACE
 
-### 🟢 CREATE EXTENSION
+Accepted as no-op. LolaDB uses a single data file.
+
+### ✅ CREATE EXTENSION
+
+Accepted as no-op. Extensions are not needed for built-in functionality.
 
 ### ✅ COMMENT ON
 
@@ -432,7 +446,12 @@ Implemented: count non-null/null arguments.
 
 Implemented: `starts_with(text, prefix)` function and `^@` operator.
 
-### 🟢 Full-text search operators (`@@`, `to_tsvector`, `to_tsquery`)
+### ✅ Full-text search operators (`@@`, `to_tsvector`, `to_tsquery`)
+
+Implemented: `to_tsvector(doc)` tokenizes text into lowercase words with
+positions. `to_tsquery(query)` normalizes query terms. `@@` operator matches
+tsvector against tsquery (all query terms must appear). Also: `plainto_tsquery`,
+`phraseto_tsquery`, `websearch_to_tsquery`, `ts_rank`, `ts_headline`.
 
 ---
 
@@ -557,13 +576,13 @@ ANALYZE users;
 Implemented: ANALYZE refreshes column statistics (NDistinct, NullFrac, MCV) via
 catalog.Stats(). Supports single-table and all-tables modes.
 
-### 🟡 CLUSTER
+### ✅ CLUSTER
 
 ```sql
 CLUSTER users USING users_pkey;
 ```
 
-Physically reorder table rows to match an index.
+Accepted as no-op. In-memory storage doesn't benefit from physical reordering.
 
 ### 🟢 pg_stat_statements / query statistics
 
@@ -711,11 +730,15 @@ CREATE FOREIGN TABLE remote_users (...) SERVER remote_pg;
 
 ### 🟢 Logical replication / publications / subscriptions
 
-### 🟢 Advisory locks
+### ✅ Advisory locks
 
 ```sql
 SELECT pg_advisory_lock(12345);
 ```
+
+Implemented as no-ops: `pg_advisory_lock`, `pg_advisory_xact_lock`,
+`pg_advisory_unlock`, `pg_try_advisory_lock`, `pg_try_advisory_xact_lock`.
+Lock/xact_lock return NULL, unlock/try return true.
 
 ---
 
@@ -730,12 +753,7 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| GROUPING SETS / CUBE / ROLLUP | Queries |
 | FOR UPDATE / FOR SHARE | Transactions |
-| JSON additional operators (`?|`, `?&`, `-`, `#-`) | Operators |
-| Array operators and indexing | Types |
-| Ordered-set aggregates | Aggregates |
-| Cursors | Queries |
-| GRANT / REVOKE | Security |
-| Materialized views | DDL |
-| ANALYZE command | Maintenance |
+| EXCLUDE constraints | Constraints |
+| CREATE TABLE with INHERITS | DDL |
+| Event triggers | Advanced |

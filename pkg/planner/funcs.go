@@ -1746,6 +1746,74 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		}
 		return tuple.DNull(), fmt.Errorf("unrecognized configuration parameter %q", settingName)
 
+	// Full-text search functions.
+	case "to_tsvector":
+		// to_tsvector([config,] document) → tsvector text representation
+		var doc string
+		if len(args) == 1 {
+			d, err := EvalAnalyzedExpr(args[0], row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			doc = datumToString(d)
+		} else if len(args) >= 2 {
+			// First arg is config (ignored), second is document.
+			d, err := EvalAnalyzedExpr(args[1], row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			doc = datumToString(d)
+		}
+		return tuple.DText(textToTsvector(doc)), nil
+
+	case "to_tsquery", "plainto_tsquery", "phraseto_tsquery", "websearch_to_tsquery":
+		// to_tsquery([config,] query) → tsquery text representation
+		var queryStr string
+		if len(args) == 1 {
+			d, err := EvalAnalyzedExpr(args[0], row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			queryStr = datumToString(d)
+		} else if len(args) >= 2 {
+			d, err := EvalAnalyzedExpr(args[1], row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			queryStr = datumToString(d)
+		}
+		return tuple.DText(textToTsquery(queryStr)), nil
+
+	case "ts_rank", "ts_rank_cd":
+		// ts_rank(tsvector, tsquery) → float
+		// Simplified: return 1.0 if any query term matches, 0.0 otherwise.
+		if len(args) < 2 {
+			return tuple.DFloat64(0), nil
+		}
+		vecD, _ := EvalAnalyzedExpr(args[0], row)
+		qryD, _ := EvalAnalyzedExpr(args[1], row)
+		if tsvectorMatchesTsquery(datumToString(vecD), datumToString(qryD)) {
+			return tuple.DFloat64(1.0), nil
+		}
+		return tuple.DFloat64(0.0), nil
+
+	case "ts_headline":
+		// ts_headline([config,] document, tsquery [, options]) → text
+		// Simplified: return the document unchanged.
+		if len(args) >= 1 {
+			d, _ := EvalAnalyzedExpr(args[0], row)
+			return d, nil
+		}
+		return tuple.DText(""), nil
+
+	// Advisory lock functions (no-op, always succeed).
+	case "pg_advisory_lock", "pg_advisory_xact_lock":
+		return tuple.DNull(), nil
+	case "pg_advisory_unlock":
+		return tuple.DBool(true), nil
+	case "pg_try_advisory_lock", "pg_try_advisory_xact_lock":
+		return tuple.DBool(true), nil
+
 	default:
 		// Try user-defined function callback.
 		if UserFuncExecutor != nil {
@@ -1761,6 +1829,80 @@ type UserFuncExecFunc func(name string, args []AnalyzedExpr, row *Row) (tuple.Da
 
 // UserFuncExecutor is set by the SQL executor to provide UDF execution.
 var UserFuncExecutor UserFuncExecFunc
+
+// --- Full-text search helpers ---
+
+// textToTsvector converts a document string to a simplified tsvector
+// representation: space-separated lowercase words with positions.
+func textToTsvector(doc string) string {
+	words := strings.Fields(strings.ToLower(doc))
+	seen := make(map[string][]int)
+	var order []string
+	for i, w := range words {
+		// Strip non-alphanumeric characters from edges.
+		w = strings.Trim(w, ".,;:!?\"'()[]{}#$%^&*")
+		if w == "" {
+			continue
+		}
+		if _, ok := seen[w]; !ok {
+			order = append(order, w)
+		}
+		seen[w] = append(seen[w], i+1)
+	}
+	// Build tsvector: 'word':pos1,pos2 ...
+	var parts []string
+	for _, w := range order {
+		posStrs := make([]string, len(seen[w]))
+		for i, p := range seen[w] {
+			posStrs[i] = fmt.Sprintf("%d", p)
+		}
+		parts = append(parts, fmt.Sprintf("'%s':%s", w, strings.Join(posStrs, ",")))
+	}
+	return strings.Join(parts, " ")
+}
+
+// textToTsquery normalizes a query string into a simplified tsquery
+// representation: lowercase terms joined by &.
+func textToTsquery(query string) string {
+	// Remove tsquery operators for simplification.
+	query = strings.NewReplacer("&", " ", "|", " ", "!", " ", "(", " ", ")", " ").Replace(query)
+	words := strings.Fields(strings.ToLower(query))
+	var terms []string
+	for _, w := range words {
+		w = strings.Trim(w, ".,;:!?\"'()[]{}#$%^&*")
+		if w != "" {
+			terms = append(terms, "'"+w+"'")
+		}
+	}
+	return strings.Join(terms, " & ")
+}
+
+// tsvectorMatchesTsquery returns true if all query terms appear in the tsvector.
+func tsvectorMatchesTsquery(tsvec, tsquery string) bool {
+	// Extract words from tsvector (the 'word' parts).
+	vecWords := make(map[string]bool)
+	for _, part := range strings.Fields(tsvec) {
+		if idx := strings.Index(part, ":"); idx > 0 {
+			w := strings.Trim(part[:idx], "'")
+			vecWords[w] = true
+		} else {
+			vecWords[strings.Trim(part, "'")] = true
+		}
+	}
+	// Extract terms from tsquery.
+	queryParts := strings.Split(tsquery, "&")
+	for _, qp := range queryParts {
+		qp = strings.TrimSpace(qp)
+		qp = strings.Trim(qp, "'")
+		if qp == "" {
+			continue
+		}
+		if !vecWords[qp] {
+			return false
+		}
+	}
+	return true
+}
 
 // EvalAnalyzedExpr evaluates an AnalyzedExpr against a row.
 func EvalAnalyzedExpr(ae AnalyzedExpr, row *Row) (tuple.Datum, error) {

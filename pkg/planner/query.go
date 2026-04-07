@@ -177,6 +177,10 @@ type RangeTblEntry struct {
 	// Lateral is true for LATERAL subqueries that can reference columns
 	// from preceding FROM items.
 	Lateral bool
+
+	// TABLESAMPLE fields.
+	SampleMethod  string // "bernoulli", "system", or ""
+	SamplePercent string // percentage expression as text (e.g. "10")
 }
 
 // RTEColumn is a single column within a RangeTblEntry, carrying the

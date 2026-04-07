@@ -11,13 +11,15 @@ type PhysicalNode interface {
 
 // PhysSeqScan is a full table sequential scan.
 type PhysSeqScan struct {
-	Table      string
-	Alias      string
-	Columns    []string
-	HeadPage   uint32
-	Estimate   PlanCost
-	Filter     Expr // optional pushed-down filter
-	IsTerminal bool // true when no Project node narrows the output columns
+	Table         string
+	Alias         string
+	Columns       []string
+	HeadPage      uint32
+	Estimate      PlanCost
+	Filter        Expr   // optional pushed-down filter
+	IsTerminal    bool   // true when no Project node narrows the output columns
+	SampleMethod  string // "bernoulli", "system", or "" (no sampling)
+	SamplePercent float64 // 0-100
 }
 
 func (n *PhysSeqScan) String() string {
