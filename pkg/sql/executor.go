@@ -9,7 +9,9 @@ import (
 
 	"github.com/gololadb/loladb/pkg/catalog"
 	"github.com/gololadb/loladb/pkg/executor"
+	"github.com/gololadb/loladb/pkg/pl/pljs"
 	"github.com/gololadb/loladb/pkg/pl/plpgsql"
+	"github.com/gololadb/loladb/pkg/pl/plstarlark"
 	"github.com/gololadb/loladb/pkg/planner"
 	"github.com/gololadb/loladb/pkg/rewriter"
 	"github.com/gololadb/loladb/pkg/tuple"
@@ -123,21 +125,72 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 				params[fn.ParamNames[i]] = val
 			}
 		}
-		interp := plpgsql.New(func(sql string) (*plpgsql.SQLResult, error) {
-			r, err := ex.Exec(sql)
+		switch strings.ToLower(fn.Language) {
+		case "plpgsql", "":
+			interp := plpgsql.New(func(sql string) (*plpgsql.SQLResult, error) {
+				r, err := ex.Exec(sql)
+				if err != nil {
+					return nil, err
+				}
+				return &plpgsql.SQLResult{Columns: r.Columns, Rows: r.Rows, Message: r.Message}, nil
+			})
+			result, err := interp.ExecFunction(fn.Body, params)
 			if err != nil {
-				return nil, err
+				return tuple.DNull(), err
 			}
-			return &plpgsql.SQLResult{Columns: r.Columns, Rows: r.Rows, Message: r.Message}, nil
-		})
-		result, err := interp.ExecFunction(fn.Body, params)
-		if err != nil {
-			return tuple.DNull(), err
-		}
-		if result.IsNull {
+			if result.IsNull {
+				return tuple.DNull(), nil
+			}
+			return result.Value, nil
+
+		case "pljs", "javascript", "js", "plv8":
+			interp := pljs.New(func(sql string) (*pljs.SQLResult, error) {
+				r, err := ex.Exec(sql)
+				if err != nil {
+					return nil, err
+				}
+				return &pljs.SQLResult{Columns: r.Columns, Rows: r.Rows, Message: r.Message}, nil
+			})
+			result, err := interp.ExecFunction(fn.Body, params)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if result.IsNull {
+				return tuple.DNull(), nil
+			}
+			return result.Value, nil
+
+		case "plstarlark", "starlark":
+			interp := plstarlark.New(func(sql string) (*plstarlark.SQLResult, error) {
+				r, err := ex.Exec(sql)
+				if err != nil {
+					return nil, err
+				}
+				return &plstarlark.SQLResult{Columns: r.Columns, Rows: r.Rows, Message: r.Message}, nil
+			})
+			result, err := interp.ExecFunction(fn.Body, params)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if result.IsNull {
+				return tuple.DNull(), nil
+			}
+			return result.Value, nil
+
+		case "sql":
+			// Execute the body as a SQL query directly.
+			r, err := ex.Exec(fn.Body)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if len(r.Rows) > 0 && len(r.Rows[0]) > 0 {
+				return r.Rows[0][0], nil
+			}
 			return tuple.DNull(), nil
+
+		default:
+			return tuple.DNull(), fmt.Errorf("unsupported language: %s", fn.Language)
 		}
-		return result.Value, nil
 	}
 
 	// Wire enum ordinal resolver for enum-aware comparisons.
@@ -1040,13 +1093,19 @@ func (ex *Executor) execCreateAggregate(ds *parser.DefineStmt) (*Result, error) 
 	return &Result{Message: "CREATE AGGREGATE"}, nil
 }
 
-// execDo executes an anonymous PL/pgSQL block (DO $$ ... $$).
+// execDo executes an anonymous code block (DO $$ ... $$ [LANGUAGE lang]).
 func (ex *Executor) execDo(ds *parser.DoStmt) (*Result, error) {
 	body := ""
+	lang := "plpgsql"
 	for _, arg := range ds.Args {
 		if arg.Defname == "as" {
 			if s, ok := arg.Arg.(*parser.String); ok {
 				body = s.Str
+			}
+		}
+		if arg.Defname == "language" {
+			if s, ok := arg.Arg.(*parser.String); ok {
+				lang = strings.ToLower(s.Str)
 			}
 		}
 	}
@@ -1054,21 +1113,48 @@ func (ex *Executor) execDo(ds *parser.DoStmt) (*Result, error) {
 		return &Result{Message: "DO"}, nil
 	}
 
-	interp := plpgsql.New(func(sql string) (*plpgsql.SQLResult, error) {
-		r, err := ex.Exec(sql)
+	switch lang {
+	case "plpgsql", "":
+		interp := plpgsql.New(func(sql string) (*plpgsql.SQLResult, error) {
+			r, err := ex.Exec(sql)
+			if err != nil {
+				return nil, err
+			}
+			return &plpgsql.SQLResult{Columns: r.Columns, Rows: r.Rows}, nil
+		})
+		_, err := interp.ExecFunction(body, nil)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("DO block: %w", err)
 		}
-		return &plpgsql.SQLResult{
-			Columns: r.Columns,
-			Rows:    r.Rows,
-		}, nil
-	})
 
-	_, err := interp.ExecFunction(body, nil)
-	if err != nil {
-		return nil, fmt.Errorf("DO block: %w", err)
+	case "pljs", "javascript", "js", "plv8":
+		interp := pljs.New(func(sql string) (*pljs.SQLResult, error) {
+			r, err := ex.Exec(sql)
+			if err != nil {
+				return nil, err
+			}
+			return &pljs.SQLResult{Columns: r.Columns, Rows: r.Rows, Message: r.Message}, nil
+		})
+		if err := interp.ExecBlock(body); err != nil {
+			return nil, fmt.Errorf("DO block: %w", err)
+		}
+
+	case "plstarlark", "starlark":
+		interp := plstarlark.New(func(sql string) (*plstarlark.SQLResult, error) {
+			r, err := ex.Exec(sql)
+			if err != nil {
+				return nil, err
+			}
+			return &plstarlark.SQLResult{Columns: r.Columns, Rows: r.Rows, Message: r.Message}, nil
+		})
+		if err := interp.ExecBlock(body); err != nil {
+			return nil, fmt.Errorf("DO block: %w", err)
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported language: %s", lang)
 	}
+
 	return &Result{Message: "DO"}, nil
 }
 

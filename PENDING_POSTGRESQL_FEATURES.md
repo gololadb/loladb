@@ -69,6 +69,8 @@ are listed here. See git history for previously completed items.
   CLUSTER (accepted)
 - **Other:** PL/pgSQL interpreter (EXCEPTION blocks, FOREACH ARRAY,
   RETURN NEXT/QUERY, user-defined function calls in SQL expressions),
+  PL/JS (JavaScript via goja, plv8-compatible SPI bridge),
+  PL/Starlark (Python-like via starlark-go, spi.execute() bridge),
   pgwire protocol, EXPLAIN, INSERT ON CONFLICT (UPSERT), UPDATE FROM,
   rewrite rules, RLS, GRANT/REVOKE ON SCHEMA,
   set_config/current_setting (session GUC), tsvector_update_trigger,
@@ -82,7 +84,4 @@ are listed here. See git history for previously completed items.
 
 ## Remaining Pending Features
 
-### 🟢 Other PL languages (PL/Python, PL/Perl, PL/v8)
-
-Niche. Would require embedding language runtimes. PL/pgSQL covers the
-vast majority of stored procedure use cases.
+All tracked features have been implemented. The PENDING list is empty.
