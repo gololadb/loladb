@@ -199,6 +199,11 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execVacuumAnalyze(vs)
 	}
 
+	// Handle CREATE TABLE ... AS SELECT.
+	if ctas, ok := stmt.(*parser.CreateTableAsStmt); ok {
+		return ex.execCreateTableAs(ctas)
+	}
+
 	// Handle PREPARE / EXECUTE / DEALLOCATE statements.
 	if ps, ok := stmt.(*parser.PrepareStmt); ok {
 		return ex.execPrepare(ps)

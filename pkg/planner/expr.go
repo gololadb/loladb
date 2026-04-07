@@ -3,6 +3,7 @@ package planner
 import (
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 	"time"
 
@@ -134,6 +135,13 @@ const (
 	OpILike                  // ILIKE
 	OpNotLike                // NOT LIKE
 	OpNotILike               // NOT ILIKE
+	OpSimilarTo              // SIMILAR TO
+	OpNotSimilarTo           // NOT SIMILAR TO
+	OpRegexMatch             // ~
+	OpRegexIMatch            // ~*
+	OpRegexNotMatch          // !~
+	OpRegexNotIMatch         // !~*
+	OpStartsWith             // ^@
 	OpConcat                 // ||
 	OpJSONArrow              // ->
 	OpJSONArrowText          // ->>
@@ -196,6 +204,20 @@ func (op OpKind) String() string {
 		return "<@"
 	case OpJSONExists:
 		return "?"
+	case OpSimilarTo:
+		return "SIMILAR TO"
+	case OpNotSimilarTo:
+		return "NOT SIMILAR TO"
+	case OpRegexMatch:
+		return "~"
+	case OpRegexIMatch:
+		return "~*"
+	case OpRegexNotMatch:
+		return "!~"
+	case OpRegexNotIMatch:
+		return "!~*"
+	case OpStartsWith:
+		return "^@"
 	default:
 		return "?"
 	}
@@ -227,6 +249,12 @@ func (e *ExprBinOp) Eval(row *Row) (tuple.Datum, error) {
 	}
 	if e.Op >= OpJSONArrow && e.Op <= OpJSONExists {
 		return e.evalJSON(row)
+	}
+	if e.Op >= OpSimilarTo && e.Op <= OpRegexNotIMatch {
+		return e.evalRegex(row)
+	}
+	if e.Op == OpStartsWith {
+		return e.evalStartsWith(row)
 	}
 	return e.evalComparison(row)
 }
@@ -739,6 +767,117 @@ func likeMatch(s []rune, si int, p []rune, pi int) bool {
 		}
 	}
 	return si == len(s)
+}
+
+// evalRegexOp evaluates SIMILAR TO and regex match operators (~, ~*, !~, !~*).
+func evalRegexOp(op OpKind, s, pattern string) (bool, error) {
+	var re string
+	var icase bool
+	var negate bool
+
+	switch op {
+	case OpSimilarTo:
+		re = similarToRegexp(pattern)
+	case OpNotSimilarTo:
+		re = similarToRegexp(pattern)
+		negate = true
+	case OpRegexMatch:
+		re = pattern
+	case OpRegexIMatch:
+		re = pattern
+		icase = true
+	case OpRegexNotMatch:
+		re = pattern
+		negate = true
+	case OpRegexNotIMatch:
+		re = pattern
+		icase = true
+		negate = true
+	}
+
+	if icase {
+		re = "(?i)" + re
+	}
+
+	matched, err := regexp.MatchString(re, s)
+	if err != nil {
+		return false, fmt.Errorf("invalid regular expression: %w", err)
+	}
+	if negate {
+		return !matched, nil
+	}
+	return matched, nil
+}
+
+// similarToRegexp converts a SQL SIMILAR TO pattern to a Go regexp.
+// SIMILAR TO uses: % = .*, _ = ., | for alternation, and supports
+// character classes [...] and grouping (...).
+func similarToRegexp(pattern string) string {
+	var buf strings.Builder
+	buf.WriteString("^")
+	i := 0
+	for i < len(pattern) {
+		ch := pattern[i]
+		switch ch {
+		case '%':
+			buf.WriteString(".*")
+		case '_':
+			buf.WriteByte('.')
+		case '\\':
+			// Escape: next char is literal.
+			buf.WriteByte('\\')
+			i++
+			if i < len(pattern) {
+				buf.WriteByte(pattern[i])
+			}
+		case '[', ']', '(', ')', '|':
+			// Pass through — these are valid in SIMILAR TO patterns.
+			buf.WriteByte(ch)
+		case '.', '^', '$', '*', '+', '?', '{', '}':
+			// Escape regexp metacharacters that aren't SIMILAR TO operators.
+			buf.WriteByte('\\')
+			buf.WriteByte(ch)
+		default:
+			buf.WriteByte(ch)
+		}
+		i++
+	}
+	buf.WriteString("$")
+	return buf.String()
+}
+
+func (e *ExprBinOp) evalRegex(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+		return tuple.DNull(), nil
+	}
+	matched, err := evalRegexOp(e.Op, datumToString(lv), datumToString(rv))
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	return tuple.DBool(matched), nil
+}
+
+func (e *ExprBinOp) evalStartsWith(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+		return tuple.DNull(), nil
+	}
+	return tuple.DBool(strings.HasPrefix(datumToString(lv), datumToString(rv))), nil
 }
 
 func datumToBool(d tuple.Datum) bool {

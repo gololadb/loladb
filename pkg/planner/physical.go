@@ -673,6 +673,16 @@ func (n *PhysResult) String() string            { return "Result" }
 func (n *PhysResult) Cost() PlanCost            { return PlanCost{Startup: 0.01, Total: 0.01, Rows: 1} }
 func (n *PhysResult) Children() []PhysicalNode  { return nil }
 
+// PhysValues produces multiple rows from literal expressions (bare VALUES clause).
+type PhysValues struct {
+	Names  []string
+	Values [][]Expr
+}
+
+func (n *PhysValues) String() string            { return "Values" }
+func (n *PhysValues) Cost() PlanCost            { return PlanCost{Startup: 0.01, Total: 0.01, Rows: float64(len(n.Values))} }
+func (n *PhysValues) Children() []PhysicalNode  { return nil }
+
 // PhysWindowAgg computes window functions over the child's output.
 type PhysWindowAgg struct {
 	Child    PhysicalNode

@@ -143,6 +143,8 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 		return &PhysDropColumn{Table: n.Table, ColName: n.ColName, IfExists: n.IfExists}, nil
 	case *LogicalResult:
 		return &PhysResult{Exprs: n.Exprs, Names: n.Names}, nil
+	case *LogicalValues:
+		return &PhysValues{Names: n.Names, Values: n.Values}, nil
 	case *LogicalWindowAgg:
 		child, err := o.Optimize(n.Child)
 		if err != nil {

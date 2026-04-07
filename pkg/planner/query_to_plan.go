@@ -32,6 +32,23 @@ func QueryToLogicalPlan(q *Query) (LogicalNode, error) {
 }
 
 func queryToSelectPlan(q *Query) (LogicalNode, error) {
+	// Handle bare VALUES clause.
+	if q.IsValues && len(q.Values) > 0 {
+		var names []string
+		for _, te := range q.TargetList {
+			names = append(names, te.Name)
+		}
+		var rows [][]Expr
+		for _, row := range q.Values {
+			var exprs []Expr
+			for _, e := range row {
+				exprs = append(exprs, analyzedToExpr(e, q.RangeTable))
+			}
+			rows = append(rows, exprs)
+		}
+		return &LogicalValues{Names: names, Values: rows}, nil
+	}
+
 	// Handle set operations.
 	if q.SetOp != SetOpNone {
 		return queryToSetOpPlan(q)

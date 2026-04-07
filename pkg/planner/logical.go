@@ -623,6 +623,15 @@ type LogicalResult struct {
 func (n *LogicalResult) String() string         { return "Result" }
 func (n *LogicalResult) OutputColumns() []string { return n.Names }
 
+// LogicalValues produces multiple rows from literal expressions (bare VALUES clause).
+type LogicalValues struct {
+	Names  []string   // column names (column1, column2, ...)
+	Values [][]Expr   // rows of expressions
+}
+
+func (n *LogicalValues) String() string         { return "Values" }
+func (n *LogicalValues) OutputColumns() []string { return n.Names }
+
 // LogicalWindowAgg computes window functions over the child's output.
 type LogicalWindowAgg struct {
 	Child    LogicalNode

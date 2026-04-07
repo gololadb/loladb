@@ -42,22 +42,22 @@ For context, here is what is currently implemented:
 
 ## 1. SQL Expressions and Operators
 
-### 🟡 SIMILAR TO
+### ✅ SIMILAR TO
 
 ```sql
 SELECT * FROM t WHERE name SIMILAR TO '%(foo|bar)%';
 ```
 
-SQL-standard regex-like pattern matching. Parser recognizes `AEXPR_SIMILAR` but
-the analyzer does not handle it.
+Implemented: SQL pattern converted to Go regexp (%, _, |, character classes, grouping).
 
-### 🟡 BETWEEN SYMMETRIC
+### ✅ BETWEEN SYMMETRIC
 
 ```sql
 SELECT * FROM t WHERE x BETWEEN SYMMETRIC 10 AND 5;
 ```
 
-Like BETWEEN but auto-swaps endpoints. Parser recognizes it.
+Implemented: desugars to `(x >= a AND x <= b) OR (x >= b AND x <= a)`.
+NOT BETWEEN SYMMETRIC also supported.
 
 ### 🟡 Row value comparisons
 
@@ -163,19 +163,21 @@ GROUP BY GROUPING SETS ((brand), (size), ());
 
 Advanced grouping. Not implemented.
 
-### 🟡 VALUES as a standalone query
+### ✅ VALUES as a standalone query
 
 ```sql
 VALUES (1, 'a'), (2, 'b'), (3, 'c');
 ```
 
-VALUES can only appear inside INSERT, not as a standalone table expression.
+Implemented: bare VALUES produces rows with synthetic column names (column1, column2, ...).
 
-### 🟡 Table aliases with column lists
+### ✅ Table aliases with column lists
 
 ```sql
 SELECT a, b FROM (SELECT 1, 2) AS t(a, b);
 ```
+
+Implemented: column alias lists on both table and subquery aliases.
 
 ### 🟢 TABLESAMPLE
 
@@ -285,11 +287,14 @@ ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
 ALTER TABLE supports ADD/DROP COLUMN but not ALTER COLUMN type, SET/DROP NOT NULL,
 SET/DROP DEFAULT, or RENAME COLUMN.
 
-### 🟡 CREATE TABLE ... AS / SELECT INTO
+### ✅ CREATE TABLE ... AS / SELECT INTO
 
 ```sql
 CREATE TABLE summary AS SELECT dept, count(*) FROM employees GROUP BY dept;
 ```
+
+Implemented: creates table from query result columns, inserts data. Supports
+IF NOT EXISTS and WITH NO DATA.
 
 ### 🟡 CREATE TABLE ... LIKE
 
@@ -360,14 +365,17 @@ Core JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`) are implemented.
 Still missing: `?|` (any key exists), `?&` (all keys exist), `-` (delete key/index),
 and `#-` (delete path).
 
-### 🟡 Pattern matching operators (`~`, `~*`, `!~`, `!~*`)
+### ✅ Pattern matching operators (`~`, `~*`, `!~`, `!~*`)
 
-POSIX regex operators. `regexp_match()` and `regexp_replace()` functions exist
-but the operator syntax is not supported.
+Implemented: POSIX regex operators dispatched to Go's regexp package.
 
-### 🟡 `num_nonnulls()` / `num_nulls()`
+### ✅ `num_nonnulls()` / `num_nulls()`
 
-### 🟡 `starts_with()` / `^@` operator
+Implemented: count non-null/null arguments.
+
+### ✅ `starts_with()` / `^@` operator
+
+Implemented: `starts_with(text, prefix)` function and `^@` operator.
 
 ### 🟢 Full-text search operators (`@@`, `to_tsvector`, `to_tsquery`)
 
@@ -639,14 +647,12 @@ SELECT pg_advisory_lock(12345);
 | FULL OUTER JOIN | Queries |
 | LATERAL joins | Queries |
 | GROUPING SETS / CUBE / ROLLUP | Queries |
-| SIMILAR TO | Expressions |
 | ALTER TABLE ALTER/RENAME COLUMN | DDL |
 | Transaction isolation levels | Transactions |
 | FOR UPDATE / FOR SHARE | Transactions |
 
 | TEMPORARY tables | DDL |
 | Table partitioning | DDL |
-| CREATE TABLE AS | DDL |
 | JSON additional operators (`?|`, `?&`, `-`, `#-`) | Operators |
 | Array operators and indexing | Types |
 | Statistical aggregates | Aggregates |

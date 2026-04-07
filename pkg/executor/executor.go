@@ -376,6 +376,8 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execDistinct(n)
 	case *planner.PhysResult:
 		return ex.execResult(n)
+	case *planner.PhysValues:
+		return ex.execValues(n)
 	case *planner.PhysWindowAgg:
 		return ex.execWindowAgg(n)
 	case *planner.PhysSubqueryScan:
@@ -3725,6 +3727,27 @@ func (ex *Executor) execRecursiveSubqueryScan(n *planner.PhysSubqueryScan) (*Res
 		Columns: cols,
 		Rows:    allRows,
 		Message: fmt.Sprintf("SELECT %d", len(allRows)),
+	}, nil
+}
+
+func (ex *Executor) execValues(n *planner.PhysValues) (*Result, error) {
+	emptyRow := &planner.Row{}
+	var rows [][]tuple.Datum
+	for _, valRow := range n.Values {
+		row := make([]tuple.Datum, len(valRow))
+		for i, expr := range valRow {
+			val, err := expr.Eval(emptyRow)
+			if err != nil {
+				return nil, fmt.Errorf("executor: Values eval: %w", err)
+			}
+			row[i] = val
+		}
+		rows = append(rows, row)
+	}
+	return &Result{
+		Columns: n.Names,
+		Rows:    rows,
+		Message: fmt.Sprintf("SELECT %d", len(rows)),
 	}, nil
 }
 

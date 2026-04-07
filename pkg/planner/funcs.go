@@ -1547,6 +1547,49 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		}
 		return tuple.DBool(CompareDatums(lv, rv) == 0), nil
 
+	case "starts_with":
+		if len(args) != 2 {
+			return tuple.DNull(), fmt.Errorf("starts_with requires 2 arguments")
+		}
+		sv, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		pv, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if sv.Type == tuple.TypeNull || pv.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		return tuple.DBool(strings.HasPrefix(datumToString(sv), datumToString(pv))), nil
+
+	case "num_nonnulls":
+		count := int64(0)
+		for _, arg := range args {
+			v, err := arg.Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if v.Type != tuple.TypeNull {
+				count++
+			}
+		}
+		return tuple.DInt64(count), nil
+
+	case "num_nulls":
+		count := int64(0)
+		for _, arg := range args {
+			v, err := arg.Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			if v.Type == tuple.TypeNull {
+				count++
+			}
+		}
+		return tuple.DInt64(count), nil
+
 	default:
 		return tuple.DNull(), fmt.Errorf("function %s is not supported", name)
 	}

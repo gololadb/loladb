@@ -224,7 +224,7 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 	}
 
 	if len(n.ValuesLists) > 0 {
-		return nil, fmt.Errorf("analyzer: bare VALUES clause not supported")
+		return a.transformValuesClause(n)
 	}
 
 	q := &Query{CommandType: CmdSelect}
@@ -517,6 +517,14 @@ func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 		rte, err := a.addRangeTableEntryQualified(t.Schemaname, tableName, alias)
 		if err != nil {
 			return nil, err
+		}
+		// Apply column alias list: SELECT * FROM t AS a(x, y)
+		if t.Alias != nil && len(t.Alias.Colnames) > 0 {
+			for i, cn := range t.Alias.Colnames {
+				if i < len(rte.Columns) {
+					rte.Columns[i].Name = cn
+				}
+			}
 		}
 		return &RangeTblRef{RTIndex: rte.RTIndex}, nil
 
@@ -1011,6 +1019,8 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 		return a.transformIn(e)
 	case parser.AEXPR_LIKE, parser.AEXPR_ILIKE:
 		return a.transformLike(e)
+	case parser.AEXPR_SIMILAR:
+		return a.transformSimilarTo(e)
 	case parser.AEXPR_DISTINCT:
 		return a.transformDistinctFrom(e, false)
 	case parser.AEXPR_NOT_DISTINCT:
@@ -1091,6 +1101,21 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 	case "?":
 		op = OpJSONExists
 		resultTyp = tuple.TypeBool
+	case "~":
+		op = OpRegexMatch
+		resultTyp = tuple.TypeBool
+	case "~*":
+		op = OpRegexIMatch
+		resultTyp = tuple.TypeBool
+	case "!~":
+		op = OpRegexNotMatch
+		resultTyp = tuple.TypeBool
+	case "!~*":
+		op = OpRegexNotIMatch
+		resultTyp = tuple.TypeBool
+	case "^@":
+		op = OpStartsWith
+		resultTyp = tuple.TypeBool
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported operator %q", opName)
 	}
@@ -1140,6 +1165,34 @@ func (a *Analyzer) transformLike(e *parser.A_Expr) (AnalyzedExpr, error) {
 	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: tuple.TypeBool}, nil
 }
 
+// transformSimilarTo handles [NOT] SIMILAR TO expressions.
+func (a *Analyzer) transformSimilarTo(e *parser.A_Expr) (AnalyzedExpr, error) {
+	left, err := a.transformExpr(e.Lexpr)
+	if err != nil {
+		return nil, err
+	}
+	right, err := a.transformExpr(e.Rexpr)
+	if err != nil {
+		return nil, err
+	}
+	opName := ""
+	if len(e.Name) > 0 {
+		opName = e.Name[len(e.Name)-1]
+	}
+	op := OpSimilarTo
+	if opName == "!~" || opName == "!~*" {
+		op = OpNotSimilarTo
+	}
+	// Check for NOT SIMILAR TO via the Name list.
+	for _, n := range e.Name {
+		if strings.EqualFold(n, "!") || strings.EqualFold(n, "not") {
+			op = OpNotSimilarTo
+			break
+		}
+	}
+	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: tuple.TypeBool}, nil
+}
+
 // transformBetween desugars BETWEEN into AND/OR comparisons.
 // x BETWEEN a AND b  →  x >= a AND x <= b
 // x NOT BETWEEN a AND b  →  x < a OR x > b
@@ -1160,28 +1213,59 @@ func (a *Analyzer) transformBetween(e *parser.A_Expr) (AnalyzedExpr, error) {
 	if err != nil {
 		return nil, err
 	}
-	// For SYMMETRIC variants, we'd need runtime min/max, but for now
-	// treat them the same as regular BETWEEN.
 	switch e.Kind {
-	case parser.AEXPR_NOT_BETWEEN, parser.AEXPR_NOT_BETWEEN_SYM:
-		// x < low OR x > high
+	case parser.AEXPR_NOT_BETWEEN:
+		// x NOT BETWEEN a AND b → x < a OR x > b
 		return &BoolExprNode{
 			Op: BoolOr,
 			Args: []AnalyzedExpr{
 				&OpExpr{Op: OpLt, Left: left, Right: low, ResultTyp: tuple.TypeBool},
 				&OpExpr{Op: OpGt, Left: left, Right: high, ResultTyp: tuple.TypeBool},
 			},
-			
+		}, nil
+	case parser.AEXPR_NOT_BETWEEN_SYM:
+		// x NOT BETWEEN SYMMETRIC a AND b → NOT ((x >= a AND x <= b) OR (x >= b AND x <= a))
+		return &BoolExprNode{
+			Op: BoolNot,
+			Args: []AnalyzedExpr{
+				&BoolExprNode{
+					Op: BoolOr,
+					Args: []AnalyzedExpr{
+						&BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{
+							&OpExpr{Op: OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+							&OpExpr{Op: OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+						}},
+						&BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{
+							&OpExpr{Op: OpGte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+							&OpExpr{Op: OpLte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+						}},
+					},
+				},
+			},
+		}, nil
+	case parser.AEXPR_BETWEEN_SYM:
+		// x BETWEEN SYMMETRIC a AND b → (x >= a AND x <= b) OR (x >= b AND x <= a)
+		return &BoolExprNode{
+			Op: BoolOr,
+			Args: []AnalyzedExpr{
+				&BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{
+					&OpExpr{Op: OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+					&OpExpr{Op: OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+				}},
+				&BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{
+					&OpExpr{Op: OpGte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+					&OpExpr{Op: OpLte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+				}},
+			},
 		}, nil
 	default:
-		// x >= low AND x <= high
+		// x BETWEEN a AND b → x >= a AND x <= b
 		return &BoolExprNode{
 			Op: BoolAnd,
 			Args: []AnalyzedExpr{
 				&OpExpr{Op: OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
 				&OpExpr{Op: OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
 			},
-			
 		}, nil
 	}
 }
@@ -1492,6 +1576,47 @@ func (a *Analyzer) transformNullTest(e *parser.NullTest) (AnalyzedExpr, error) {
 
 // transformInsertStmt resolves an INSERT statement.
 // Mirrors PostgreSQL's transformInsertStmt() in analyze.c.
+// transformValuesClause handles bare VALUES (a, b), (c, d) as a standalone query.
+// Produces a CmdSelect query with synthetic column names (column1, column2, ...).
+// Multiple rows are handled by evaluating all value expressions and storing
+// them in the Values field, which the planner converts to a LogicalValues node.
+func (a *Analyzer) transformValuesClause(n *parser.SelectStmt) (*Query, error) {
+	q := &Query{CommandType: CmdSelect, IsValues: true}
+
+	// Determine column count from the first row.
+	if len(n.ValuesLists) == 0 {
+		return nil, fmt.Errorf("analyzer: empty VALUES clause")
+	}
+	numCols := len(n.ValuesLists[0])
+
+	// Build synthetic target list: column1, column2, ...
+	for i := 0; i < numCols; i++ {
+		colName := fmt.Sprintf("column%d", i+1)
+		q.TargetList = append(q.TargetList, &TargetEntry{
+			Name: colName,
+			Expr: &Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}, // placeholder
+		})
+	}
+
+	// Transform all value rows.
+	for rowIdx, row := range n.ValuesLists {
+		if len(row) != numCols {
+			return nil, fmt.Errorf("analyzer: VALUES row %d has %d columns, expected %d", rowIdx+1, len(row), numCols)
+		}
+		var resolvedRow []AnalyzedExpr
+		for _, e := range row {
+			expr, err := a.transformExpr(e)
+			if err != nil {
+				return nil, err
+			}
+			resolvedRow = append(resolvedRow, expr)
+		}
+		q.Values = append(q.Values, resolvedRow)
+	}
+
+	return q, nil
+}
+
 func (a *Analyzer) transformSetOp(n *parser.SelectStmt) (*Query, error) {
 	// Analyze left and right branches independently.
 	leftAnalyzer := &Analyzer{Cat: a.Cat}
@@ -3174,6 +3299,10 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 	// Bool-returning
 	case "regexp_match":
 		retType = tuple.TypeText // returns matched text or NULL
+	case "starts_with":
+		retType = tuple.TypeBool
+	case "num_nonnulls", "num_nulls":
+		retType = tuple.TypeInt64
 	// Preserve input type
 	case "coalesce", "nullif", "greatest", "least":
 		if len(args) > 0 {

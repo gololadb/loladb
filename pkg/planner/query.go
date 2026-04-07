@@ -127,6 +127,9 @@ type Query struct {
 
 	// OnConflict holds the analyzed ON CONFLICT clause for INSERT.
 	OnConflict *OnConflictClause
+
+	// IsValues is true for bare VALUES (...), (...) queries.
+	IsValues bool
 }
 
 // CTEDef holds a single analyzed CTE definition.
@@ -623,6 +626,24 @@ func (o *OpExpr) Eval(row *Row) (tuple.Datum, error) {
 		matched := matchLikePattern(s, pattern, icase)
 		if o.Op == OpNotLike || o.Op == OpNotILike {
 			matched = !matched
+		}
+		return tuple.DBool(matched), nil
+	}
+	if o.Op == OpStartsWith {
+		if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		return tuple.DBool(strings.HasPrefix(datumToString(lv), datumToString(rv))), nil
+	}
+	if o.Op >= OpSimilarTo && o.Op <= OpRegexNotIMatch {
+		if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+			return tuple.DNull(), nil
+		}
+		s := datumToString(lv)
+		pattern := datumToString(rv)
+		matched, err := evalRegexOp(o.Op, s, pattern)
+		if err != nil {
+			return tuple.DNull(), err
 		}
 		return tuple.DBool(matched), nil
 	}
