@@ -59,6 +59,16 @@ type Executor struct {
 
 	// Server-side prepared statements (session-scoped).
 	preparedStmts map[string]*PreparedStmt
+
+	// Server-side cursors (session-scoped).
+	cursors map[string]*CursorState
+}
+
+// CursorState holds the materialized result set and current position for a cursor.
+type CursorState struct {
+	Name   string
+	Result *Result
+	Pos    int // 0-based index of next row to fetch (starts before first row)
 }
 
 // NewExecutor creates a SQL executor backed by the given catalog.
@@ -229,6 +239,17 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	}
 	if ds, ok := stmt.(*parser.DeallocateStmt); ok {
 		return ex.execDeallocate(ds)
+	}
+
+	// Handle cursor statements.
+	if dc, ok := stmt.(*parser.DeclareCursorStmt); ok {
+		return ex.execDeclareCursor(dc)
+	}
+	if fs, ok := stmt.(*parser.FetchStmt); ok {
+		return ex.execFetch(fs)
+	}
+	if cp, ok := stmt.(*parser.ClosePortalStmt); ok {
+		return ex.execCloseCursor(cp)
 	}
 
 	// Handle CREATE MATERIALIZED VIEW.
@@ -734,4 +755,78 @@ func (ex *Executor) execComment(cs *parser.CommentStmt) (*Result, error) {
 	}
 	ex.Cat.SetComment(key, comment)
 	return &Result{Message: "COMMENT"}, nil
+}
+
+// execDeclareCursor materializes the query result and stores it as a named cursor.
+func (ex *Executor) execDeclareCursor(dc *parser.DeclareCursorStmt) (*Result, error) {
+	name := strings.ToLower(dc.Portalname)
+	if ex.cursors == nil {
+		ex.cursors = map[string]*CursorState{}
+	}
+	if _, exists := ex.cursors[name]; exists {
+		return nil, fmt.Errorf("cursor \"%s\" already exists", name)
+	}
+
+	// Execute the query to materialize the result set.
+	querySQL := parser.Deparse(dc.Query)
+	result, err := ex.Exec(querySQL)
+	if err != nil {
+		return nil, fmt.Errorf("DECLARE CURSOR: %w", err)
+	}
+
+	ex.cursors[name] = &CursorState{
+		Name:   name,
+		Result: result,
+		Pos:    0,
+	}
+	return &Result{Message: "DECLARE CURSOR"}, nil
+}
+
+// execFetch returns the next N rows from a cursor.
+func (ex *Executor) execFetch(fs *parser.FetchStmt) (*Result, error) {
+	name := strings.ToLower(fs.Portalname)
+	cur, ok := ex.cursors[name]
+	if !ok {
+		return nil, fmt.Errorf("cursor \"%s\" does not exist", name)
+	}
+
+	if fs.IsMove {
+		// MOVE just advances the position without returning rows.
+		count := int(fs.HowMany)
+		if count <= 0 {
+			count = 1
+		}
+		cur.Pos += count
+		if cur.Pos > len(cur.Result.Rows) {
+			cur.Pos = len(cur.Result.Rows)
+		}
+		return &Result{Message: fmt.Sprintf("MOVE %d", count)}, nil
+	}
+
+	count := int(fs.HowMany)
+	if count <= 0 {
+		count = 1
+	}
+
+	result := &Result{Columns: cur.Result.Columns}
+	for i := 0; i < count && cur.Pos < len(cur.Result.Rows); i++ {
+		result.Rows = append(result.Rows, cur.Result.Rows[cur.Pos])
+		cur.Pos++
+	}
+	return result, nil
+}
+
+// execCloseCursor closes a named cursor or all cursors.
+func (ex *Executor) execCloseCursor(cp *parser.ClosePortalStmt) (*Result, error) {
+	if cp.Portalname == "" {
+		// CLOSE ALL
+		ex.cursors = nil
+		return &Result{Message: "CLOSE ALL"}, nil
+	}
+	name := strings.ToLower(cp.Portalname)
+	if _, ok := ex.cursors[name]; !ok {
+		return nil, fmt.Errorf("cursor \"%s\" does not exist", name)
+	}
+	delete(ex.cursors, name)
+	return &Result{Message: "CLOSE CURSOR"}, nil
 }

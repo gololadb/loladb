@@ -97,11 +97,16 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 			for _, a := range ref.Args {
 				argExprs = append(argExprs, analyzedToExpr(a, q.RangeTable))
 			}
+			var withinExpr Expr
+			if ref.WithinGroupExpr != nil {
+				withinExpr = analyzedToExpr(ref.WithinGroupExpr, q.RangeTable)
+			}
 			aggDescs = append(aggDescs, AggDesc{
-				Func:     ref.AggFunc,
-				ArgExprs: argExprs,
-				Star:     ref.Star,
-				Distinct: ref.Distinct,
+				Func:            ref.AggFunc,
+				ArgExprs:        argExprs,
+				Star:            ref.Star,
+				Distinct:        ref.Distinct,
+				WithinGroupExpr: withinExpr,
 			})
 		}
 		var havingExpr Expr

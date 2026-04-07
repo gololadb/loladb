@@ -236,6 +236,8 @@ const (
 	OpJSONContains           // @>
 	OpJSONContainedBy        // <@
 	OpJSONExists             // ?
+	OpJSONExistsAny          // ?|
+	OpJSONExistsAll          // ?&
 	OpJSONDelete             // - (delete key from JSON object/array)
 	OpJSONDeletePath         // #- (delete by path)
 )
@@ -292,6 +294,10 @@ func (op OpKind) String() string {
 		return "<@"
 	case OpJSONExists:
 		return "?"
+	case OpJSONExistsAny:
+		return "?|"
+	case OpJSONExistsAll:
+		return "?&"
 	case OpJSONDelete:
 		return "-"
 	case OpJSONDeletePath:

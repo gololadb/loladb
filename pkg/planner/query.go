@@ -466,12 +466,13 @@ type NullTestExpr struct {
 // list. During execution, the aggregate executor replaces these with
 // the accumulated result for each group.
 type AggRef struct {
-	AggFunc    string         // e.g. "count", "sum", "avg", "min", "max"
-	Args       []AnalyzedExpr // arguments (empty for count(*))
-	Star       bool           // true for count(*)
-	Distinct   bool           // true for count(DISTINCT ...)
-	AggIndex   int            // index into the aggregate list (set by planner)
-	ReturnTyp  tuple.DatumType
+	AggFunc         string         // e.g. "count", "sum", "avg", "min", "max"
+	Args            []AnalyzedExpr // arguments (empty for count(*))
+	Star            bool           // true for count(*)
+	Distinct        bool           // true for count(DISTINCT ...)
+	AggIndex        int            // index into the aggregate list (set by planner)
+	ReturnTyp       tuple.DatumType
+	WithinGroupExpr AnalyzedExpr   // ORDER BY expr for ordered-set aggregates (percentile_cont, etc.)
 }
 
 // WindowFuncRef represents a window function call in the target list.
@@ -655,7 +656,7 @@ func (o *OpExpr) Eval(row *Row) (tuple.Datum, error) {
 		}
 		return tuple.DText(datumToString(lv) + datumToString(rv)), nil
 	}
-	if o.Op >= OpJSONArrow && o.Op <= OpJSONExists {
+	if o.Op >= OpJSONArrow && o.Op <= OpJSONExistsAll {
 		return evalJSONOp(o.Op, lv, rv)
 	}
 	cmp := CompareDatums(lv, rv)
@@ -1078,6 +1079,10 @@ func evalJSONOp(op OpKind, lv, rv tuple.Datum) (tuple.Datum, error) {
 		return jsonContains(rv.Text, lv.Text)
 	case OpJSONExists:
 		return jsonKeyExists(lv.Text, rv.Text)
+	case OpJSONExistsAny:
+		return jsonKeyExistsAny(lv.Text, rv.Text)
+	case OpJSONExistsAll:
+		return jsonKeyExistsAll(lv.Text, rv.Text)
 	case OpJSONDelete:
 		return jsonDelete(lv.Text, rv)
 	case OpJSONDeletePath:
@@ -1131,14 +1136,21 @@ func jsonDelete(jsonStr string, key tuple.Datum) (tuple.Datum, error) {
 	return tuple.DText(jsonStr), nil
 }
 
+// parsePGArrayLiteral parses a PostgreSQL array literal like {a,b,c} into a slice of strings.
+func parsePGArrayLiteral(s string) []string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
+		s = s[1 : len(s)-1]
+	}
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
 // jsonDeletePath implements jsonb #- text[] (delete by path).
 func jsonDeletePath(jsonStr, pathStr string) (tuple.Datum, error) {
-	// Parse path from PG array literal: {key1,key2,...}
-	path := pathStr
-	if len(path) >= 2 && path[0] == '{' && path[len(path)-1] == '}' {
-		path = path[1 : len(path)-1]
-	}
-	keys := strings.Split(path, ",")
+	keys := parsePGArrayLiteral(pathStr)
 	if len(keys) == 0 {
 		return tuple.DText(jsonStr), nil
 	}
@@ -1305,6 +1317,40 @@ func jsonKeyExists(jsonStr, key string) (tuple.Datum, error) {
 	}
 	_, ok := obj[key]
 	return tuple.DBool(ok), nil
+}
+
+// jsonKeyExistsAny implements ?|: does the JSON object contain any of the given keys?
+// Right operand is a text array literal like {a,b,c}.
+func jsonKeyExistsAny(jsonStr, arrStr string) (tuple.Datum, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &obj); err != nil {
+		return tuple.DBool(false), nil
+	}
+	keys := parsePGArrayLiteral(arrStr)
+	for _, k := range keys {
+		if _, ok := obj[k]; ok {
+			return tuple.DBool(true), nil
+		}
+	}
+	return tuple.DBool(false), nil
+}
+
+// jsonKeyExistsAll implements ?&: does the JSON object contain all of the given keys?
+func jsonKeyExistsAll(jsonStr, arrStr string) (tuple.Datum, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &obj); err != nil {
+		return tuple.DBool(false), nil
+	}
+	keys := parsePGArrayLiteral(arrStr)
+	if len(keys) == 0 {
+		return tuple.DBool(true), nil
+	}
+	for _, k := range keys {
+		if _, ok := obj[k]; !ok {
+			return tuple.DBool(false), nil
+		}
+	}
+	return tuple.DBool(true), nil
 }
 
 // jsonRawToResult converts a json.RawMessage to a Datum. If asText is true,

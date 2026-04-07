@@ -607,10 +607,11 @@ type LogicalAggregate struct {
 
 // AggDesc describes a single aggregate computation.
 type AggDesc struct {
-	Func     string // "count", "sum", "avg", "min", "max"
-	ArgExprs []Expr // argument expressions (empty for count(*))
-	Star     bool   // true for count(*)
-	Distinct bool
+	Func            string // "count", "sum", "avg", "min", "max"
+	ArgExprs        []Expr // argument expressions (empty for count(*))
+	Star            bool   // true for count(*)
+	Distinct        bool
+	WithinGroupExpr Expr   // ORDER BY expr for ordered-set aggregates
 }
 
 func (n *LogicalAggregate) String() string { return "Aggregate" }

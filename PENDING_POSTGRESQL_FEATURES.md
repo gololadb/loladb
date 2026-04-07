@@ -76,17 +76,17 @@ Not applicable until native array types are added.
 
 ## 2. Data Types
 
-### 🟡 JSON additional operators (`?|`, `?&`)
+### ✅ JSON operators (complete)
 
-JSON/JSONB types support `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `-` (delete
-key/index), and `#-` (delete path) operators. Still missing: `?|` (any key
-exists) and `?&` (all keys exist).
+JSON/JSONB types support `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`
+(any key exists), `?&` (all keys exist), `-` (delete key/index), and `#-`
+(delete path).
 
 ### 🟡 Array operators
 
 Arrays have a native datum type, `TEXT[]` column syntax, `ARRAY[...]`
-constructor, and `arr[1]` indexing. Still missing: slicing, containment
-operators (`@>`, `<@`, `&&`), and `unnest()`.
+constructor, `arr[1]` indexing, and `unnest()`. Still missing: slicing,
+containment operators (`@>`, `<@`, `&&`).
 
 ### 🟢 Geometric types (point, line, box, circle, polygon, path)
 
@@ -379,7 +379,7 @@ Implemented: `ARRAY[...]` constructor and 1-based array indexing.
 ### ✅ JSON delete operators (`-`, `#-`)
 
 Implemented: `-` (delete key by name or element by index) and `#-` (delete by
-path). Remaining JSON gaps: `?|` (any key exists) and `?&` (all keys exist).
+path).
 
 ### ✅ Pattern matching operators (`~`, `~*`, `!~`, `!~*`)
 
@@ -399,14 +399,15 @@ Implemented: `starts_with(text, prefix)` function and `^@` operator.
 
 ## 8. Aggregate Functions
 
-### 🟡 Ordered-set aggregates
+### ✅ Ordered-set aggregates
 
 ```sql
 SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY salary) FROM employees;
 SELECT mode() WITHIN GROUP (ORDER BY status) FROM orders;
 ```
 
-`percentile_cont`, `percentile_disc`, `mode`.
+Implemented: `percentile_cont` (continuous interpolation), `percentile_disc`
+(discrete), `mode` (most frequent value).
 
 ### ✅ Statistical aggregates (basic)
 
@@ -541,15 +542,18 @@ Implemented: SQL-level PREPARE stores parameterized queries with `$N` parameter
 references. EXECUTE substitutes parameters and runs through the full pipeline.
 DEALLOCATE and DEALLOCATE ALL supported. Works with SELECT, INSERT, UPDATE, DELETE.
 
-### 🟡 DECLARE / FETCH / CLOSE (cursors)
+### ✅ DECLARE / FETCH / CLOSE (cursors)
 
 ```sql
 DECLARE cur CURSOR FOR SELECT * FROM large_table;
 FETCH 100 FROM cur;
 CLOSE cur;
+CLOSE ALL;
 ```
 
-No cursor support.
+Implemented: cursors materialize the query result on DECLARE and support
+forward FETCH with a count. CLOSE and CLOSE ALL supported. Duplicate cursor
+names are rejected.
 
 ---
 

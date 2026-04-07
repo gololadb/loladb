@@ -669,9 +669,48 @@ func (ex *Executor) execProject(n *planner.PhysProject) (*Result, error) {
 		}
 	}
 
+	// Check if any projected expression is a set-returning function (unnest).
+	srfIdx := -1
+	for i, expr := range n.Exprs {
+		if fn, ok := expr.(*planner.ExprFunc); ok && strings.ToLower(fn.Name) == "unnest" {
+			srfIdx = i
+			break
+		}
+	}
+
 	result := &Result{Columns: n.Names}
 	for _, row := range child.Rows {
 		r := &planner.Row{Columns: row, Names: child.Columns}
+
+		if srfIdx >= 0 {
+			// Evaluate the SRF argument to get the array, then expand.
+			fn := n.Exprs[srfIdx].(*planner.ExprFunc)
+			arrVal, err := fn.Args[0].Eval(r)
+			if err != nil {
+				return nil, err
+			}
+			elements := expandArray(arrVal)
+			// Evaluate non-SRF expressions once.
+			base := make([]tuple.Datum, len(n.Exprs))
+			for j, expr := range n.Exprs {
+				if j == srfIdx {
+					continue
+				}
+				val, err := expr.Eval(r)
+				if err != nil {
+					return nil, err
+				}
+				base[j] = val
+			}
+			for _, elem := range elements {
+				projected := make([]tuple.Datum, len(n.Exprs))
+				copy(projected, base)
+				projected[srfIdx] = elem
+				result.Rows = append(result.Rows, projected)
+			}
+			continue
+		}
+
 		var projected []tuple.Datum
 		for _, expr := range n.Exprs {
 			val, err := expr.Eval(r)
@@ -683,6 +722,34 @@ func (ex *Executor) execProject(n *planner.PhysProject) (*Result, error) {
 		result.Rows = append(result.Rows, projected)
 	}
 	return result, nil
+}
+
+// expandArray parses a PG array literal or array datum into individual elements.
+func expandArray(d tuple.Datum) []tuple.Datum {
+	if d.Type == tuple.TypeNull {
+		return nil
+	}
+	s := ""
+	switch d.Type {
+	case tuple.TypeText:
+		s = d.Text
+	default:
+		return []tuple.Datum{d}
+	}
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return []tuple.Datum{d}
+	}
+	inner := s[1 : len(s)-1]
+	if inner == "" {
+		return nil
+	}
+	parts := strings.Split(inner, ",")
+	result := make([]tuple.Datum, len(parts))
+	for i, p := range parts {
+		result[i] = tuple.DText(strings.TrimSpace(p))
+	}
+	return result
 }
 
 // --- Join executors ---
@@ -1026,6 +1093,20 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				st.count++
 				continue
 			}
+
+			// Ordered-set aggregates: accumulate the WITHIN GROUP expression value.
+			if ad.WithinGroupExpr != nil {
+				wval, err := ad.WithinGroupExpr.Eval(r)
+				if err != nil {
+					return nil, err
+				}
+				if wval.Type != tuple.TypeNull {
+					st.arrBuf = append(st.arrBuf, wval)
+					st.count++
+				}
+				continue
+			}
+
 			if len(ad.ArgExprs) == 0 {
 				st.count++
 				continue
@@ -1227,6 +1308,81 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				} else {
 					n := float64(st.count)
 					row = append(row, tuple.DFloat64((st.sumSq-st.sum*st.sum/n)/n))
+				}
+			case "percentile_cont":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					// Get the fraction argument.
+					frac := 0.5
+					if len(ad.ArgExprs) > 0 {
+						fv, err := ad.ArgExprs[0].Eval(&planner.Row{})
+						if err == nil {
+							frac = datumToFloat64(fv)
+						}
+					}
+					// Sort collected values.
+					sort.Slice(st.arrBuf, func(a, b int) bool {
+						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+					})
+					// Continuous interpolation.
+					n := float64(len(st.arrBuf))
+					idx := frac * (n - 1)
+					lo := int(math.Floor(idx))
+					hi := int(math.Ceil(idx))
+					if lo == hi || hi >= len(st.arrBuf) {
+						row = append(row, tuple.DFloat64(datumToFloat64(st.arrBuf[lo])))
+					} else {
+						loVal := datumToFloat64(st.arrBuf[lo])
+						hiVal := datumToFloat64(st.arrBuf[hi])
+						row = append(row, tuple.DFloat64(loVal+(hiVal-loVal)*(idx-float64(lo))))
+					}
+				}
+			case "percentile_disc":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					frac := 0.5
+					if len(ad.ArgExprs) > 0 {
+						fv, err := ad.ArgExprs[0].Eval(&planner.Row{})
+						if err == nil {
+							frac = datumToFloat64(fv)
+						}
+					}
+					sort.Slice(st.arrBuf, func(a, b int) bool {
+						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+					})
+					// Discrete: return the first value whose cumulative fraction >= frac.
+					idx := int(math.Ceil(frac*float64(len(st.arrBuf)))) - 1
+					if idx < 0 {
+						idx = 0
+					}
+					if idx >= len(st.arrBuf) {
+						idx = len(st.arrBuf) - 1
+					}
+					row = append(row, st.arrBuf[idx])
+				}
+			case "mode":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					// Find the most frequent value.
+					counts := map[string]int{}
+					valMap := map[string]tuple.Datum{}
+					for _, v := range st.arrBuf {
+						key := datumToStringVal(v)
+						counts[key]++
+						valMap[key] = v
+					}
+					bestKey := ""
+					bestCount := 0
+					for k, c := range counts {
+						if c > bestCount {
+							bestCount = c
+							bestKey = k
+						}
+					}
+					row = append(row, valMap[bestKey])
 				}
 			default:
 				row = append(row, tuple.DNull())
@@ -3884,8 +4040,41 @@ func (ex *Executor) execValues(n *planner.PhysValues) (*Result, error) {
 }
 
 func (ex *Executor) execResult(n *planner.PhysResult) (*Result, error) {
-	row := make([]tuple.Datum, len(n.Exprs))
 	emptyRow := &planner.Row{}
+
+	// Check for set-returning function (unnest).
+	for i, expr := range n.Exprs {
+		if fn, ok := expr.(*planner.ExprFunc); ok && strings.ToLower(fn.Name) == "unnest" {
+			arrVal, err := fn.Args[0].Eval(emptyRow)
+			if err != nil {
+				return nil, fmt.Errorf("executor: Result eval: %w", err)
+			}
+			elements := expandArray(arrVal)
+			// Evaluate non-SRF expressions once.
+			base := make([]tuple.Datum, len(n.Exprs))
+			for j, e := range n.Exprs {
+				if j == i {
+					continue
+				}
+				val, err := e.Eval(emptyRow)
+				if err != nil {
+					return nil, fmt.Errorf("executor: Result eval: %w", err)
+				}
+				base[j] = val
+			}
+			result := &Result{Columns: n.Names}
+			for _, elem := range elements {
+				projected := make([]tuple.Datum, len(n.Exprs))
+				copy(projected, base)
+				projected[i] = elem
+				result.Rows = append(result.Rows, projected)
+			}
+			result.Message = fmt.Sprintf("SELECT %d", len(result.Rows))
+			return result, nil
+		}
+	}
+
+	row := make([]tuple.Datum, len(n.Exprs))
 	for i, expr := range n.Exprs {
 		val, err := expr.Eval(emptyRow)
 		if err != nil {

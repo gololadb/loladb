@@ -1653,6 +1653,15 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		}
 		return tuple.DInt64(count), nil
 
+	case "unnest":
+		// unnest() is a set-returning function. When evaluated as a scalar
+		// (e.g. in evalBuiltinFunc), just return the array value. The actual
+		// row expansion is handled by the executor's project node.
+		if len(args) > 0 {
+			return args[0].Eval(row)
+		}
+		return tuple.DNull(), nil
+
 	default:
 		return tuple.DNull(), fmt.Errorf("function %s is not supported", name)
 	}

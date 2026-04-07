@@ -1159,6 +1159,12 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 	case "?":
 		op = OpJSONExists
 		resultTyp = tuple.TypeBool
+	case "?|":
+		op = OpJSONExistsAny
+		resultTyp = tuple.TypeBool
+	case "?&":
+		op = OpJSONExistsAll
+		resultTyp = tuple.TypeBool
 	case "#-":
 		op = OpJSONDeletePath
 		resultTyp = tuple.TypeJSON
@@ -3404,7 +3410,8 @@ func isAggregateFunc(name string) bool {
 		"bool_and", "bool_or", "every",
 		"string_agg", "array_agg",
 		"stddev", "stddev_pop", "stddev_samp",
-		"variance", "var_pop", "var_samp":
+		"variance", "var_pop", "var_samp",
+		"percentile_cont", "percentile_disc", "mode":
 		return true
 	}
 	return false
@@ -3460,16 +3467,39 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 		case "stddev", "stddev_pop", "stddev_samp",
 			"variance", "var_pop", "var_samp":
 			retType = tuple.TypeFloat64
+		case "percentile_cont":
+			retType = tuple.TypeFloat64
+		case "percentile_disc":
+			// Returns the type of the ORDER BY expression.
+			retType = tuple.TypeFloat64
+		case "mode":
+			retType = tuple.TypeText
 		default:
 			retType = tuple.TypeText
 		}
+
+		// Handle WITHIN GROUP (ORDER BY ...) for ordered-set aggregates.
+		var withinGroupExpr AnalyzedExpr
+		if len(f.AggWithinGroup) > 0 {
+			resolved, err := a.transformExpr(f.AggWithinGroup[0].Node)
+			if err != nil {
+				return nil, err
+			}
+			withinGroupExpr = resolved
+			// For mode and percentile_disc, return type matches the sort expression.
+			if name == "mode" || name == "percentile_disc" {
+				retType = resolved.ResultType()
+			}
+		}
+
 		return &AggRef{
-			AggFunc:   name,
-			Args:      args,
-			Star:      f.AggStar,
-			Distinct:  f.AggDistinct,
-			AggIndex:  -1, // set later by the planner
-			ReturnTyp: retType,
+			AggFunc:         name,
+			Args:            args,
+			Star:            f.AggStar,
+			Distinct:        f.AggDistinct,
+			AggIndex:        -1, // set later by the planner
+			ReturnTyp:       retType,
+			WithinGroupExpr: withinGroupExpr,
 		}, nil
 	}
 
