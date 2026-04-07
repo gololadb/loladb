@@ -451,6 +451,11 @@ func splitByNewline(s string) []string {
 // --- Scan executors ---
 
 func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
+	// Check if this scan targets a virtual catalog table.
+	if vr := ex.virtualCatalogTable(n.Table, n.Alias); vr != nil {
+		return vr, nil
+	}
+
 	// Check if this scan targets a CTE working table (recursive CTE self-reference).
 	if cte := ex.getCTEResult(n.Table); cte != nil {
 		// Remap column names to use the scan's alias.

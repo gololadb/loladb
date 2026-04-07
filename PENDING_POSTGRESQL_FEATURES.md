@@ -399,19 +399,23 @@ SELECT mode() WITHIN GROUP (ORDER BY status) FROM orders;
 
 ## 9. System Catalog and Introspection
 
-### 🔴 information_schema
+### ✅ information_schema
 
 ```sql
 SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';
 SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'users';
 ```
 
-No information_schema views. Applications and ORMs rely heavily on these.
+Virtual catalog tables: `information_schema.tables` (table_catalog,
+table_schema, table_name, table_type), `information_schema.columns`
+(column_name, ordinal_position, column_default, is_nullable, data_type),
+`information_schema.schemata`. Queryable with WHERE, ORDER BY, joins.
 
-### 🔴 pg_catalog system views
+### ✅ pg_catalog system views
 
-`pg_tables`, `pg_indexes`, `pg_views`, `pg_roles`, `pg_stat_user_tables`, etc.
-The catalog data exists internally but is not exposed as queryable views.
+`pg_tables`, `pg_indexes`, `pg_views`, `pg_roles`, `pg_stat_user_tables`,
+`pg_namespace`. Accessible both qualified (`pg_catalog.pg_tables`) and
+unqualified (`pg_tables`). Generated dynamically from catalog metadata.
 
 ### 🟡 System information functions
 
@@ -629,7 +633,7 @@ SELECT pg_advisory_lock(12345);
 
 | COPY | Bulk I/O |
 | VACUUM | Maintenance |
-| information_schema | Introspection |
+
 | PREPARE / EXECUTE | Prepared statements |
 
 ### Important for real-world applications (🟡)

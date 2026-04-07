@@ -1436,6 +1436,11 @@ func tupleToIndexInfo(tup *tuple.Tuple) *IndexInfo {
 }
 
 // getIndexesForTable returns all indexes for the given table OID.
+// GetTableIndexes returns all indexes for a table by its OID.
+func (c *Catalog) GetTableIndexes(tableOID int32) ([]IndexInfo, error) {
+	return c.getIndexesForTable(tableOID)
+}
+
 func (c *Catalog) getIndexesForTable(tableOID int32) ([]IndexInfo, error) {
 	xid := c.Eng.TxMgr.Begin()
 	snap := c.Eng.TxMgr.Snapshot(xid)

@@ -120,11 +120,46 @@ func (a *Analyzer) addRangeTableEntry(tableName, alias string) (*RangeTblEntry, 
 
 // addRangeTableEntryQualified resolves a schema-qualified table name.
 func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) (*RangeTblEntry, error) {
+	// Check for virtual catalog tables first.
+	qualName := tableName
+	if schema != "" {
+		qualName = schema + "." + tableName
+	}
+	if vcols := virtualCatalogColumns(qualName); vcols != nil {
+		if alias == "" {
+			alias = tableName
+		}
+		rte := &RangeTblEntry{
+			RTIndex: len(a.rangeTable) + 1,
+			RelName: qualName,
+			Alias:   alias,
+			Columns: vcols,
+		}
+		a.rangeTable = append(a.rangeTable, rte)
+		return rte, nil
+	}
+
 	rel, err := a.Cat.FindRelationQualified(schema, tableName)
 	if err != nil {
 		return nil, err
 	}
 	if rel == nil {
+		// Also check unqualified names for pg_catalog virtual tables.
+		if schema == "" {
+			if vcols := virtualCatalogColumns("pg_catalog." + tableName); vcols != nil {
+				if alias == "" {
+					alias = tableName
+				}
+				rte := &RangeTblEntry{
+					RTIndex: len(a.rangeTable) + 1,
+					RelName: "pg_catalog." + tableName,
+					Alias:   alias,
+					Columns: vcols,
+				}
+				a.rangeTable = append(a.rangeTable, rte)
+				return rte, nil
+			}
+		}
 		if schema != "" {
 			return nil, fmt.Errorf("analyzer: relation %q.%q does not exist", schema, tableName)
 		}
@@ -146,7 +181,7 @@ func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) 
 
 	// Use schema-qualified name for the RelName so the executor can
 	// find the correct relation when multiple schemas have same-named tables.
-	qualName := tableName
+	qualName = tableName
 	if schema != "" {
 		qualName = schema + "." + tableName
 	}
@@ -3167,6 +3202,101 @@ func (a *Analyzer) AddRangeTableEntry(tableName, alias string) {
 // GetRangeTable returns the current range table.
 func (a *Analyzer) GetRangeTable() []*RangeTblEntry {
 	return a.rangeTable
+}
+
+// virtualCatalogColumns returns synthetic column definitions for virtual
+// catalog tables (information_schema.*, pg_catalog.*). Returns nil if the
+// table name is not a recognized virtual table.
+func virtualCatalogColumns(qualName string) []RTEColumn {
+	type colDef struct {
+		name string
+		typ  tuple.DatumType
+	}
+	var defs []colDef
+
+	switch strings.ToLower(qualName) {
+	case "information_schema.tables":
+		defs = []colDef{
+			{"table_catalog", tuple.TypeText},
+			{"table_schema", tuple.TypeText},
+			{"table_name", tuple.TypeText},
+			{"table_type", tuple.TypeText},
+		}
+	case "information_schema.columns":
+		defs = []colDef{
+			{"table_catalog", tuple.TypeText},
+			{"table_schema", tuple.TypeText},
+			{"table_name", tuple.TypeText},
+			{"column_name", tuple.TypeText},
+			{"ordinal_position", tuple.TypeInt64},
+			{"column_default", tuple.TypeText},
+			{"is_nullable", tuple.TypeText},
+			{"data_type", tuple.TypeText},
+		}
+	case "information_schema.schemata":
+		defs = []colDef{
+			{"catalog_name", tuple.TypeText},
+			{"schema_name", tuple.TypeText},
+			{"schema_owner", tuple.TypeText},
+		}
+	case "pg_catalog.pg_tables":
+		defs = []colDef{
+			{"schemaname", tuple.TypeText},
+			{"tablename", tuple.TypeText},
+			{"tableowner", tuple.TypeText},
+			{"hasindexes", tuple.TypeBool},
+			{"hasrules", tuple.TypeBool},
+			{"hastriggers", tuple.TypeBool},
+		}
+	case "pg_catalog.pg_indexes":
+		defs = []colDef{
+			{"schemaname", tuple.TypeText},
+			{"tablename", tuple.TypeText},
+			{"indexname", tuple.TypeText},
+			{"indexdef", tuple.TypeText},
+		}
+	case "pg_catalog.pg_views":
+		defs = []colDef{
+			{"schemaname", tuple.TypeText},
+			{"viewname", tuple.TypeText},
+			{"viewowner", tuple.TypeText},
+			{"definition", tuple.TypeText},
+		}
+	case "pg_catalog.pg_roles":
+		defs = []colDef{
+			{"rolname", tuple.TypeText},
+			{"rolsuper", tuple.TypeBool},
+			{"rolinherit", tuple.TypeBool},
+			{"rolcreaterole", tuple.TypeBool},
+			{"rolcreatedb", tuple.TypeBool},
+			{"rolcanlogin", tuple.TypeBool},
+			{"rolbypassrls", tuple.TypeBool},
+			{"rolconnlimit", tuple.TypeInt64},
+		}
+	case "pg_catalog.pg_stat_user_tables":
+		defs = []colDef{
+			{"relid", tuple.TypeInt64},
+			{"schemaname", tuple.TypeText},
+			{"relname", tuple.TypeText},
+			{"seq_scan", tuple.TypeInt64},
+			{"seq_tup_read", tuple.TypeInt64},
+			{"n_live_tup", tuple.TypeInt64},
+		}
+	case "pg_catalog.pg_namespace":
+		defs = []colDef{
+			{"oid", tuple.TypeInt64},
+			{"nspname", tuple.TypeText},
+			{"nspowner", tuple.TypeInt64},
+		}
+	default:
+		return nil
+	}
+
+	cols := make([]RTEColumn, len(defs))
+	for i, d := range defs {
+		cols[i] = RTEColumn{Name: d.name, Type: d.typ, ColNum: int32(i + 1)}
+	}
+	return cols
 }
 
 
