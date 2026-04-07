@@ -599,10 +599,11 @@ func (n *LogicalDropColumn) OutputColumns() []string { return nil }
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
 // LogicalAggregate groups input rows and computes aggregate functions.
 type LogicalAggregate struct {
-	GroupExprs []Expr    // GROUP BY expressions (empty = single group)
-	AggDescs   []AggDesc // aggregate function descriptors
-	HavingQual Expr      // HAVING filter (nil = no HAVING)
-	Child      LogicalNode
+	GroupExprs   []Expr    // GROUP BY expressions (empty = single group)
+	AggDescs     []AggDesc // aggregate function descriptors
+	HavingQual   Expr      // HAVING filter (nil = no HAVING)
+	GroupingSets [][]int   // for GROUPING SETS/CUBE/ROLLUP: each set is indices into GroupExprs
+	Child        LogicalNode
 }
 
 // AggDesc describes a single aggregate computation.

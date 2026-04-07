@@ -1035,6 +1035,11 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 		return nil, err
 	}
 
+	// GROUPING SETS / CUBE / ROLLUP: run aggregation once per set.
+	if len(n.GroupingSets) > 0 {
+		return ex.execGroupingSets(n, child)
+	}
+
 	type aggState struct {
 		count  int64
 		sum    float64
@@ -1431,6 +1436,260 @@ func datumToFloat64(d tuple.Datum) float64 {
 	default:
 		return 0
 	}
+}
+
+// execGroupingSets runs the aggregation once per grouping set, producing
+// a UNION ALL of the results. Non-active group columns are set to NULL.
+func (ex *Executor) execGroupingSets(n *planner.PhysAggregate, child *Result) (*Result, error) {
+	// Build output column names: group columns + aggregate columns.
+	var outCols []string
+	for _, expr := range n.GroupExprs {
+		name := expr.String()
+		if ec, ok := expr.(*planner.ExprColumn); ok {
+			for _, cn := range child.Columns {
+				bare := cn
+				if idx := strings.LastIndex(cn, "."); idx >= 0 {
+					bare = cn[idx+1:]
+				}
+				if strings.EqualFold(bare, ec.Column) {
+					name = cn
+					break
+				}
+			}
+		}
+		outCols = append(outCols, name)
+	}
+	for i, ad := range n.AggDescs {
+		if ad.Star {
+			outCols = append(outCols, fmt.Sprintf("%s_%d", ad.Func, i))
+		} else {
+			outCols = append(outCols, fmt.Sprintf("%s_%d", ad.Func, i))
+		}
+	}
+
+	result := &Result{Columns: outCols}
+
+	for _, activeSet := range n.GroupingSets {
+		// Build a set of active group expression indices for fast lookup.
+		active := map[int]bool{}
+		for _, idx := range activeSet {
+			active[idx] = true
+		}
+
+		type aggState struct {
+			count  int64
+			sum    float64
+			sumSq  float64
+			hasVal bool
+			min    tuple.Datum
+			max    tuple.Datum
+			vals   []tuple.Datum
+			strBuf strings.Builder
+			arrBuf []tuple.Datum
+		}
+		type groupEntry struct {
+			groupKey []tuple.Datum
+			aggs     []aggState
+		}
+
+		var groups []*groupEntry
+		groupIndex := map[string]*groupEntry{}
+
+		for _, row := range child.Rows {
+			r := &planner.Row{Columns: row, Names: child.Columns}
+
+			// Compute group key using only active expressions.
+			groupKey := make([]tuple.Datum, len(n.GroupExprs))
+			var keyBuf strings.Builder
+			for i, expr := range n.GroupExprs {
+				if active[i] {
+					val, err := expr.Eval(r)
+					if err != nil {
+						return nil, err
+					}
+					groupKey[i] = val
+					fmt.Fprintf(&keyBuf, "%v|", val)
+				} else {
+					groupKey[i] = tuple.DNull()
+					keyBuf.WriteString("NULL|")
+				}
+			}
+			keyStr := keyBuf.String()
+
+			entry, exists := groupIndex[keyStr]
+			if !exists {
+				entry = &groupEntry{
+					groupKey: groupKey,
+					aggs:     make([]aggState, len(n.AggDescs)),
+				}
+				groups = append(groups, entry)
+				groupIndex[keyStr] = entry
+			}
+
+			// Feed row into aggregates.
+			for i, ad := range n.AggDescs {
+				st := &entry.aggs[i]
+				if ad.Star {
+					st.count++
+					continue
+				}
+				if ad.WithinGroupExpr != nil {
+					wval, err := ad.WithinGroupExpr.Eval(r)
+					if err != nil {
+						return nil, err
+					}
+					if wval.Type != tuple.TypeNull {
+						st.arrBuf = append(st.arrBuf, wval)
+						st.count++
+					}
+					continue
+				}
+				if len(ad.ArgExprs) == 0 {
+					st.count++
+					continue
+				}
+				val, err := ad.ArgExprs[0].Eval(r)
+				if err != nil {
+					return nil, err
+				}
+				if val.Type == tuple.TypeNull {
+					continue
+				}
+				if ad.Distinct {
+					dup := false
+					for _, prev := range st.vals {
+						if planner.CompareDatums(prev, val) == 0 {
+							dup = true
+							break
+						}
+					}
+					if dup {
+						continue
+					}
+					st.vals = append(st.vals, val)
+				}
+				st.count++
+				switch ad.Func {
+				case "sum", "avg":
+					st.sum += datumToFloat64(val)
+				case "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp":
+					v := datumToFloat64(val)
+					st.sum += v
+					st.sumSq += v * v
+				case "min":
+					if !st.hasVal || planner.CompareDatums(val, st.min) < 0 {
+						st.min = val
+					}
+				case "max":
+					if !st.hasVal || planner.CompareDatums(val, st.max) > 0 {
+						st.max = val
+					}
+				case "string_agg":
+					delim := ","
+					if len(ad.ArgExprs) >= 2 {
+						dv, err := ad.ArgExprs[1].Eval(r)
+						if err == nil && dv.Type == tuple.TypeText {
+							delim = dv.Text
+						}
+					}
+					if st.hasVal {
+						st.strBuf.WriteString(delim)
+					}
+					st.strBuf.WriteString(datumToStringVal(val))
+				case "array_agg":
+					st.arrBuf = append(st.arrBuf, val)
+				}
+				st.hasVal = true
+			}
+		}
+
+		// If no rows and this is the empty set, produce a single row.
+		if len(groups) == 0 && len(activeSet) == 0 {
+			entry := &groupEntry{
+				groupKey: make([]tuple.Datum, len(n.GroupExprs)),
+				aggs:     make([]aggState, len(n.AggDescs)),
+			}
+			for i := range entry.groupKey {
+				entry.groupKey[i] = tuple.DNull()
+			}
+			groups = append(groups, entry)
+		}
+
+		// Finalize and emit rows.
+		for _, entry := range groups {
+			row := make([]tuple.Datum, 0, len(n.GroupExprs)+len(n.AggDescs))
+			row = append(row, entry.groupKey...)
+			for i, ad := range n.AggDescs {
+				st := &entry.aggs[i]
+				switch ad.Func {
+				case "count":
+					row = append(row, tuple.DInt64(st.count))
+				case "sum":
+					if st.count == 0 {
+						row = append(row, tuple.DNull())
+					} else {
+						row = append(row, tuple.DFloat64(st.sum))
+					}
+				case "avg":
+					if st.count == 0 {
+						row = append(row, tuple.DNull())
+					} else {
+						row = append(row, tuple.DFloat64(st.sum/float64(st.count)))
+					}
+				case "min":
+					if !st.hasVal {
+						row = append(row, tuple.DNull())
+					} else {
+						row = append(row, st.min)
+					}
+				case "max":
+					if !st.hasVal {
+						row = append(row, tuple.DNull())
+					} else {
+						row = append(row, st.max)
+					}
+				case "bool_and", "every":
+					if !st.hasVal {
+						row = append(row, tuple.DNull())
+					} else {
+						row = append(row, st.min)
+					}
+				case "bool_or":
+					if !st.hasVal {
+						row = append(row, tuple.DNull())
+					} else {
+						row = append(row, st.max)
+					}
+				case "string_agg":
+					if !st.hasVal {
+						row = append(row, tuple.DNull())
+					} else {
+						row = append(row, tuple.DText(st.strBuf.String()))
+					}
+				case "array_agg":
+					if len(st.arrBuf) == 0 {
+						row = append(row, tuple.DNull())
+					} else {
+						var sb strings.Builder
+						sb.WriteByte('{')
+						for j, v := range st.arrBuf {
+							if j > 0 {
+								sb.WriteByte(',')
+							}
+							sb.WriteString(datumToStringVal(v))
+						}
+						sb.WriteByte('}')
+						row = append(row, tuple.DText(sb.String()))
+					}
+				default:
+					row = append(row, tuple.DNull())
+				}
+			}
+			result.Rows = append(result.Rows, row)
+		}
+	}
+
+	return result, nil
 }
 
 func (ex *Executor) execSort(n *planner.PhysSort) (*Result, error) {

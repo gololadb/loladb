@@ -308,14 +308,62 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		collectWindowFuncs(te.Expr, &q.WindowFuncs)
 	}
 
-	// Step 4: Transform GROUP BY.
+	// Step 4: Transform GROUP BY (including GROUPING SETS / CUBE / ROLLUP).
 	if len(n.GroupClause) > 0 {
+		hasGroupingSets := false
 		for _, g := range n.GroupClause {
-			expr, err := a.transformExpr(g)
-			if err != nil {
-				return nil, fmt.Errorf("analyzer: GROUP BY: %w", err)
+			if _, ok := g.(*parser.GroupingSet); ok {
+				hasGroupingSets = true
+				break
 			}
-			q.GroupClause = append(q.GroupClause, expr)
+		}
+
+		if hasGroupingSets {
+			// Collect all unique group expressions and build grouping sets.
+			exprIndex := map[string]int{} // expr string → index
+			for _, g := range n.GroupClause {
+				gs, ok := g.(*parser.GroupingSet)
+				if !ok {
+					// Plain expression alongside grouping sets — treat as single-element set.
+					expr, err := a.transformExpr(g)
+					if err != nil {
+						return nil, fmt.Errorf("analyzer: GROUP BY: %w", err)
+					}
+					key := expr.String()
+					if _, exists := exprIndex[key]; !exists {
+						exprIndex[key] = len(q.GroupClause)
+						q.GroupClause = append(q.GroupClause, expr)
+					}
+					continue
+				}
+				sets := expandGroupingSet(gs)
+				for _, set := range sets {
+					var idxSet []int
+					for _, node := range set {
+						expr, err := a.transformExpr(node)
+						if err != nil {
+							return nil, fmt.Errorf("analyzer: GROUP BY: %w", err)
+						}
+						key := expr.String()
+						idx, exists := exprIndex[key]
+						if !exists {
+							idx = len(q.GroupClause)
+							exprIndex[key] = idx
+							q.GroupClause = append(q.GroupClause, expr)
+						}
+						idxSet = append(idxSet, idx)
+					}
+					q.GroupingSets = append(q.GroupingSets, idxSet)
+				}
+			}
+		} else {
+			for _, g := range n.GroupClause {
+				expr, err := a.transformExpr(g)
+				if err != nil {
+					return nil, fmt.Errorf("analyzer: GROUP BY: %w", err)
+				}
+				q.GroupClause = append(q.GroupClause, expr)
+			}
 		}
 	}
 
@@ -1151,10 +1199,21 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 		op = OpJSONHashArrowText
 		resultTyp = tuple.TypeText
 	case "@>":
-		op = OpJSONContains
+		if left != nil && left.ResultType() == tuple.TypeJSON {
+			op = OpJSONContains
+		} else {
+			op = OpArrayContains
+		}
 		resultTyp = tuple.TypeBool
 	case "<@":
-		op = OpJSONContainedBy
+		if left != nil && left.ResultType() == tuple.TypeJSON {
+			op = OpJSONContainedBy
+		} else {
+			op = OpArrayContainedBy
+		}
+		resultTyp = tuple.TypeBool
+	case "&&":
+		op = OpArrayOverlap
 		resultTyp = tuple.TypeBool
 	case "?":
 		op = OpJSONExists
@@ -3402,6 +3461,70 @@ func (a *Analyzer) analyzeWindowDef(wd *parser.WindowDef) (*AnalyzedWindowDef, e
 	}
 
 	return result, nil
+}
+
+// expandGroupingSet expands a GroupingSet node into a list of expression lists.
+// GROUPING SETS ((a), (b), ()) → [[a], [b], []]
+// ROLLUP (a, b) → [[a, b], [a], []]
+// CUBE (a, b) → [[a, b], [a], [b], []]
+func expandGroupingSet(gs *parser.GroupingSet) [][]parser.Expr {
+	switch gs.Kind {
+	case parser.GROUPING_SET_SETS:
+		var result [][]parser.Expr
+		for _, item := range gs.Content {
+			if nested, ok := item.(*parser.GroupingSet); ok {
+				if nested.Kind == parser.GROUPING_SET_EMPTY {
+					result = append(result, nil) // empty grouping set ()
+				} else {
+					// Nested ROLLUP/CUBE inside GROUPING SETS
+					result = append(result, expandGroupingSet(nested)...)
+				}
+			} else if expr, ok := item.(parser.Expr); ok {
+				result = append(result, []parser.Expr{expr})
+			}
+		}
+		return result
+	case parser.GROUPING_SET_ROLLUP:
+		// ROLLUP(a, b, c) → (a,b,c), (a,b), (a), ()
+		exprs := make([]parser.Expr, 0, len(gs.Content))
+		for _, item := range gs.Content {
+			if e, ok := item.(parser.Expr); ok {
+				exprs = append(exprs, e)
+			}
+		}
+		var result [][]parser.Expr
+		for i := len(exprs); i >= 0; i-- {
+			set := make([]parser.Expr, i)
+			copy(set, exprs[:i])
+			result = append(result, set)
+		}
+		return result
+	case parser.GROUPING_SET_CUBE:
+		// CUBE(a, b) → all 2^n subsets: (a,b), (a), (b), ()
+		exprs := make([]parser.Expr, 0, len(gs.Content))
+		for _, item := range gs.Content {
+			if e, ok := item.(parser.Expr); ok {
+				exprs = append(exprs, e)
+			}
+		}
+		n := len(exprs)
+		total := 1 << n
+		var result [][]parser.Expr
+		// Iterate from all-bits-set down to 0 for natural ordering.
+		for mask := total - 1; mask >= 0; mask-- {
+			var set []parser.Expr
+			for bit := 0; bit < n; bit++ {
+				if mask&(1<<bit) != 0 {
+					set = append(set, exprs[bit])
+				}
+			}
+			result = append(result, set)
+		}
+		return result
+	case parser.GROUPING_SET_EMPTY:
+		return [][]parser.Expr{nil}
+	}
+	return nil
 }
 
 func isAggregateFunc(name string) bool {

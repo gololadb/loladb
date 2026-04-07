@@ -1152,10 +1152,11 @@ func (o *Optimizer) optimizeAggregate(n *LogicalAggregate) (PhysicalNode, error)
 		return nil, err
 	}
 	return &PhysAggregate{
-		GroupExprs:  n.GroupExprs,
-		AggDescs:    n.AggDescs,
-		HavingQual:  n.HavingQual,
-		Child:       child,
+		GroupExprs:   n.GroupExprs,
+		AggDescs:     n.AggDescs,
+		HavingQual:   n.HavingQual,
+		GroupingSets: n.GroupingSets,
+		Child:        child,
 	}, nil
 }
 

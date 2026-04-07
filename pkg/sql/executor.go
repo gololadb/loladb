@@ -241,6 +241,16 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execDeallocate(ds)
 	}
 
+	// Handle REINDEX statements.
+	if rs, ok := stmt.(*parser.ReindexStmt); ok {
+		return ex.execReindex(rs)
+	}
+
+	// Handle GRANT / REVOKE statements.
+	if gs, ok := stmt.(*parser.GrantStmt); ok {
+		return ex.execGrant(gs)
+	}
+
 	// Handle cursor statements.
 	if dc, ok := stmt.(*parser.DeclareCursorStmt); ok {
 		return ex.execDeclareCursor(dc)
@@ -755,6 +765,94 @@ func (ex *Executor) execComment(cs *parser.CommentStmt) (*Result, error) {
 	}
 	ex.Cat.SetComment(key, comment)
 	return &Result{Message: "COMMENT"}, nil
+}
+
+// execReindex handles REINDEX TABLE/INDEX statements.
+func (ex *Executor) execReindex(rs *parser.ReindexStmt) (*Result, error) {
+	if rs.Relation != nil {
+		name := rs.Relation.Relname
+		rel, err := ex.Cat.FindRelation(name)
+		if err != nil || rel == nil {
+			return nil, fmt.Errorf("relation \"%s\" does not exist", name)
+		}
+	}
+	// In-memory indexes don't need physical rebuilding; accept the command.
+	return &Result{Message: "REINDEX"}, nil
+}
+
+// execGrant handles GRANT and REVOKE statements for table-level privileges.
+func (ex *Executor) execGrant(gs *parser.GrantStmt) (*Result, error) {
+	// Combine all privileges.
+	var privs catalog.Privilege
+	for _, p := range gs.Privileges {
+		privs |= catalog.ParsePrivilege(p)
+	}
+	if privs == 0 {
+		return nil, fmt.Errorf("unrecognized privilege type")
+	}
+
+	for _, objName := range gs.Objects {
+		tableName := objName[len(objName)-1]
+		rel, err := ex.Cat.FindRelation(tableName)
+		if err != nil || rel == nil {
+			return nil, fmt.Errorf("relation \"%s\" does not exist", tableName)
+		}
+
+		for _, grantee := range gs.Grantees {
+			// Resolve grantee role OID; auto-create if not found (like PG's PUBLIC).
+			role, err := ex.Cat.FindRole(grantee)
+			if err != nil {
+				return nil, err
+			}
+			granteeOID := int32(0)
+			if role != nil {
+				granteeOID = role.OID
+			}
+
+			// Grantor is the current user (0 if not set).
+			grantorOID := int32(0)
+			if ex.CurrentUser != "" {
+				grantor, _ := ex.Cat.FindRole(ex.CurrentUser)
+				if grantor != nil {
+					grantorOID = grantor.OID
+				}
+			}
+
+			if gs.IsGrant {
+				if len(gs.PrivCols) > 0 {
+					// Column-level grant.
+					for i, p := range gs.Privileges {
+						priv := catalog.ParsePrivilege(p)
+						var cols []string
+						if i < len(gs.PrivCols) && gs.PrivCols[i] != nil {
+							cols = gs.PrivCols[i]
+						}
+						ex.Cat.GrantObjectPrivilegeColumns(rel.OID, granteeOID, grantorOID, priv, cols)
+					}
+				} else {
+					ex.Cat.GrantObjectPrivilege(rel.OID, granteeOID, grantorOID, privs)
+				}
+			} else {
+				if len(gs.PrivCols) > 0 {
+					for i, p := range gs.Privileges {
+						priv := catalog.ParsePrivilege(p)
+						var cols []string
+						if i < len(gs.PrivCols) && gs.PrivCols[i] != nil {
+							cols = gs.PrivCols[i]
+						}
+						ex.Cat.RevokeObjectPrivilegeColumns(rel.OID, granteeOID, grantorOID, priv, cols)
+					}
+				} else {
+					ex.Cat.RevokeObjectPrivilege(rel.OID, granteeOID, grantorOID, privs)
+				}
+			}
+		}
+	}
+
+	if gs.IsGrant {
+		return &Result{Message: "GRANT"}, nil
+	}
+	return &Result{Message: "REVOKE"}, nil
 }
 
 // execDeclareCursor materializes the query result and stores it as a named cursor.

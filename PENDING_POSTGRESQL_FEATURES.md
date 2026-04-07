@@ -85,8 +85,8 @@ JSON/JSONB types support `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`
 ### 🟡 Array operators
 
 Arrays have a native datum type, `TEXT[]` column syntax, `ARRAY[...]`
-constructor, `arr[1]` indexing, and `unnest()`. Still missing: slicing,
-containment operators (`@>`, `<@`, `&&`).
+constructor, `arr[1]` indexing, `unnest()`, and containment operators
+(`@>`, `<@`, `&&`). Still missing: slicing (`arr[2:4]`).
 
 ### 🟢 Geometric types (point, line, box, circle, polygon, path)
 
@@ -155,14 +155,17 @@ SELECT * FROM users u, LATERAL (
 ) recent;
 ```
 
-### 🟡 GROUPING SETS / CUBE / ROLLUP
+### ✅ GROUPING SETS / CUBE / ROLLUP
 
 ```sql
 SELECT brand, size, sum(sales) FROM items
 GROUP BY GROUPING SETS ((brand), (size), ());
+SELECT a, b, sum(c) FROM t GROUP BY ROLLUP(a, b);
+SELECT a, b, sum(c) FROM t GROUP BY CUBE(a, b);
 ```
 
-Advanced grouping. Not implemented.
+Implemented: GROUPING SETS, ROLLUP, and CUBE. Each grouping set runs a
+separate aggregation pass; non-active group columns are NULL.
 
 ### ✅ VALUES as a standalone query
 
@@ -226,13 +229,15 @@ SET TRANSACTION ISOLATION LEVEL is accepted (all levels map to snapshot
 isolation). SHOW transaction_isolation / default_transaction_isolation /
 server_version and other session variables are supported.
 
-### 🟡 Row-level locking (SELECT ... FOR UPDATE / FOR SHARE)
+### ✅ Row-level locking (SELECT ... FOR UPDATE / FOR SHARE)
 
 ```sql
 SELECT * FROM accounts WHERE id = 1 FOR UPDATE;
+SELECT * FROM accounts FOR SHARE;
 ```
 
-No row-level locks. The design doc mentions this as a future item.
+Syntax accepted. Under MVCC snapshot isolation, no physical row locks are
+taken — the clause is parsed and silently ignored.
 
 ### 🟢 Two-phase commit (PREPARE TRANSACTION)
 
@@ -308,7 +313,16 @@ CREATE TABLE new_users (LIKE users INCLUDING ALL);
 Copies column definitions (name, type, NOT NULL, defaults, generated) from
 the source table. Additional columns can be added alongside LIKE.
 
-### 🟡 ALTER INDEX / REINDEX
+### 🟡 ALTER INDEX
+
+### ✅ REINDEX
+
+```sql
+REINDEX TABLE users;
+```
+
+Accepted: validates the table exists. In-memory indexes don't require physical
+rebuilding.
 
 ### ✅ CREATE TEMPORARY TABLE
 
@@ -509,12 +523,6 @@ CLUSTER users USING users_pkey;
 
 Physically reorder table rows to match an index.
 
-### 🟡 REINDEX
-
-```sql
-REINDEX TABLE users;
-```
-
 ### 🟢 pg_stat_statements / query statistics
 
 ### 🟢 LISTEN / NOTIFY
@@ -559,21 +567,17 @@ names are rejected.
 
 ## 13. Security
 
-### 🟡 GRANT / REVOKE (fine-grained)
+### ✅ GRANT / REVOKE (fine-grained)
 
 ```sql
 GRANT SELECT ON users TO readonly_role;
 REVOKE INSERT ON users FROM public;
-```
-
-ACL infrastructure exists in the catalog but SQL-level GRANT/REVOKE for
-table-level and column-level privileges is not fully wired.
-
-### 🟡 Column-level privileges
-
-```sql
 GRANT SELECT (name, email) ON users TO app_role;
 ```
+
+Implemented: table-level and column-level GRANT/REVOKE for SELECT, INSERT,
+UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, and ALL PRIVILEGES. Wired
+to the catalog ACL store with persistence.
 
 ### 🟢 Row-level security with USING and WITH CHECK
 

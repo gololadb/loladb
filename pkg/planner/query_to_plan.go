@@ -116,10 +116,11 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 			patchAggExprs(havingExpr, len(groupExprs))
 		}
 		plan = &LogicalAggregate{
-			GroupExprs: groupExprs,
-			AggDescs:   aggDescs,
-			HavingQual: havingExpr,
-			Child:      plan,
+			GroupExprs:   groupExprs,
+			AggDescs:     aggDescs,
+			HavingQual:   havingExpr,
+			GroupingSets: q.GroupingSets,
+			Child:        plan,
 		}
 	}
 

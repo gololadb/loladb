@@ -240,6 +240,9 @@ const (
 	OpJSONExistsAll          // ?&
 	OpJSONDelete             // - (delete key from JSON object/array)
 	OpJSONDeletePath         // #- (delete by path)
+	OpArrayContains          // @> (array contains)
+	OpArrayContainedBy       // <@ (array contained by)
+	OpArrayOverlap           // && (array overlap)
 )
 
 func (op OpKind) String() string {
@@ -302,6 +305,12 @@ func (op OpKind) String() string {
 		return "-"
 	case OpJSONDeletePath:
 		return "#-"
+	case OpArrayContains:
+		return "@>"
+	case OpArrayContainedBy:
+		return "<@"
+	case OpArrayOverlap:
+		return "&&"
 	case OpSimilarTo:
 		return "SIMILAR TO"
 	case OpNotSimilarTo:
@@ -348,6 +357,9 @@ func (e *ExprBinOp) Eval(row *Row) (tuple.Datum, error) {
 	if e.Op >= OpJSONArrow && e.Op <= OpJSONDeletePath {
 		return e.evalJSON(row)
 	}
+	if e.Op >= OpArrayContains && e.Op <= OpArrayOverlap {
+		return e.evalArrayOp(row)
+	}
 	if e.Op >= OpSimilarTo && e.Op <= OpRegexNotIMatch {
 		return e.evalRegex(row)
 	}
@@ -367,6 +379,18 @@ func (e *ExprBinOp) evalJSON(row *Row) (tuple.Datum, error) {
 		return tuple.DNull(), err
 	}
 	return evalJSONOp(e.Op, lv, rv)
+}
+
+func (e *ExprBinOp) evalArrayOp(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	return evalArrayOp(e.Op, lv, rv)
 }
 
 func (e *ExprBinOp) evalLogical(row *Row) (tuple.Datum, error) {

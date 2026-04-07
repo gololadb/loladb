@@ -88,6 +88,10 @@ type Query struct {
 	// GroupClause holds GROUP BY expressions.
 	GroupClause []AnalyzedExpr
 
+	// GroupingSets holds the expanded grouping sets (each is a list of indices
+	// into GroupClause). Non-nil only for GROUPING SETS / CUBE / ROLLUP.
+	GroupingSets [][]int
+
 	// HasAggs is true when the query contains aggregate functions.
 	HasAggs bool
 
@@ -659,6 +663,9 @@ func (o *OpExpr) Eval(row *Row) (tuple.Datum, error) {
 	if o.Op >= OpJSONArrow && o.Op <= OpJSONExistsAll {
 		return evalJSONOp(o.Op, lv, rv)
 	}
+	if o.Op >= OpArrayContains && o.Op <= OpArrayOverlap {
+		return evalArrayOp(o.Op, lv, rv)
+	}
 	cmp := CompareDatums(lv, rv)
 	switch o.Op {
 	case OpEq:
@@ -1146,6 +1153,52 @@ func parsePGArrayLiteral(s string) []string {
 		return nil
 	}
 	return strings.Split(s, ",")
+}
+
+// evalArrayOp evaluates array containment and overlap operators.
+func evalArrayOp(op OpKind, lv, rv tuple.Datum) (tuple.Datum, error) {
+	lArr := parsePGArrayLiteral(datumToString(lv))
+	rArr := parsePGArrayLiteral(datumToString(rv))
+
+	switch op {
+	case OpArrayContains:
+		// lArr @> rArr: every element of rArr is in lArr
+		lSet := map[string]bool{}
+		for _, v := range lArr {
+			lSet[strings.TrimSpace(v)] = true
+		}
+		for _, v := range rArr {
+			if !lSet[strings.TrimSpace(v)] {
+				return tuple.DBool(false), nil
+			}
+		}
+		return tuple.DBool(true), nil
+	case OpArrayContainedBy:
+		// lArr <@ rArr: every element of lArr is in rArr
+		rSet := map[string]bool{}
+		for _, v := range rArr {
+			rSet[strings.TrimSpace(v)] = true
+		}
+		for _, v := range lArr {
+			if !rSet[strings.TrimSpace(v)] {
+				return tuple.DBool(false), nil
+			}
+		}
+		return tuple.DBool(true), nil
+	case OpArrayOverlap:
+		// lArr && rArr: any common element
+		lSet := map[string]bool{}
+		for _, v := range lArr {
+			lSet[strings.TrimSpace(v)] = true
+		}
+		for _, v := range rArr {
+			if lSet[strings.TrimSpace(v)] {
+				return tuple.DBool(true), nil
+			}
+		}
+		return tuple.DBool(false), nil
+	}
+	return tuple.DNull(), nil
 }
 
 // jsonDeletePath implements jsonb #- text[] (delete by path).
