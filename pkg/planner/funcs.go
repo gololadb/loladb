@@ -1963,6 +1963,186 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		}
 		return tuple.DText(sb.String()), nil
 
+	// Geometric type functions.
+	case "point":
+		// point(x, y) → '(x,y)'
+		if len(args) < 2 {
+			if len(args) == 1 {
+				d, _ := EvalAnalyzedExpr(args[0], row)
+				return d, nil
+			}
+			return tuple.DText("(0,0)"), nil
+		}
+		x, _ := EvalAnalyzedExpr(args[0], row)
+		y, _ := EvalAnalyzedExpr(args[1], row)
+		return tuple.DText(fmt.Sprintf("(%s,%s)", datumToString(x), datumToString(y))), nil
+
+	case "lseg":
+		// lseg(point1, point2) → '[(x1,y1),(x2,y2)]'
+		if len(args) < 2 {
+			return tuple.DText("[(0,0),(0,0)]"), nil
+		}
+		p1, _ := EvalAnalyzedExpr(args[0], row)
+		p2, _ := EvalAnalyzedExpr(args[1], row)
+		return tuple.DText(fmt.Sprintf("[%s,%s]", datumToString(p1), datumToString(p2))), nil
+
+	case "box":
+		// box(point1, point2) → '(x1,y1),(x2,y2)'
+		if len(args) < 2 {
+			return tuple.DText("(0,0),(0,0)"), nil
+		}
+		p1, _ := EvalAnalyzedExpr(args[0], row)
+		p2, _ := EvalAnalyzedExpr(args[1], row)
+		return tuple.DText(fmt.Sprintf("%s,%s", datumToString(p1), datumToString(p2))), nil
+
+	case "circle":
+		// circle(center, radius) → '<(x,y),r>'
+		if len(args) < 2 {
+			return tuple.DText("<(0,0),0>"), nil
+		}
+		c, _ := EvalAnalyzedExpr(args[0], row)
+		r, _ := EvalAnalyzedExpr(args[1], row)
+		return tuple.DText(fmt.Sprintf("<%s,%s>", datumToString(c), datumToString(r))), nil
+
+	case "polygon":
+		// polygon(npts, circle) or polygon(path) → text representation.
+		if len(args) >= 1 {
+			d, _ := EvalAnalyzedExpr(args[0], row)
+			return tuple.DText(fmt.Sprintf("((%s))", datumToString(d))), nil
+		}
+		return tuple.DText("((0,0))"), nil
+
+	case "path":
+		// path(polygon) → text representation.
+		if len(args) >= 1 {
+			d, _ := EvalAnalyzedExpr(args[0], row)
+			return tuple.DText(fmt.Sprintf("[%s]", datumToString(d))), nil
+		}
+		return tuple.DText("[(0,0)]"), nil
+
+	case "area":
+		// area(geometric) → float. Parse circle '<(x,y),r>' or box.
+		if len(args) < 1 {
+			return tuple.DFloat64(0), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		return tuple.DFloat64(geomArea(s)), nil
+
+	case "center":
+		// center(geometric) → point.
+		if len(args) < 1 {
+			return tuple.DText("(0,0)"), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		return tuple.DText(geomCenter(s)), nil
+
+	case "diameter":
+		// diameter(circle) → float.
+		if len(args) < 1 {
+			return tuple.DFloat64(0), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		r := geomCircleRadius(s)
+		return tuple.DFloat64(r * 2), nil
+
+	case "radius":
+		// radius(circle) → float.
+		if len(args) < 1 {
+			return tuple.DFloat64(0), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		return tuple.DFloat64(geomCircleRadius(s)), nil
+
+	case "height":
+		// height(box) → float.
+		if len(args) < 1 {
+			return tuple.DFloat64(0), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		_, _, _, h := geomBoxDims(s)
+		return tuple.DFloat64(h), nil
+
+	case "width":
+		// width(box) → float.
+		if len(args) < 1 {
+			return tuple.DFloat64(0), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		_, _, w, _ := geomBoxDims(s)
+		return tuple.DFloat64(w), nil
+
+	case "npoints":
+		// npoints(path|polygon) → int.
+		if len(args) < 1 {
+			return tuple.DInt64(0), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		return tuple.DInt64(int64(geomNPoints(s))), nil
+
+	case "isclosed":
+		// isclosed(path) → bool. Closed paths use '(...)'.
+		if len(args) < 1 {
+			return tuple.DBool(false), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := strings.TrimSpace(datumToString(d))
+		return tuple.DBool(strings.HasPrefix(s, "(")), nil
+
+	case "isopen":
+		// isopen(path) → bool. Open paths use '[...]'.
+		if len(args) < 1 {
+			return tuple.DBool(false), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := strings.TrimSpace(datumToString(d))
+		return tuple.DBool(strings.HasPrefix(s, "[")), nil
+
+	case "pclose":
+		// pclose(path) → closed path. Convert '[...]' to '(...)'.
+		if len(args) < 1 {
+			return tuple.DText("()"), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := strings.TrimSpace(datumToString(d))
+		if strings.HasPrefix(s, "[") {
+			s = "(" + s[1:len(s)-1] + ")"
+		}
+		return tuple.DText(s), nil
+
+	case "popen":
+		// popen(path) → open path. Convert '(...)' to '[...]'.
+		if len(args) < 1 {
+			return tuple.DText("[]"), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := strings.TrimSpace(datumToString(d))
+		if strings.HasPrefix(s, "(") {
+			s = "[" + s[1:len(s)-1] + "]"
+		}
+		return tuple.DText(s), nil
+
+	case "bound_box":
+		// bound_box(box, box) → bounding box of both.
+		if len(args) < 2 {
+			return tuple.DText("(0,0),(0,0)"), nil
+		}
+		d1, _ := EvalAnalyzedExpr(args[0], row)
+		d2, _ := EvalAnalyzedExpr(args[1], row)
+		x1a, y1a, x2a, y2a := geomBoxCorners(datumToString(d1))
+		x1b, y1b, x2b, y2b := geomBoxCorners(datumToString(d2))
+		minX := math.Min(math.Min(x1a, x2a), math.Min(x1b, x2b))
+		minY := math.Min(math.Min(y1a, y2a), math.Min(y1b, y2b))
+		maxX := math.Max(math.Max(x1a, x2a), math.Max(x1b, x2b))
+		maxY := math.Max(math.Max(y1a, y2a), math.Max(y1b, y2b))
+		return tuple.DText(fmt.Sprintf("(%g,%g),(%g,%g)", maxX, maxY, minX, minY)), nil
+
 	// Advisory lock functions (no-op, always succeed).
 	case "pg_advisory_lock", "pg_advisory_xact_lock":
 		return tuple.DNull(), nil
@@ -2845,3 +3025,122 @@ func FormatInterval(months int32, microseconds int64) string {
 	return strings.Join(parts, " ")
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Geometric helper functions
+// ---------------------------------------------------------------------------
+
+// parsePoint extracts (x, y) from a PostgreSQL point literal like "(x,y)".
+func parsePoint(s string) (float64, float64) {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "()")
+	parts := strings.SplitN(s, ",", 2)
+	if len(parts) != 2 {
+		return 0, 0
+	}
+	x, _ := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	y, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	return x, y
+}
+
+// geomCircleRadius extracts the radius from a circle literal '<(x,y),r>'.
+func geomCircleRadius(s string) float64 {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "<>")
+	idx := strings.LastIndex(s, ",")
+	if idx < 0 {
+		return 0
+	}
+	r, _ := strconv.ParseFloat(strings.TrimSpace(s[idx+1:]), 64)
+	return r
+}
+
+// geomCircleCenter extracts the center point from '<(x,y),r>'.
+func geomCircleCenter(s string) (float64, float64) {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "<>")
+	idx := strings.Index(s, ")")
+	if idx < 0 {
+		return 0, 0
+	}
+	return parsePoint(s[:idx+1])
+}
+
+// geomArea computes the area of a circle or box.
+func geomArea(s string) float64 {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "<") {
+		r := geomCircleRadius(s)
+		return math.Pi * r * r
+	}
+	_, _, w, h := geomBoxDims(s)
+	return math.Abs(w * h)
+}
+
+// geomCenter returns the center point as "(x,y)".
+func geomCenter(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "<") {
+		cx, cy := geomCircleCenter(s)
+		return fmt.Sprintf("(%g,%g)", cx, cy)
+	}
+	x1, y1, x2, y2 := geomBoxCorners(s)
+	return fmt.Sprintf("(%g,%g)", (x1+x2)/2, (y1+y2)/2)
+}
+
+// geomBoxCorners extracts two corner points from '(x1,y1),(x2,y2)'.
+func geomBoxCorners(s string) (x1, y1, x2, y2 float64) {
+	s = strings.TrimSpace(s)
+	sep := strings.Index(s, "),(")
+	if sep < 0 {
+		return 0, 0, 0, 0
+	}
+	p1 := s[:sep+1]
+	p2 := s[sep+2:]
+	x1, y1 = parsePoint(p1)
+	x2, y2 = parsePoint(p2)
+	return
+}
+
+// geomBoxDims returns center x, center y, width, height of a box.
+func geomBoxDims(s string) (cx, cy, w, h float64) {
+	x1, y1, x2, y2 := geomBoxCorners(s)
+	w = math.Abs(x2 - x1)
+	h = math.Abs(y2 - y1)
+	cx = (x1 + x2) / 2
+	cy = (y1 + y2) / 2
+	return
+}
+
+// geomNPoints counts the number of points in a path or polygon literal.
+func geomNPoints(s string) int {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "[]()")
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "),(") + 1
+}
+
+// geomDistance computes the Euclidean distance between two geometric objects.
+func geomDistance(s1, s2 string) float64 {
+	x1, y1 := geomExtractPoint(s1)
+	x2, y2 := geomExtractPoint(s2)
+	dx := x2 - x1
+	dy := y2 - y1
+	return math.Sqrt(dx*dx + dy*dy)
+}
+
+// geomExtractPoint extracts a representative point from any geometric literal.
+func geomExtractPoint(s string) (float64, float64) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "<") {
+		return geomCircleCenter(s)
+	}
+	if strings.Contains(s, "),(") {
+		x1, y1, x2, y2 := geomBoxCorners(s)
+		return (x1 + x2) / 2, (y1 + y2) / 2
+	}
+	return parsePoint(s)
+}

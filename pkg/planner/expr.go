@@ -318,6 +318,8 @@ const (
 	OpArrayContainedBy       // <@ (array contained by)
 	OpArrayOverlap           // && (array overlap)
 	OpTSMatch                // @@ (full-text search match)
+	OpGeomDistance            // <-> (geometric distance)
+	OpGeomSame               // ~= (geometric same as)
 )
 
 func (op OpKind) String() string {
@@ -402,6 +404,10 @@ func (op OpKind) String() string {
 		return "^@"
 	case OpTSMatch:
 		return "@@"
+	case OpGeomDistance:
+		return "<->"
+	case OpGeomSame:
+		return "~="
 	default:
 		return "?"
 	}
@@ -445,6 +451,9 @@ func (e *ExprBinOp) Eval(row *Row) (tuple.Datum, error) {
 	}
 	if e.Op == OpTSMatch {
 		return e.evalTSMatch(row)
+	}
+	if e.Op == OpGeomDistance || e.Op == OpGeomSame {
+		return e.evalGeom(row)
 	}
 	return e.evalComparison(row)
 }
@@ -1169,6 +1178,30 @@ func (e *ExprBinOp) evalTSMatch(row *Row) (tuple.Datum, error) {
 		return tuple.DNull(), nil
 	}
 	return tuple.DBool(tsvectorMatchesTsquery(datumToString(lv), datumToString(rv))), nil
+}
+
+func (e *ExprBinOp) evalGeom(row *Row) (tuple.Datum, error) {
+	lv, err := e.Left.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	rv, err := e.Right.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+		return tuple.DNull(), nil
+	}
+	ls := datumToString(lv)
+	rs := datumToString(rv)
+	switch e.Op {
+	case OpGeomDistance:
+		return tuple.DFloat64(geomDistance(ls, rs)), nil
+	case OpGeomSame:
+		return tuple.DBool(ls == rs), nil
+	default:
+		return tuple.DNull(), nil
+	}
 }
 
 func datumToBool(d tuple.Datum) bool {

@@ -31,7 +31,8 @@ For context, here is what is currently implemented:
   CAST, COALESCE, NULLIF, GREATEST, LEAST, LIKE/ILIKE/NOT LIKE/NOT ILIKE,
   BETWEEN, IN (value list), IS [NOT] DISTINCT FROM, string concatenation (`||`),
   array concatenation (`||`), JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`),
-  full-text search (`@@`, `to_tsvector`, `to_tsquery`)
+  full-text search (`@@`, `to_tsvector`, `to_tsquery`),
+  geometric distance (`<->`), geometric same (`~=`)
 - **Constraints:** PRIMARY KEY, UNIQUE (with auto-index creation and enforcement),
   DEFERRABLE / INITIALLY DEFERRED
 - **Aggregates:** count, sum, avg, min, max, bool_and, bool_or, every, string_agg, array_agg,
@@ -42,7 +43,8 @@ For context, here is what is currently implemented:
   json/jsonb, uuid, interval, bytea, money, arrays (+ domains, enums),
   inet/cidr/macaddr (stored as text), range types (int4range, tsrange, etc.),
   XML (XMLELEMENT, XMLCONCAT, XMLFOREST, XMLPARSE, XMLSERIALIZE, xmlagg),
-  composite types (CREATE TYPE AS accepted)
+  composite types (CREATE TYPE AS accepted),
+  geometric types (point, line, lseg, box, path, polygon, circle)
 - **Indexes:** B+Tree, Hash, BRIN, GIN, GiST, SP-GiST
 - **Storage:** Slotted pages, TOAST, WAL, buffer pool (clock-sweep), freelist
 - **Concurrency:** MVCC with snapshot isolation, transaction manager
@@ -107,9 +109,13 @@ Arrays have a native datum type, `TEXT[]` column syntax, `ARRAY[...]`
 constructor, `arr[1]` indexing, `arr[2:4]` slicing, `unnest()`, and
 containment operators (`@>`, `<@`, `&&`).
 
-### 🟢 Geometric types (point, line, box, circle, polygon, path)
+### ✅ Geometric types (point, line, box, circle, polygon, path)
 
-Niche use case. PostgreSQL supports these with operators and GiST indexing.
+All geometric types stored as text. Constructor functions: `point()`, `box()`,
+`circle()`, `lseg()`, `polygon()`, `path()`. Measurement functions: `area()`,
+`center()`, `diameter()`, `radius()`, `height()`, `width()`, `npoints()`.
+Path functions: `isclosed()`, `isopen()`, `pclose()`, `popen()`.
+Operators: `<->` (distance), `~=` (same as). `bound_box()` for bounding box.
 
 ### ✅ Network types (inet, cidr, macaddr)
 

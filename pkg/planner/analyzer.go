@@ -1369,6 +1369,12 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 	case "@@":
 		op = OpTSMatch
 		resultTyp = tuple.TypeBool
+	case "<->":
+		op = OpGeomDistance
+		resultTyp = tuple.TypeFloat64
+	case "~=":
+		op = OpGeomSame
+		resultTyp = tuple.TypeBool
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported operator %q", opName)
 	}
@@ -2850,6 +2856,8 @@ func MapSQLType(sqlType string) tuple.DatumType {
 	case "TSVECTOR", "TSQUERY":
 		return tuple.TypeText
 	case "INET", "CIDR", "MACADDR", "MACADDR8":
+		return tuple.TypeText
+	case "POINT", "LINE", "LSEG", "BOX", "PATH", "POLYGON", "CIRCLE":
 		return tuple.TypeText
 	case "XML":
 		return tuple.TypeText
