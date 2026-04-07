@@ -124,6 +124,9 @@ type Query struct {
 
 	// WindowFuncs collects all window function references in the query.
 	WindowFuncs []*WindowFuncRef
+
+	// OnConflict holds the analyzed ON CONFLICT clause for INSERT.
+	OnConflict *OnConflictClause
 }
 
 // CTEDef holds a single analyzed CTE definition.
@@ -231,6 +234,23 @@ type UpdateAssignment struct {
 	ColNum  int32 // 1-based column number in the target relation
 	ColType tuple.DatumType
 	Expr    AnalyzedExpr
+}
+
+// OnConflictAction mirrors parser.OnConflictAction.
+type OnConflictAction int
+
+const (
+	OnConflictNone    OnConflictAction = iota
+	OnConflictNothing                  // DO NOTHING
+	OnConflictUpdate                   // DO UPDATE SET ...
+)
+
+// OnConflictClause is the analyzed form of ON CONFLICT.
+type OnConflictClause struct {
+	Action         OnConflictAction
+	ConflictCols   []string            // column names from the conflict target
+	Assignments    []*UpdateAssignment // SET assignments for DO UPDATE
+	WhereClause    AnalyzedExpr        // optional WHERE on the DO UPDATE
 }
 
 // UtilityStmt carries information for DDL / utility commands that

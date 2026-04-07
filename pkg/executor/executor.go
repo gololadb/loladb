@@ -1425,6 +1425,33 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 
 		_, err := ex.Cat.InsertInto(n.Table, values)
 		if err != nil {
+			if n.OnConflict != nil && strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
+				if n.OnConflict.Action == planner.OnConflictNothing {
+					// DO NOTHING: skip this row.
+					continue
+				}
+				if n.OnConflict.Action == planner.OnConflictUpdate {
+					// DO UPDATE: find the conflicting row and update it.
+					resultRow, err := ex.execOnConflictUpdate(n, values, colNames, tableCols)
+					if err != nil {
+						return nil, err
+					}
+					count++
+					if len(n.ReturningExprs) > 0 && resultRow != nil {
+						row := &planner.Row{Columns: resultRow, Names: colNames}
+						retRow := make([]tuple.Datum, len(n.ReturningExprs))
+						for i, expr := range n.ReturningExprs {
+							val, err := expr.Eval(row)
+							if err != nil {
+								return nil, fmt.Errorf("executor: RETURNING eval: %w", err)
+							}
+							retRow[i] = val
+						}
+						returningRows = append(returningRows, retRow)
+					}
+					continue
+				}
+			}
 			return nil, err
 		}
 		count++
@@ -1467,6 +1494,103 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		}, nil
 	}
 	return &Result{RowsAffected: count, Message: fmt.Sprintf("INSERT 0 %d", count)}, nil
+}
+
+// execOnConflictUpdate handles DO UPDATE for a conflicting INSERT row.
+// It finds the existing row that conflicts on the conflict columns,
+// evaluates the SET assignments with both the existing row and the
+// proposed "excluded" row available, and updates in place.
+func (ex *Executor) execOnConflictUpdate(
+	n *planner.PhysInsert,
+	proposed []tuple.Datum, // the values we tried to insert
+	colNames []string,
+	tableCols []catalog.Column,
+) ([]tuple.Datum, error) {
+	oc := n.OnConflict
+
+	// Build a map from conflict column name → index in colNames.
+	conflictIdxs := make([]int, len(oc.ConflictCols))
+	for i, cc := range oc.ConflictCols {
+		for j, cn := range colNames {
+			if strings.EqualFold(cc, cn) {
+				conflictIdxs[i] = j
+				break
+			}
+		}
+	}
+
+	// Scan for the conflicting row.
+	var matchID slottedpage.ItemID
+	var matchRow []tuple.Datum
+	ex.Cat.SeqScan(n.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		for _, ci := range conflictIdxs {
+			if ci >= len(tup.Columns) || ci >= len(proposed) {
+				return true
+			}
+			if planner.CompareDatums(tup.Columns[ci], proposed[ci]) != 0 {
+				return true
+			}
+		}
+		matchID = id
+		matchRow = make([]tuple.Datum, len(tup.Columns))
+		copy(matchRow, tup.Columns)
+		return false // found it
+	})
+
+	if matchRow == nil {
+		return nil, fmt.Errorf("executor: ON CONFLICT UPDATE could not find conflicting row")
+	}
+
+	// Build combined column names: table columns + "excluded." prefixed columns.
+	combinedNames := make([]string, len(colNames)*2)
+	combinedVals := make([]tuple.Datum, len(colNames)*2)
+	for i, cn := range colNames {
+		combinedNames[i] = n.Table + "." + cn
+		combinedVals[i] = matchRow[i]
+		combinedNames[len(colNames)+i] = "excluded." + cn
+		combinedVals[len(colNames)+i] = proposed[i]
+	}
+
+	combinedRow := &planner.Row{Columns: combinedVals, Names: combinedNames}
+
+	// Evaluate optional WHERE clause — if false, skip the update.
+	if oc.WhereExpr != nil {
+		wval, err := oc.WhereExpr.Eval(combinedRow)
+		if err != nil {
+			return nil, fmt.Errorf("executor: ON CONFLICT WHERE: %w", err)
+		}
+		if !(wval.Type == tuple.TypeBool && wval.Bool) {
+			return nil, nil // WHERE not satisfied, skip
+		}
+	}
+
+	// Apply SET assignments.
+	newVals := make([]tuple.Datum, len(matchRow))
+	copy(newVals, matchRow)
+	for _, a := range oc.Assignments {
+		for ci, cn := range colNames {
+			if strings.EqualFold(a.Column, cn) {
+				val, err := a.Value.Eval(combinedRow)
+				if err != nil {
+					return nil, fmt.Errorf("executor: ON CONFLICT SET %s: %w", a.Column, err)
+				}
+				newVals[ci] = val
+				break
+			}
+		}
+	}
+
+	// Coerce and validate.
+	coerceInsertValues(tableCols, newVals)
+	if err := validateNotNull(tableCols, newVals); err != nil {
+		return nil, err
+	}
+	if err := ex.validateCustomTypes(tableCols, newVals); err != nil {
+		return nil, err
+	}
+
+	ex.Cat.Update(n.Table, matchID, newVals)
+	return newVals, nil
 }
 
 func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
@@ -1588,17 +1712,23 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 	}
 
 	type target struct {
-		id  slottedpage.ItemID
-		row []tuple.Datum
+		id       slottedpage.ItemID
+		row      []tuple.Datum // target table columns only
+		childRow []tuple.Datum // full child row (may include FROM columns)
 	}
+	nTargetCols := len(tableCols)
 	var targets []target
 	matchIdx := 0
 	ex.Cat.SeqScan(n.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-		if matchIdx < len(child.Rows) && rowsMatch(tup.Columns, child.Rows[matchIdx]) {
-			row := make([]tuple.Datum, len(tup.Columns))
-			copy(row, tup.Columns)
-			targets = append(targets, target{id: id, row: row})
-			matchIdx++
+		if matchIdx < len(child.Rows) {
+			childRow := child.Rows[matchIdx]
+			// Compare only the target table columns (first nTargetCols of child row).
+			if len(childRow) >= nTargetCols && rowsMatch(tup.Columns, childRow[:nTargetCols]) {
+				row := make([]tuple.Datum, len(tup.Columns))
+				copy(row, tup.Columns)
+				targets = append(targets, target{id: id, row: row, childRow: childRow})
+				matchIdx++
+			}
 		}
 		return true
 	})
@@ -1611,7 +1741,8 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 		for _, a := range n.Assignments {
 			for ci, cname := range n.Columns {
 				if cname == a.Column {
-					r := &planner.Row{Columns: t.row, Names: childCols}
+					// Use the full child row so FROM columns are accessible.
+					r := &planner.Row{Columns: t.childRow, Names: childCols}
 					val, err := a.Value.Eval(r)
 					if err != nil {
 						return nil, err

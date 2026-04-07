@@ -1195,6 +1195,7 @@ func (o *Optimizer) optimizeInsert(n *LogicalInsert) (PhysicalNode, error) {
 	return &PhysInsert{
 		Table: n.Table, Columns: n.Columns, Values: values,
 		ReturningExprs: n.ReturningExprs, ReturningNames: n.ReturningNames,
+		OnConflict: n.OnConflict,
 	}, nil
 }
 

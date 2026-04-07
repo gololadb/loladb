@@ -250,6 +250,7 @@ type PhysInsert struct {
 	Values         [][]Expr
 	ReturningExprs []Expr
 	ReturningNames []string
+	OnConflict     *OnConflictPlan // nil = no ON CONFLICT
 	Estimate       PlanCost
 }
 

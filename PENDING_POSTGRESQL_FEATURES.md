@@ -118,23 +118,25 @@ Supported window functions: `row_number()`, `rank()`, `dense_rank()`, `lag()`,
 `cume_dist()`, `nth_value()`, and aggregate-as-window (`sum`, `count`, `avg`,
 `min`, `max`). Supports `PARTITION BY`, `ORDER BY` (ASC/DESC), and `OVER ()`.
 
-### 🔴 INSERT ... ON CONFLICT (UPSERT)
+### ✅ INSERT ... ON CONFLICT (UPSERT)
 
 ```sql
 INSERT INTO kv (key, val) VALUES ('a', 1)
 ON CONFLICT (key) DO UPDATE SET val = EXCLUDED.val;
 ```
 
-No upsert support.
+Supports `DO NOTHING` and `DO UPDATE SET` with `EXCLUDED` pseudo-table.
+Conflict target specified by column list. Multi-row VALUES supported.
 
-### 🔴 UPDATE ... FROM
+### ✅ UPDATE ... FROM
 
 ```sql
 UPDATE orders SET status = 'shipped'
 FROM shipments WHERE shipments.order_id = orders.id;
 ```
 
-UPDATE does not support FROM clause for multi-table updates.
+Supports multi-table UPDATE with FROM clause. SET expressions can
+reference columns from joined tables.
 
 ### 🟡 FULL OUTER JOIN
 
@@ -612,8 +614,6 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| INSERT ... ON CONFLICT | DML |
-| UPDATE ... FROM | DML |
 | Real transactions (BEGIN/COMMIT/ROLLBACK) | Transactions |
 | FOREIGN KEY | Constraints |
 | CHECK constraints | Constraints |

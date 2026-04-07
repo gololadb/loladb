@@ -178,6 +178,15 @@ type LogicalInsert struct {
 	Values         [][]Expr // each inner slice is a row
 	ReturningExprs []Expr
 	ReturningNames []string
+	OnConflict     *OnConflictPlan // nil = no ON CONFLICT
+}
+
+// OnConflictPlan holds the plan-level ON CONFLICT information.
+type OnConflictPlan struct {
+	Action       OnConflictAction
+	ConflictCols []string     // columns that form the conflict target
+	Assignments  []Assignment // SET assignments for DO UPDATE
+	WhereExpr    Expr         // optional WHERE on DO UPDATE
 }
 
 func (n *LogicalInsert) String() string        { return fmt.Sprintf("Insert(%s)", n.Table) }

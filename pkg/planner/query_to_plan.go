@@ -240,7 +240,27 @@ func queryToInsertPlan(q *Query) (LogicalNode, error) {
 		values = append(values, rowExprs)
 	}
 	retExprs, retNames := convertReturning(q.ReturningList, q.RangeTable)
-	return &LogicalInsert{Table: rte.RelName, Columns: q.InsertColumns, Values: values, ReturningExprs: retExprs, ReturningNames: retNames}, nil
+	node := &LogicalInsert{Table: rte.RelName, Columns: q.InsertColumns, Values: values, ReturningExprs: retExprs, ReturningNames: retNames}
+
+	// ON CONFLICT
+	if q.OnConflict != nil {
+		ocp := &OnConflictPlan{
+			Action:       q.OnConflict.Action,
+			ConflictCols: q.OnConflict.ConflictCols,
+		}
+		for _, ua := range q.OnConflict.Assignments {
+			ocp.Assignments = append(ocp.Assignments, Assignment{
+				Column: ua.ColName,
+				Value:  analyzedToExpr(ua.Expr, q.RangeTable),
+			})
+		}
+		if q.OnConflict.WhereClause != nil {
+			ocp.WhereExpr = analyzedToExpr(q.OnConflict.WhereClause, q.RangeTable)
+		}
+		node.OnConflict = ocp
+	}
+
+	return node, nil
 }
 
 func queryToDeletePlan(q *Query) (LogicalNode, error) {
@@ -273,8 +293,18 @@ func queryToUpdatePlan(q *Query) (LogicalNode, error) {
 		colNames[i] = c.Name
 		colTypes[i] = c.Type
 	}
-	scan := &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames}
-	var child LogicalNode = scan
+
+	// Build child plan from the join tree (handles UPDATE ... FROM).
+	var child LogicalNode
+	if q.JoinTree != nil && len(q.JoinTree.FromList) > 0 {
+		var err error
+		child, err = joinTreeToPlan(q.JoinTree.FromList, q.RangeTable)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		child = &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames}
+	}
 
 	if q.JoinTree != nil && q.JoinTree.Quals != nil {
 		child = &LogicalFilter{

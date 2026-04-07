@@ -1566,6 +1566,15 @@ func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 		q.SelectSource = subQ
 	}
 
+	// ON CONFLICT clause.
+	if n.OnConflict != nil {
+		oc, err := a.transformOnConflict(n.OnConflict, rte)
+		if err != nil {
+			return nil, fmt.Errorf("analyzer: INSERT ON CONFLICT: %w", err)
+		}
+		q.OnConflict = oc
+	}
+
 	// RETURNING clause.
 	if len(n.ReturningList) > 0 {
 		ret, err := a.transformReturningList(n.ReturningList)
@@ -1577,6 +1586,96 @@ func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 
 	q.RangeTable = a.rangeTable
 	return q, nil
+}
+
+// transformOnConflict resolves an ON CONFLICT clause.
+func (a *Analyzer) transformOnConflict(oc *parser.OnConflictClause, targetRTE *RangeTblEntry) (*OnConflictClause, error) {
+	result := &OnConflictClause{}
+
+	switch oc.Action {
+	case parser.ONCONFLICT_NOTHING:
+		result.Action = OnConflictNothing
+	case parser.ONCONFLICT_UPDATE:
+		result.Action = OnConflictUpdate
+	default:
+		return nil, fmt.Errorf("unsupported ON CONFLICT action")
+	}
+
+	// Resolve conflict target columns.
+	if oc.Infer != nil {
+		for _, elem := range oc.Infer.IndexElems {
+			s, ok := elem.(*parser.String)
+			if !ok {
+				return nil, fmt.Errorf("unsupported conflict target element %T", elem)
+			}
+			// Verify column exists in target table.
+			found := false
+			for _, col := range targetRTE.Columns {
+				if strings.EqualFold(col.Name, s.Str) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("column %q does not exist in table %q", s.Str, targetRTE.RelName)
+			}
+			result.ConflictCols = append(result.ConflictCols, s.Str)
+		}
+	}
+
+	// For DO UPDATE, resolve SET assignments.
+	// Add an "excluded" pseudo-RTE so EXCLUDED.col references resolve.
+	if result.Action == OnConflictUpdate {
+		excludedRTE := &RangeTblEntry{
+			RTIndex: len(a.rangeTable) + 1,
+			RelName: "excluded",
+			Alias:   "excluded",
+			Columns: make([]RTEColumn, len(targetRTE.Columns)),
+		}
+		copy(excludedRTE.Columns, targetRTE.Columns)
+		a.rangeTable = append(a.rangeTable, excludedRTE)
+
+		for _, rt := range oc.TargetList {
+			colName := rt.Name
+			var colNum int32
+			var colType tuple.DatumType
+			found := false
+			for _, col := range targetRTE.Columns {
+				if strings.EqualFold(col.Name, colName) {
+					colNum = col.ColNum
+					colType = col.Type
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("column %q of relation %q does not exist", colName, targetRTE.RelName)
+			}
+
+			val, err := a.transformExpr(rt.Val)
+			if err != nil {
+				return nil, err
+			}
+
+			result.Assignments = append(result.Assignments, &UpdateAssignment{
+				ColName: colName,
+				ColNum:  colNum,
+				ColType: colType,
+				Expr:    val,
+			})
+		}
+
+		// Optional WHERE clause on DO UPDATE.
+		if oc.WhereClause != nil {
+			w, err := a.transformExpr(oc.WhereClause)
+			if err != nil {
+				return nil, err
+			}
+			result.WhereClause = w
+		}
+	}
+
+	return result, nil
 }
 
 // transformDeleteStmt resolves a DELETE statement.
@@ -1621,14 +1720,27 @@ func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*Query, error) {
 func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 	q := &Query{CommandType: CmdUpdate}
 
-	rte, err := a.addRangeTableEntryQualified(n.Relation.Schemaname, n.Relation.Relname, "")
+	alias := ""
+	if n.Relation.Alias != nil && n.Relation.Alias.Aliasname != "" {
+		alias = n.Relation.Alias.Aliasname
+	}
+	rte, err := a.addRangeTableEntryQualified(n.Relation.Schemaname, n.Relation.Relname, alias)
 	if err != nil {
 		return nil, err
 	}
 	q.ResultRelation = rte.RTIndex
 
-	// Build join tree.
+	// Build join tree: target table + optional FROM tables.
 	fromList := []JoinTreeNode{&RangeTblRef{RTIndex: rte.RTIndex}}
+
+	// Handle UPDATE ... FROM clause — add extra tables to the range table.
+	if len(n.FromClause) > 0 {
+		extraItems, err := a.transformFromClause(n.FromClause)
+		if err != nil {
+			return nil, fmt.Errorf("analyzer: UPDATE FROM: %w", err)
+		}
+		fromList = append(fromList, extraItems...)
+	}
 
 	var qual AnalyzedExpr
 	if n.WhereClause != nil {
