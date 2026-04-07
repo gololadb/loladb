@@ -351,6 +351,64 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return &Result{Message: "CREATE EVENT TRIGGER"}, nil
 	}
 
+	// Handle CREATE TYPE AS (composite type) — accept, no-op.
+	if ct, ok := stmt.(*parser.CompositeTypeStmt); ok {
+		name := ""
+		if len(ct.TypeName) > 0 {
+			name = ct.TypeName[len(ct.TypeName)-1]
+		}
+		return &Result{Message: fmt.Sprintf("CREATE TYPE %s", name)}, nil
+	}
+
+	// Handle CREATE FOREIGN DATA WRAPPER (accept, no-op).
+	if cf, ok := stmt.(*parser.CreateFdwStmt); ok {
+		return &Result{Message: fmt.Sprintf("CREATE FOREIGN DATA WRAPPER %s", cf.Fdwname)}, nil
+	}
+
+	// Handle CREATE SERVER (accept, no-op).
+	if cs, ok := stmt.(*parser.CreateForeignServerStmt); ok {
+		return &Result{Message: fmt.Sprintf("CREATE SERVER %s", cs.Servername)}, nil
+	}
+
+	// Handle CREATE FOREIGN TABLE (accept, no-op).
+	if cft, ok := stmt.(*parser.CreateForeignTableStmt); ok {
+		name := ""
+		if cft.Base.Relation != nil {
+			name = cft.Base.Relation.Relname
+		}
+		return &Result{Message: fmt.Sprintf("CREATE FOREIGN TABLE %s", name)}, nil
+	}
+
+	// Handle CREATE USER MAPPING (accept, no-op).
+	if cum, ok := stmt.(*parser.CreateUserMappingStmt); ok {
+		return &Result{Message: fmt.Sprintf("CREATE USER MAPPING FOR %s SERVER %s", cum.User, cum.Servername)}, nil
+	}
+
+	// Handle IMPORT FOREIGN SCHEMA (accept, no-op).
+	if ifs, ok := stmt.(*parser.ImportForeignSchemaStmt); ok {
+		return &Result{Message: fmt.Sprintf("IMPORT FOREIGN SCHEMA %s", ifs.RemoteSchema)}, nil
+	}
+
+	// Handle CREATE PUBLICATION (accept, no-op).
+	if cp, ok := stmt.(*parser.CreatePublicationStmt); ok {
+		return &Result{Message: fmt.Sprintf("CREATE PUBLICATION %s", cp.Pubname)}, nil
+	}
+
+	// Handle CREATE SUBSCRIPTION (accept, no-op).
+	if cs, ok := stmt.(*parser.CreateSubscriptionStmt); ok {
+		return &Result{Message: fmt.Sprintf("CREATE SUBSCRIPTION %s", cs.Subname)}, nil
+	}
+
+	// Handle ALTER PUBLICATION (accept, no-op).
+	if ap, ok := stmt.(*parser.AlterPublicationStmt); ok {
+		return &Result{Message: fmt.Sprintf("ALTER PUBLICATION %s", ap.Pubname)}, nil
+	}
+
+	// Handle ALTER SUBSCRIPTION (accept, no-op).
+	if as, ok := stmt.(*parser.AlterSubscriptionStmt); ok {
+		return &Result{Message: fmt.Sprintf("ALTER SUBSCRIPTION %s", as.Subname)}, nil
+	}
+
 	// Handle CREATE EXTENSION (accept, no-op).
 	if ce, ok := stmt.(*parser.CreateExtensionStmt); ok {
 		return &Result{Message: fmt.Sprintf("CREATE EXTENSION %s", ce.Extname)}, nil
@@ -540,6 +598,17 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 			return nil, ex.txError(err)
 		}
 		lastResult = convertResult(r)
+	}
+
+	// Track query statistics for pg_stat_statements.
+	if lastResult != nil {
+		qs := ex.Cat.QueryStats[sql]
+		if qs == nil {
+			qs = &catalog.QueryStat{}
+			ex.Cat.QueryStats[sql] = qs
+		}
+		qs.Calls++
+		qs.Rows += int64(len(lastResult.Rows))
 	}
 
 	return lastResult, nil

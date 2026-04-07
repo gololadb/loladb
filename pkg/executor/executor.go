@@ -1332,6 +1332,8 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				st.arrBuf = append(st.arrBuf, val)
 			case "json_agg", "jsonb_agg":
 				st.arrBuf = append(st.arrBuf, val)
+			case "xmlagg":
+				st.arrBuf = append(st.arrBuf, val)
 			case "json_object_agg", "jsonb_object_agg":
 				// Collect key from first arg (val), value from second arg.
 				st.arrBuf = append(st.arrBuf, val)
@@ -1463,6 +1465,16 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 					}
 					out, _ := json.Marshal(elems)
 					row = append(row, tuple.DJSON(string(out)))
+				}
+			case "xmlagg":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					var buf strings.Builder
+					for _, v := range st.arrBuf {
+						buf.WriteString(datumToStringVal(v))
+					}
+					row = append(row, tuple.DText(buf.String()))
 				}
 			case "json_object_agg", "jsonb_object_agg":
 				if len(st.arrBuf) == 0 {
@@ -2060,6 +2072,8 @@ func (ex *Executor) execGroupingSets(n *planner.PhysAggregate, child *Result) (*
 					st.strBuf.WriteString(datumToStringVal(val))
 				case "array_agg":
 					st.arrBuf = append(st.arrBuf, val)
+				case "xmlagg":
+					st.arrBuf = append(st.arrBuf, val)
 				}
 				st.hasVal = true
 			}
@@ -2141,6 +2155,16 @@ func (ex *Executor) execGroupingSets(n *planner.PhysAggregate, child *Result) (*
 							sb.WriteString(datumToStringVal(v))
 						}
 						sb.WriteByte('}')
+						row = append(row, tuple.DText(sb.String()))
+					}
+				case "xmlagg":
+					if len(st.arrBuf) == 0 {
+						row = append(row, tuple.DNull())
+					} else {
+						var sb strings.Builder
+						for _, v := range st.arrBuf {
+							sb.WriteString(datumToStringVal(v))
+						}
 						row = append(row, tuple.DText(sb.String()))
 					}
 				default:

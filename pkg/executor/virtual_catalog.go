@@ -33,6 +33,8 @@ func (ex *Executor) virtualCatalogTable(tableName string, alias string) *Result 
 		return ex.pgStatUserTables(alias)
 	case "pg_namespace", "pg_catalog.pg_namespace":
 		return ex.pgNamespace(alias)
+	case "pg_stat_statements", "pg_catalog.pg_stat_statements":
+		return ex.pgStatStatements(alias)
 	default:
 		return nil
 	}
@@ -492,6 +494,37 @@ func (ex *Executor) pgNamespace(alias string) *Result {
 			tuple.DInt64(int64(s.OID)),
 			tuple.DText(s.Name),
 			tuple.DInt64(int64(s.OwnerOID)),
+		})
+	}
+
+	return &Result{
+		Columns: qualifyColumns(cols, alias),
+		Rows:    rows,
+		Message: fmt.Sprintf("SELECT %d", len(rows)),
+	}
+}
+
+
+
+// ---------------------------------------------------------------------------
+// pg_stat_statements
+// ---------------------------------------------------------------------------
+
+func (ex *Executor) pgStatStatements(alias string) *Result {
+	if alias == "" {
+		alias = "pg_stat_statements"
+	}
+	cols := []string{"userid", "dbid", "query", "calls", "total_time", "rows"}
+
+	var rows [][]tuple.Datum
+	for query, qs := range ex.Cat.QueryStats {
+		rows = append(rows, []tuple.Datum{
+			tuple.DInt64(0),
+			tuple.DInt64(0),
+			tuple.DText(query),
+			tuple.DInt64(qs.Calls),
+			tuple.DFloat64(0),
+			tuple.DInt64(qs.Rows),
 		})
 	}
 

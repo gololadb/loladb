@@ -1043,6 +1043,9 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 		}
 		return &FuncCallExpr{FuncName: funcName, Args: args, ReturnType: retType}, nil
 
+	case *parser.XmlExpr:
+		return a.transformXmlExpr(e)
+
 	case *parser.SubLink:
 		return a.transformSubLink(e)
 
@@ -1698,6 +1701,50 @@ func (a *Analyzer) transformBoolExpr(e *parser.BoolExpr) (AnalyzedExpr, error) {
 // transformNullTest resolves IS [NOT] NULL.
 // Mirrors PostgreSQL's transformNullTest() in parse_expr.c.
 // transformSubLink handles subquery expressions: EXISTS, IN, NOT IN, ANY, ALL, scalar.
+func (a *Analyzer) transformXmlExpr(xe *parser.XmlExpr) (AnalyzedExpr, error) {
+	// Map XmlExpr AST nodes to our built-in function calls.
+	var funcName string
+	switch xe.Op {
+	case parser.IS_XMLCONCAT:
+		funcName = "xmlconcat"
+	case parser.IS_XMLELEMENT:
+		funcName = "xmlelement"
+	case parser.IS_XMLFOREST:
+		funcName = "xmlforest"
+	case parser.IS_XMLPARSE:
+		funcName = "xmlparse"
+	case parser.IS_XMLSERIALIZE:
+		funcName = "xmlserialize"
+	case parser.IS_XMLPI:
+		funcName = "xmlelement"
+	case parser.IS_XMLROOT:
+		funcName = "xmlparse"
+	case parser.IS_XMLEXISTS:
+		funcName = "xmlparse"
+	default:
+		funcName = "xmlparse"
+	}
+
+	var args []AnalyzedExpr
+	// For XMLELEMENT, prepend the element name as a string literal.
+	if xe.Op == parser.IS_XMLELEMENT && xe.Name != "" {
+		args = append(args, &Const{Value: tuple.DText(xe.Name), ConstType: tuple.TypeText})
+	}
+	for _, arg := range xe.Args {
+		ae, err := a.transformExpr(arg)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, ae)
+	}
+
+	return &FuncCallExpr{
+		FuncName:   funcName,
+		Args:       args,
+		ReturnType: tuple.TypeText,
+	}, nil
+}
+
 func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
 	selectStmt, ok := sl.Subselect.(*parser.SelectStmt)
 	if !ok {
@@ -2802,6 +2849,18 @@ func MapSQLType(sqlType string) tuple.DatumType {
 		return tuple.TypeMoney
 	case "TSVECTOR", "TSQUERY":
 		return tuple.TypeText
+	case "INET", "CIDR", "MACADDR", "MACADDR8":
+		return tuple.TypeText
+	case "XML":
+		return tuple.TypeText
+	case "INT4RANGE", "INT8RANGE", "NUMRANGE", "TSRANGE", "TSTZRANGE", "DATERANGE":
+		return tuple.TypeText
+	case "RECORD", "VOID":
+		return tuple.TypeText
+	case "OID", "REGCLASS", "REGTYPE", "REGPROC":
+		return tuple.TypeInt64
+	case "EVENT_TRIGGER", "TRIGGER":
+		return tuple.TypeText
 	case "TEXT[]", "INT[]", "INTEGER[]", "INT4[]", "INT8[]", "FLOAT8[]", "BOOLEAN[]":
 		return tuple.TypeArray
 	}
@@ -3723,7 +3782,8 @@ func (a *Analyzer) isAggregateFunc(name string) bool {
 		"regr_avgx", "regr_avgy", "regr_sxx", "regr_syy", "regr_sxy",
 		"percentile_cont", "percentile_disc", "mode",
 		"rank", "dense_rank", "percent_rank", "cume_dist",
-		"json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg":
+		"json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg",
+		"xmlagg":
 		return true
 	}
 	// Check custom aggregates in the catalog.
@@ -3803,6 +3863,8 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 			retType = tuple.TypeFloat64
 		case "json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg":
 			retType = tuple.TypeJSON
+		case "xmlagg":
+			retType = tuple.TypeText
 		default:
 			retType = tuple.TypeText
 		}
@@ -3997,6 +4059,15 @@ func virtualCatalogColumns(qualName string) []RTEColumn {
 			{"oid", tuple.TypeInt64},
 			{"nspname", tuple.TypeText},
 			{"nspowner", tuple.TypeInt64},
+		}
+	case "pg_catalog.pg_stat_statements", "pg_stat_statements":
+		defs = []colDef{
+			{"userid", tuple.TypeInt64},
+			{"dbid", tuple.TypeInt64},
+			{"query", tuple.TypeText},
+			{"calls", tuple.TypeInt64},
+			{"total_time", tuple.TypeFloat64},
+			{"rows", tuple.TypeInt64},
 		}
 	default:
 		return nil

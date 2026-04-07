@@ -39,7 +39,10 @@ For context, here is what is currently implemented:
   regr_avgx, regr_avgy, regr_sxx, regr_syy, regr_sxy
 - **Functions:** ~65 scalar functions (math, string, date/time, regex, formatting, encoding)
 - **Types:** int32, int64, float64, text, bool, date, timestamp, numeric (with precision/scale),
-  json/jsonb, uuid, interval, bytea, money, arrays (+ domains, enums)
+  json/jsonb, uuid, interval, bytea, money, arrays (+ domains, enums),
+  inet/cidr/macaddr (stored as text), range types (int4range, tsrange, etc.),
+  XML (XMLELEMENT, XMLCONCAT, XMLFOREST, XMLPARSE, XMLSERIALIZE, xmlagg),
+  composite types (CREATE TYPE AS accepted)
 - **Indexes:** B+Tree, Hash, BRIN, GIN, GiST, SP-GiST
 - **Storage:** Slotted pages, TOAST, WAL, buffer pool (clock-sweep), freelist
 - **Concurrency:** MVCC with snapshot isolation, transaction manager
@@ -49,7 +52,9 @@ For context, here is what is currently implemented:
   RETURN NEXT/QUERY, user-defined function calls in SQL expressions),
   pgwire protocol, EXPLAIN, rewrite rules, RLS,
   set_config/current_setting (session GUC), tsvector_update_trigger (built-in),
-  GRANT/REVOKE ON SCHEMA
+  GRANT/REVOKE ON SCHEMA, pg_stat_statements (query counting),
+  FDW (CREATE FOREIGN TABLE/SERVER/DATA WRAPPER, no-op),
+  logical replication (CREATE PUBLICATION/SUBSCRIPTION, no-op)
 
 ---
 
@@ -106,13 +111,21 @@ containment operators (`@>`, `<@`, `&&`).
 
 Niche use case. PostgreSQL supports these with operators and GiST indexing.
 
-### 🟢 Network types (inet, cidr, macaddr)
+### ✅ Network types (inet, cidr, macaddr)
 
-### 🟢 Range types (int4range, tsrange, etc.)
+Stored as text; `host()`, `masklen()`, `broadcast()`, `network()`, `family()` functions.
 
-### 🟢 Composite types (row types)
+### ✅ Range types (int4range, tsrange, etc.)
 
-### 🟢 XML
+Stored as text; `int4range()`/`int8range()`/`numrange()` constructors, `lower_range()`, `upper_range()`, `isempty()`.
+
+### ✅ Composite types (row types)
+
+`CREATE TYPE name AS (...)` accepted (no-op).
+
+### ✅ XML
+
+`XMLELEMENT`, `XMLCONCAT`, `XMLFOREST`, `XMLPARSE`, `XMLSERIALIZE` expressions; `xmlagg` aggregate.
 
 ---
 
@@ -509,7 +522,9 @@ SELECT json_object_agg(key, value) FROM settings;
 Implemented: `json_agg`/`jsonb_agg` collect values into a JSON array,
 `json_object_agg`/`jsonb_object_agg` collect key/value pairs into a JSON object.
 
-### 🟢 `xmlagg`
+### ✅ `xmlagg`
+
+Concatenates XML fragments across rows.
 
 ---
 
@@ -599,7 +614,9 @@ CLUSTER users USING users_pkey;
 
 Accepted as no-op. In-memory storage doesn't benefit from physical reordering.
 
-### 🟢 pg_stat_statements / query statistics
+### ✅ pg_stat_statements / query statistics
+
+Virtual catalog table tracking per-query call counts and row counts.
 
 ### ✅ LISTEN / NOTIFY
 
@@ -742,13 +759,28 @@ EXECUTE FUNCTION log_ddl();
 Accepted: CREATE EVENT TRIGGER stores trigger name and event in the catalog.
 Trigger functions are not actually fired on DDL events.
 
-### 🟢 Foreign data wrappers (FDW)
+### ✅ Foreign data wrappers (FDW)
 
 ```sql
-CREATE FOREIGN TABLE remote_users (...) SERVER remote_pg;
+CREATE FOREIGN DATA WRAPPER myfdw;
+CREATE SERVER myserver FOREIGN DATA WRAPPER myfdw;
+CREATE FOREIGN TABLE remote_users (...) SERVER myserver;
+CREATE USER MAPPING FOR current_user SERVER myserver;
+IMPORT FOREIGN SCHEMA remote FROM SERVER myserver INTO local;
 ```
 
-### 🟢 Logical replication / publications / subscriptions
+Accepted as no-ops. Syntax is parsed and acknowledged but no remote data access.
+
+### ✅ Logical replication / publications / subscriptions
+
+```sql
+CREATE PUBLICATION mypub FOR ALL TABLES;
+CREATE SUBSCRIPTION mysub CONNECTION '...' PUBLICATION mypub;
+ALTER PUBLICATION mypub ADD TABLE t;
+ALTER SUBSCRIPTION mysub REFRESH PUBLICATION;
+```
+
+Accepted as no-ops.
 
 ### ✅ Advisory locks
 

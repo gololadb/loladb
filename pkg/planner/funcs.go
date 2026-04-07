@@ -1806,6 +1806,163 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		}
 		return tuple.DText(""), nil
 
+	// Network type functions.
+	case "host":
+		// host(inet) → text — extract IP address without mask.
+		if len(args) < 1 {
+			return tuple.DNull(), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		if idx := strings.Index(s, "/"); idx >= 0 {
+			return tuple.DText(s[:idx]), nil
+		}
+		return tuple.DText(s), nil
+
+	case "masklen":
+		// masklen(inet) → int — extract mask length.
+		if len(args) < 1 {
+			return tuple.DNull(), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		if idx := strings.Index(s, "/"); idx >= 0 {
+			var ml int
+			fmt.Sscanf(s[idx+1:], "%d", &ml)
+			return tuple.DInt32(int32(ml)), nil
+		}
+		return tuple.DInt32(32), nil // default for IPv4
+
+	case "broadcast":
+		// broadcast(inet) → inet — simplified: return the address as-is.
+		if len(args) < 1 {
+			return tuple.DNull(), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		return d, nil
+
+	case "network":
+		// network(inet) → cidr — simplified: return the address as-is.
+		if len(args) < 1 {
+			return tuple.DNull(), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		return d, nil
+
+	case "family":
+		// family(inet) → int — return 4 for IPv4, 6 for IPv6.
+		if len(args) < 1 {
+			return tuple.DNull(), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		if strings.Contains(s, ":") {
+			return tuple.DText("6"), nil
+		}
+		return tuple.DText("4"), nil
+
+	// Range type functions.
+	case "int4range", "int8range", "numrange":
+		// range(lower, upper [, bounds]) → text representation.
+		if len(args) < 2 {
+			return tuple.DNull(), nil
+		}
+		lo, _ := EvalAnalyzedExpr(args[0], row)
+		hi, _ := EvalAnalyzedExpr(args[1], row)
+		bounds := "[)"
+		if len(args) >= 3 {
+			b, _ := EvalAnalyzedExpr(args[2], row)
+			bounds = datumToString(b)
+		}
+		lb := "["
+		ub := ")"
+		if len(bounds) >= 2 {
+			lb = string(bounds[0])
+			ub = string(bounds[1])
+		}
+		return tuple.DText(fmt.Sprintf("%s%s,%s%s", lb, datumToString(lo), datumToString(hi), ub)), nil
+
+	case "lower_range":
+		// lower(range) → extract lower bound.
+		if len(args) < 1 {
+			return tuple.DNull(), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		if len(s) >= 3 && (s[0] == '[' || s[0] == '(') {
+			inner := s[1 : len(s)-1]
+			parts := strings.SplitN(inner, ",", 2)
+			if len(parts) == 2 {
+				return tuple.DText(strings.TrimSpace(parts[0])), nil
+			}
+		}
+		return tuple.DNull(), nil
+
+	case "upper_range":
+		// upper(range) → extract upper bound.
+		if len(args) < 1 {
+			return tuple.DNull(), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		if len(s) >= 3 && (s[0] == '[' || s[0] == '(') {
+			inner := s[1 : len(s)-1]
+			parts := strings.SplitN(inner, ",", 2)
+			if len(parts) == 2 {
+				return tuple.DText(strings.TrimSpace(parts[1])), nil
+			}
+		}
+		return tuple.DNull(), nil
+
+	case "isempty":
+		// isempty(range) → bool.
+		if len(args) < 1 {
+			return tuple.DBool(true), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		s := datumToString(d)
+		return tuple.DBool(s == "empty" || s == ""), nil
+
+	// XML functions.
+	case "xmlelement":
+		if len(args) < 1 {
+			return tuple.DText("<element/>"), nil
+		}
+		d, _ := EvalAnalyzedExpr(args[0], row)
+		name := datumToString(d)
+		if len(args) >= 2 {
+			var content []string
+			for _, a := range args[1:] {
+				cv, _ := EvalAnalyzedExpr(a, row)
+				content = append(content, datumToString(cv))
+			}
+			return tuple.DText(fmt.Sprintf("<%s>%s</%s>", name, strings.Join(content, ""), name)), nil
+		}
+		return tuple.DText(fmt.Sprintf("<%s/>", name)), nil
+
+	case "xmlforest":
+		var parts []string
+		for _, a := range args {
+			d, _ := EvalAnalyzedExpr(a, row)
+			parts = append(parts, datumToString(d))
+		}
+		return tuple.DText(strings.Join(parts, "")), nil
+
+	case "xmlparse", "xmlserialize":
+		if len(args) >= 1 {
+			d, _ := EvalAnalyzedExpr(args[0], row)
+			return d, nil
+		}
+		return tuple.DText(""), nil
+
+	case "xmlconcat":
+		var sb strings.Builder
+		for _, a := range args {
+			d, _ := EvalAnalyzedExpr(a, row)
+			sb.WriteString(datumToString(d))
+		}
+		return tuple.DText(sb.String()), nil
+
 	// Advisory lock functions (no-op, always succeed).
 	case "pg_advisory_lock", "pg_advisory_xact_lock":
 		return tuple.DNull(), nil

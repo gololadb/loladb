@@ -161,6 +161,15 @@ type Catalog struct {
 
 	// EventTriggers stores event trigger name → event name.
 	EventTriggers map[string]string
+
+	// QueryStats tracks per-query execution counts for pg_stat_statements.
+	QueryStats map[string]*QueryStat
+}
+
+// QueryStat holds basic per-query statistics.
+type QueryStat struct {
+	Calls int64
+	Rows  int64
 }
 
 // PartitionInfo describes a partitioned table.
@@ -209,6 +218,7 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		Partitions:       make(map[string]*PartitionInfo),
 		Inheritance:      make(map[string][]string),
 		EventTriggers:   make(map[string]string),
+		QueryStats:      make(map[string]*QueryStat),
 	}
 
 	if eng.Super.PgClassPage == 0 {
