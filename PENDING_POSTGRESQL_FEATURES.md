@@ -191,13 +191,14 @@ LIMIT/OFFSET work, but the SQL:2008 standard syntax is not supported.
 
 ## 4. Transactions
 
-### 🔴 Real transaction support (BEGIN / COMMIT / ROLLBACK)
+### ✅ Real transaction support (BEGIN / COMMIT / ROLLBACK)
 
-Transactions are stubbed in the pgwire compatibility layer — BEGIN/COMMIT/ROLLBACK
-are acknowledged but are no-ops. The MVCC infrastructure (TxManager, snapshots)
-exists but is not wired to user-facing SQL transaction control.
+Full transaction control: BEGIN starts a transaction block, COMMIT makes
+changes permanent, ROLLBACK undoes all DML (INSERT/UPDATE/DELETE) since BEGIN.
+Failed transactions reject commands until ROLLBACK. COMMIT of a failed
+transaction performs ROLLBACK (PostgreSQL behavior).
 
-### 🔴 SAVEPOINT / ROLLBACK TO SAVEPOINT
+### ✅ SAVEPOINT / ROLLBACK TO SAVEPOINT
 
 ```sql
 BEGIN;
@@ -207,6 +208,9 @@ INSERT INTO t VALUES (2);
 ROLLBACK TO sp1;
 COMMIT;  -- only row 1 is committed
 ```
+
+Supports nested savepoints, ROLLBACK TO (including recovery from failed
+transaction state), and RELEASE SAVEPOINT.
 
 ### 🟡 Transaction isolation levels
 
@@ -614,7 +618,6 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| Real transactions (BEGIN/COMMIT/ROLLBACK) | Transactions |
 | FOREIGN KEY | Constraints |
 | CHECK constraints | Constraints |
 | Type casting with `::` | Operators |
@@ -634,7 +637,7 @@ SELECT pg_advisory_lock(12345);
 | ALTER TABLE ALTER/RENAME COLUMN | DDL |
 | Transaction isolation levels | Transactions |
 | FOR UPDATE / FOR SHARE | Transactions |
-| SAVEPOINT | Transactions |
+
 | TEMPORARY tables | DDL |
 | Table partitioning | DDL |
 | CREATE TABLE AS | DDL |

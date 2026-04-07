@@ -46,6 +46,24 @@ type TriggerContext struct {
 // SQLExecFunc executes a SQL statement and returns the result.
 type SQLExecFunc func(sql string) (*Result, error)
 
+// MutationKind identifies the type of DML mutation for undo tracking.
+type MutationKind int
+
+const (
+	MutInsert MutationKind = iota // row was inserted
+	MutDelete                     // row was deleted
+	MutUpdate                     // row was updated
+)
+
+// Mutation records a single DML change for transaction rollback.
+type Mutation struct {
+	Kind      MutationKind
+	Table     string
+	ItemID    slottedpage.ItemID   // for insert: the inserted ID; for delete: the deleted ID
+	NewItemID slottedpage.ItemID   // for update: the new row's ID after update
+	OldValues []tuple.Datum        // previous row values (for update/delete undo)
+}
+
 // Executor runs physical plan trees against the catalog/engine.
 type Executor struct {
 	Cat         *catalog.Catalog
@@ -56,6 +74,49 @@ type Executor struct {
 	// cteResults holds materialized CTE results for recursive CTE execution.
 	// Keyed by CTE alias name.
 	cteResults map[string]*cteResultEntry
+
+	// TrackMutations enables mutation logging for transaction support.
+	TrackMutations bool
+	// Mutations is the ordered log of DML changes within a transaction.
+	Mutations []Mutation
+}
+
+// RecordMutation appends a mutation to the log if tracking is enabled.
+func (ex *Executor) RecordMutation(m Mutation) {
+	if ex.TrackMutations {
+		ex.Mutations = append(ex.Mutations, m)
+	}
+}
+
+// MutationLogLen returns the current length of the mutation log.
+func (ex *Executor) MutationLogLen() int {
+	return len(ex.Mutations)
+}
+
+// ClearMutations resets the mutation log.
+func (ex *Executor) ClearMutations() {
+	ex.Mutations = ex.Mutations[:0]
+}
+
+// UndoMutationsFrom reverses mutations from index `from` to the end of the log,
+// in reverse order. Used for ROLLBACK and ROLLBACK TO SAVEPOINT.
+func (ex *Executor) UndoMutationsFrom(from int) {
+	for i := len(ex.Mutations) - 1; i >= from; i-- {
+		m := ex.Mutations[i]
+		switch m.Kind {
+		case MutInsert:
+			// Undo insert → delete the row.
+			ex.Cat.Delete(m.Table, m.ItemID)
+		case MutDelete:
+			// Undo delete → re-insert the old values.
+			ex.Cat.InsertInto(m.Table, m.OldValues)
+		case MutUpdate:
+			// Undo update → delete the new row and re-insert old values.
+			ex.Cat.Delete(m.Table, m.NewItemID)
+			ex.Cat.InsertInto(m.Table, m.OldValues)
+		}
+	}
+	ex.Mutations = ex.Mutations[:from]
 }
 
 type cteResultEntry struct {
@@ -1423,7 +1484,7 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 			return nil, err
 		}
 
-		_, err := ex.Cat.InsertInto(n.Table, values)
+		insertedID, err := ex.Cat.InsertInto(n.Table, values)
 		if err != nil {
 			if n.OnConflict != nil && strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
 				if n.OnConflict.Action == planner.OnConflictNothing {
@@ -1455,6 +1516,7 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 			return nil, err
 		}
 		count++
+		ex.RecordMutation(Mutation{Kind: MutInsert, Table: n.Table, ItemID: insertedID})
 
 		// Evaluate RETURNING expressions against the inserted row.
 		if len(n.ReturningExprs) > 0 {
@@ -1589,7 +1651,10 @@ func (ex *Executor) execOnConflictUpdate(
 		return nil, err
 	}
 
-	ex.Cat.Update(n.Table, matchID, newVals)
+	oldCopy := make([]tuple.Datum, len(matchRow))
+	copy(oldCopy, matchRow)
+	newID, _ := ex.Cat.Update(n.Table, matchID, newVals)
+	ex.RecordMutation(Mutation{Kind: MutUpdate, Table: n.Table, ItemID: matchID, NewItemID: newID, OldValues: oldCopy})
 	return newVals, nil
 }
 
@@ -1657,6 +1722,7 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 			returningRows = append(returningRows, retRow)
 		}
 
+		ex.RecordMutation(Mutation{Kind: MutDelete, Table: n.Table, ItemID: dt.id, OldValues: dt.row})
 		ex.Cat.Delete(n.Table, dt.id)
 
 		if hasTriggers {
@@ -1776,7 +1842,10 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 			return nil, err
 		}
 
-		ex.Cat.Update(n.Table, t.id, newVals)
+		oldCopy := make([]tuple.Datum, len(t.row))
+		copy(oldCopy, t.row)
+		newID, _ := ex.Cat.Update(n.Table, t.id, newVals)
+		ex.RecordMutation(Mutation{Kind: MutUpdate, Table: n.Table, ItemID: t.id, NewItemID: newID, OldValues: oldCopy})
 
 		// Evaluate RETURNING against the new row values.
 		if len(n.ReturningExprs) > 0 {

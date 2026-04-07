@@ -49,15 +49,8 @@ func interceptQuery(sql string, provider CatalogProvider) (*QueryResult, bool) {
 		!strings.Contains(upper, "ROLE") {
 		return &QueryResult{Message: "SET"}, true
 	}
-	if upper == "BEGIN" || strings.HasPrefix(upper, "BEGIN ") {
-		return &QueryResult{Message: "BEGIN"}, true
-	}
-	if upper == "COMMIT" || upper == "END" {
-		return &QueryResult{Message: "COMMIT"}, true
-	}
-	if upper == "ROLLBACK" {
-		return &QueryResult{Message: "ROLLBACK"}, true
-	}
+	// Transaction control (BEGIN, COMMIT, ROLLBACK, SAVEPOINT, etc.)
+	// is handled by the SQL executor — do not intercept here.
 	if strings.HasPrefix(upper, "LOCK ") {
 		return &QueryResult{Message: "LOCK TABLE"}, true
 	}

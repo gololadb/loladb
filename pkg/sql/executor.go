@@ -22,6 +22,21 @@ type Result struct {
 	Message      string
 }
 
+// TxState tracks the session-level transaction state.
+type TxState int
+
+const (
+	TxNone   TxState = iota // auto-commit mode (no explicit transaction)
+	TxActive                // inside BEGIN ... COMMIT/ROLLBACK
+	TxFailed                // transaction aborted, only ROLLBACK accepted
+)
+
+// Savepoint records a named position in the mutation log.
+type Savepoint struct {
+	Name     string
+	Position int // index into the mutation log
+}
+
 // Executor parses SQL and runs it through the full pipeline:
 // SQL → Parser → Analyzer (Query tree) → Rewriter → Planner (Logical) → Optimizer (Physical) → Executor → Result
 type Executor struct {
@@ -31,6 +46,10 @@ type Executor struct {
 	rewriter    *rewriter.Rewriter
 	optimizer   *planner.Optimizer
 	exec        *executor.Executor
+
+	// Transaction state
+	txState    TxState
+	savepoints []Savepoint
 }
 
 // NewExecutor creates a SQL executor backed by the given catalog.
@@ -140,6 +159,9 @@ func (ex *Executor) SetRole(role string) {
 func (ex *Executor) Exec(sql string) (*Result, error) {
 	stmts, err := parser.Parse(strings.NewReader(sql), nil)
 	if err != nil {
+		if ex.txState == TxActive {
+			ex.txState = TxFailed
+		}
 		return nil, fmt.Errorf("sql: parse error: %w", err)
 	}
 	if len(stmts) == 0 {
@@ -147,6 +169,16 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	}
 
 	stmt := stmts[0].Stmt
+
+	// Handle transaction control statements.
+	if txStmt, ok := stmt.(*parser.TransactionStmt); ok {
+		return ex.execTransaction(txStmt)
+	}
+
+	// In failed transaction state, reject everything except ROLLBACK.
+	if ex.txState == TxFailed {
+		return nil, fmt.Errorf("current transaction is aborted, commands ignored until end of transaction block")
+	}
 
 	// Handle SET statements.
 	if setVar, ok := stmt.(*parser.VariableSetStmt); ok {
@@ -202,7 +234,7 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	// Phase 1: Analyze — parse tree → Query tree (semantic analysis).
 	query, err := ex.analyzer.Analyze(stmt)
 	if err != nil {
-		return nil, err
+		return nil, ex.txError(err)
 	}
 
 	// Attach the original SELECT SQL to CREATE VIEW utility statements.
@@ -214,7 +246,7 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	// Phase 2: Rewrite — apply rewrite rules (view expansion, DML rules).
 	queries, err := ex.rewriter.Rewrite(query)
 	if err != nil {
-		return nil, err
+		return nil, ex.txError(err)
 	}
 	if len(queries) == 0 {
 		return &Result{Message: "OK"}, nil
@@ -227,19 +259,19 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		// Phase 3: Plan — Query tree → Logical plan.
 		logical, err := planner.QueryToLogicalPlan(q)
 		if err != nil {
-			return nil, err
+			return nil, ex.txError(err)
 		}
 
 		// Phase 4: Optimize — Logical plan → Physical plan.
 		physical, err := ex.optimizer.Optimize(logical)
 		if err != nil {
-			return nil, err
+			return nil, ex.txError(err)
 		}
 
 		if isExplain {
 			r, err := ex.exec.ExecuteExplain(physical, isAnalyze)
 			if err != nil {
-				return nil, err
+				return nil, ex.txError(err)
 			}
 			return convertResult(r), nil
 		}
@@ -247,12 +279,143 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		// Phase 5: Execute.
 		r, err := ex.exec.Execute(physical)
 		if err != nil {
-			return nil, err
+			return nil, ex.txError(err)
 		}
 		lastResult = convertResult(r)
 	}
 
 	return lastResult, nil
+}
+
+// TxStatus returns the current transaction status indicator for pgwire.
+// 'I' = idle, 'T' = in transaction, 'E' = failed transaction.
+func (ex *Executor) TxStatus() byte {
+	switch ex.txState {
+	case TxActive:
+		return 'T'
+	case TxFailed:
+		return 'E'
+	default:
+		return 'I'
+	}
+}
+
+// txError marks the transaction as failed if we're inside one.
+func (ex *Executor) txError(err error) error {
+	if ex.txState == TxActive {
+		ex.txState = TxFailed
+	}
+	return err
+}
+
+// execTransaction handles BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, ROLLBACK TO.
+func (ex *Executor) execTransaction(ts *parser.TransactionStmt) (*Result, error) {
+	switch ts.Kind {
+	case parser.TRANS_STMT_BEGIN, parser.TRANS_STMT_START:
+		if ex.txState == TxActive {
+			return nil, fmt.Errorf("there is already a transaction in progress")
+		}
+		ex.txState = TxActive
+		ex.exec.TrackMutations = true
+		ex.exec.ClearMutations()
+		ex.savepoints = nil
+		return &Result{Message: "BEGIN"}, nil
+
+	case parser.TRANS_STMT_COMMIT:
+		if ex.txState == TxFailed {
+			// PostgreSQL rolls back on COMMIT of a failed transaction.
+			ex.exec.UndoMutationsFrom(0)
+			ex.txState = TxNone
+			ex.exec.TrackMutations = false
+			ex.savepoints = nil
+			return &Result{Message: "ROLLBACK"}, nil
+		}
+		// Commit: mutations are already applied, just clear state.
+		ex.txState = TxNone
+		ex.exec.TrackMutations = false
+		ex.exec.ClearMutations()
+		ex.savepoints = nil
+		return &Result{Message: "COMMIT"}, nil
+
+	case parser.TRANS_STMT_ROLLBACK:
+		if ex.txState == TxNone {
+			// No transaction in progress — PostgreSQL issues a WARNING but succeeds.
+			return &Result{Message: "ROLLBACK"}, nil
+		}
+		// Undo all mutations.
+		ex.exec.UndoMutationsFrom(0)
+		ex.txState = TxNone
+		ex.exec.TrackMutations = false
+		ex.savepoints = nil
+		return &Result{Message: "ROLLBACK"}, nil
+
+	case parser.TRANS_STMT_SAVEPOINT:
+		if ex.txState != TxActive {
+			return nil, fmt.Errorf("SAVEPOINT can only be used in transaction blocks")
+		}
+		name := ""
+		if len(ts.Options) > 0 {
+			name = ts.Options[0]
+		}
+		ex.savepoints = append(ex.savepoints, Savepoint{
+			Name:     name,
+			Position: ex.exec.MutationLogLen(),
+		})
+		return &Result{Message: "SAVEPOINT"}, nil
+
+	case parser.TRANS_STMT_ROLLBACK_TO:
+		if ex.txState != TxActive && ex.txState != TxFailed {
+			return nil, fmt.Errorf("ROLLBACK TO SAVEPOINT can only be used in transaction blocks")
+		}
+		name := ""
+		if len(ts.Options) > 0 {
+			name = ts.Options[0]
+		}
+		// Find the savepoint (search from most recent).
+		found := false
+		for i := len(ex.savepoints) - 1; i >= 0; i-- {
+			if strings.EqualFold(ex.savepoints[i].Name, name) {
+				// Undo mutations back to the savepoint position.
+				ex.exec.UndoMutationsFrom(ex.savepoints[i].Position)
+				// Remove savepoints created after this one (but keep this one).
+				ex.savepoints = ex.savepoints[:i+1]
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("savepoint %q does not exist", name)
+		}
+		// ROLLBACK TO restores the transaction to active state even if it was failed.
+		ex.txState = TxActive
+		return &Result{Message: "ROLLBACK"}, nil
+
+	case parser.TRANS_STMT_RELEASE:
+		if ex.txState != TxActive {
+			return nil, fmt.Errorf("RELEASE SAVEPOINT can only be used in transaction blocks")
+		}
+		name := ""
+		if len(ts.Options) > 0 {
+			name = ts.Options[0]
+		}
+		// Find and remove the savepoint.
+		found := false
+		for i := len(ex.savepoints) - 1; i >= 0; i-- {
+			if strings.EqualFold(ex.savepoints[i].Name, name) {
+				// Remove this savepoint and all after it.
+				ex.savepoints = ex.savepoints[:i]
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("savepoint %q does not exist", name)
+		}
+		return &Result{Message: "RELEASE"}, nil
+
+	default:
+		return &Result{Message: "OK"}, nil
+	}
 }
 
 // ExplainPlan returns the physical plan text without executing.
