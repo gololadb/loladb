@@ -83,8 +83,10 @@ const (
 	msgCloseComplete    byte = '3'
 	msgNoData           byte = 'n'
 	msgCopyOutResponse  byte = 'H'
+	msgCopyInResponse   byte = 'G'
 	msgCopyData         byte = 'd'
 	msgCopyDone         byte = 'c'
+	msgCopyFail         byte = 'f'
 )
 
 // Error/Notice field identifiers — mirrors postgres_ext.h PG_DIAG_*.
@@ -112,12 +114,26 @@ type QueryResult struct {
 	Rows         [][]tuple.Datum
 	RowsAffected int64
 	Message      string
+	// CopyData holds formatted output for COPY TO STDOUT.
+	CopyData string
+	// CopyStmt is non-nil when a COPY FROM STDIN was parsed and the
+	// pgwire layer needs to initiate the COPY sub-protocol.
+	CopyStmt interface{}
 }
 
 // QueryExecutor is the interface the pgwire server uses to execute SQL.
 // The sql.Executor satisfies this via a thin adapter.
 type QueryExecutor interface {
 	Execute(sql string) (*QueryResult, error)
+}
+
+// CopyExecutor extends QueryExecutor with the ability to feed COPY FROM
+// STDIN data back into the SQL engine after the pgwire layer collects it.
+type CopyExecutor interface {
+	QueryExecutor
+	// ExecuteCopyFromData inserts rows from COPY data lines.
+	// The copyStmt is the opaque CopyStmt from QueryResult.CopyStmt.
+	ExecuteCopyFromData(copyStmt interface{}, lines []string) (*QueryResult, error)
 }
 
 // SessionExecutor extends QueryExecutor with per-connection session setup.
@@ -432,11 +448,6 @@ func (c *conn) executeAndSend(sql string) {
 		c.handleSQLExecute(sql)
 		return
 	}
-	if strings.HasPrefix(upper, "COPY ") && strings.Contains(upper, "TO STDOUT") {
-		c.handleCopyToStdout(sql, upper)
-		return
-	}
-
 	// Try the pg_dump compatibility interceptor first.
 	var provider CatalogProvider
 	if cp, ok := c.executor.(CatalogProvider); ok {
@@ -456,6 +467,18 @@ func (c *conn) executeAndSend(sql string) {
 	result, err := c.executor.Execute(sql)
 	if err != nil {
 		c.sendError("ERROR", "42000", err.Error())
+		return
+	}
+
+	// COPY TO STDOUT — send data via the COPY out sub-protocol.
+	if result.CopyData != "" {
+		c.sendCopyOut(result)
+		return
+	}
+
+	// COPY FROM STDIN — initiate the COPY in sub-protocol.
+	if result.CopyStmt != nil {
+		c.handleCopyIn(result)
 		return
 	}
 
@@ -972,37 +995,11 @@ func splitParams(s string) []string {
 	return params
 }
 
-// handleCopyToStdout implements COPY table TO stdout for pg_dump.
-// Converts to SELECT, then sends results in COPY text format.
-func (c *conn) handleCopyToStdout(sql, upper string) {
-	// Parse: COPY schema.table (col1, col2, ...) TO stdout;
-	// Extract table name and optional column list.
-	rest := strings.TrimSpace(sql[len("COPY "):])
-
-	// Find table name (possibly schema-qualified).
-	var tableName string
-	idx := strings.IndexAny(rest, " (")
-	if idx < 0 {
-		c.sendError("ERROR", "42601", "invalid COPY syntax")
-		return
-	}
-	tableName = rest[:idx]
-	// Strip schema prefix.
-	if dot := strings.LastIndex(tableName, "."); dot >= 0 {
-		tableName = tableName[dot+1:]
-	}
-
-	// Build SELECT query.
-	selectSQL := fmt.Sprintf("SELECT * FROM %s", tableName)
-
-	result, err := c.executor.Execute(selectSQL)
-	if err != nil {
-		c.sendError("ERROR", "42000", err.Error())
-		return
-	}
+// sendCopyOut sends COPY TO STDOUT data via the pgwire COPY out sub-protocol.
+func (c *conn) sendCopyOut(result *QueryResult) {
+	numCols := len(result.Columns)
 
 	// Send CopyOutResponse: text format, N columns.
-	numCols := len(result.Columns)
 	{
 		buf := newMsgBuf(msgCopyOutResponse)
 		buf.writeByte(0) // text format overall
@@ -1013,23 +1010,13 @@ func (c *conn) handleCopyToStdout(sql, upper string) {
 		c.send(buf)
 	}
 
-	// Send CopyData for each row (tab-separated, newline-terminated).
-	for _, row := range result.Rows {
-		var line strings.Builder
-		for i, d := range row {
-			if i > 0 {
-				line.WriteByte('\t')
-			}
-			if d.Type == tuple.TypeNull {
-				line.WriteString("\\N")
-			} else {
-				line.WriteString(datumToText(d))
-			}
+	// Send CopyData — one message per line of formatted output.
+	for _, line := range strings.SplitAfter(result.CopyData, "\n") {
+		if line == "" {
+			continue
 		}
-		line.WriteByte('\n')
-
 		buf := newMsgBuf(msgCopyData)
-		buf.writeBytes([]byte(line.String()))
+		buf.writeBytes([]byte(line))
 		c.send(buf)
 	}
 
@@ -1039,5 +1026,93 @@ func (c *conn) handleCopyToStdout(sql, upper string) {
 		c.send(buf)
 	}
 
-	c.sendCommandComplete(fmt.Sprintf("COPY %d", len(result.Rows)))
+	c.sendCommandComplete(result.Message)
+}
+
+// handleCopyIn implements the COPY FROM STDIN pgwire sub-protocol.
+// Sends CopyInResponse, reads CopyData messages until CopyDone or CopyFail,
+// then feeds the collected data to the SQL engine.
+func (c *conn) handleCopyIn(result *QueryResult) {
+	copyStmt := result.CopyStmt
+
+	ce, ok := c.executor.(CopyExecutor)
+	if !ok {
+		c.sendError("ERROR", "0A000", "COPY FROM STDIN not supported by this executor")
+		return
+	}
+
+	// Send CopyInResponse: text format, 0 columns (column count is informational).
+	{
+		buf := newMsgBuf(msgCopyInResponse)
+		buf.writeByte(0) // text format overall
+		buf.writeInt16(0)
+		c.send(buf)
+	}
+
+	// Read CopyData messages until CopyDone or CopyFail.
+	var lines []string
+	var accumulated strings.Builder
+
+	for {
+		header := make([]byte, 5)
+		if _, err := io.ReadFull(c.nc, header); err != nil {
+			return // client disconnected
+		}
+
+		msgType := header[0]
+		msgLen := int(binary.BigEndian.Uint32(header[1:])) - 4
+		if msgLen < 0 {
+			msgLen = 0
+		}
+
+		var payload []byte
+		if msgLen > 0 {
+			payload = make([]byte, msgLen)
+			if _, err := io.ReadFull(c.nc, payload); err != nil {
+				return
+			}
+		}
+
+		switch msgType {
+		case msgCopyData:
+			// Accumulate data. CopyData messages may contain partial lines
+			// or multiple lines, so we buffer and split on newlines.
+			accumulated.Write(payload)
+
+		case msgCopyDone:
+			// Split accumulated data into lines.
+			data := accumulated.String()
+			for _, line := range strings.Split(data, "\n") {
+				if line == "" {
+					continue
+				}
+				// Stop at the \. terminator.
+				if line == "\\." {
+					break
+				}
+				lines = append(lines, line)
+			}
+
+			// Feed data to the SQL engine.
+			insertResult, err := ce.ExecuteCopyFromData(copyStmt, lines)
+			if err != nil {
+				c.sendError("ERROR", "22000", err.Error())
+				return
+			}
+			c.sendCommandComplete(insertResult.Message)
+			return
+
+		case msgCopyFail:
+			// Client aborted the COPY.
+			errMsg := cstring(payload)
+			c.sendError("ERROR", "57014", fmt.Sprintf("COPY FROM STDIN failed: %s", errMsg))
+			return
+
+		default:
+			// Unexpected message during COPY — protocol error.
+			c.sendError("ERROR", "08P01",
+				fmt.Sprintf("unexpected message type %c during COPY", msgType))
+			return
+		}
+	}
 }

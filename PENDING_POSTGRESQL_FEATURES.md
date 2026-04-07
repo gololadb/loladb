@@ -431,19 +431,20 @@ unqualified (`pg_tables`). Generated dynamically from catalog metadata.
 
 ## 10. COPY and Bulk Operations
 
-### 🔴 COPY
+### ✅ COPY
 
 ```sql
 COPY users FROM '/path/to/users.csv' WITH (FORMAT csv, HEADER);
 COPY (SELECT * FROM users) TO STDOUT WITH (FORMAT csv);
 ```
 
-No COPY support. This is the primary way to bulk-load data into PostgreSQL.
+Implemented: COPY TO STDOUT (text/csv), COPY FROM file (text/csv), COPY (query) TO STDOUT,
+column lists, HEADER option, NULL handling, and text-format escaping.
 
-### 🟡 COPY ... FROM STDIN (pgwire protocol)
+### ✅ COPY ... FROM STDIN (pgwire protocol)
 
-The pgwire protocol supports a COPY sub-protocol for streaming data. Not
-implemented.
+The pgwire COPY sub-protocol is implemented: CopyInResponse/CopyData/CopyDone/CopyFail
+message handling for streaming bulk data from clients.
 
 ---
 
@@ -631,7 +632,6 @@ SELECT pg_advisory_lock(12345);
 |---|---|
 
 
-| COPY | Bulk I/O |
 | VACUUM | Maintenance |
 
 | PREPARE / EXECUTE | Prepared statements |

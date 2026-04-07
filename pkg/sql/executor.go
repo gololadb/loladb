@@ -20,6 +20,12 @@ type Result struct {
 	Rows         [][]tuple.Datum
 	RowsAffected int64
 	Message      string
+	// CopyData holds formatted output for COPY TO STDOUT.
+	CopyData string
+	// CopyStmt is set when a COPY FROM STDIN is parsed but needs
+	// the pgwire layer to supply data. The caller should check this
+	// and initiate the COPY sub-protocol.
+	CopyStmt interface{}
 }
 
 // TxState tracks the session-level transaction state.
@@ -178,6 +184,11 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	// In failed transaction state, reject everything except ROLLBACK.
 	if ex.txState == TxFailed {
 		return nil, fmt.Errorf("current transaction is aborted, commands ignored until end of transaction block")
+	}
+
+	// Handle COPY statements (bypass analyzer — COPY is a utility).
+	if cs, ok := stmt.(*parser.CopyStmt); ok {
+		return ex.execCopy(cs)
 	}
 
 	// Handle SET statements.

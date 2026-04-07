@@ -43,6 +43,19 @@ func (a *sqlAdapter) Execute(sqlStr string) (*pgwire.QueryResult, error) {
 		Rows:         r.Rows,
 		RowsAffected: r.RowsAffected,
 		Message:      msg,
+		CopyData:     r.CopyData,
+		CopyStmt:     r.CopyStmt,
+	}, nil
+}
+
+func (a *sqlAdapter) ExecuteCopyFromData(copyStmt interface{}, lines []string) (*pgwire.QueryResult, error) {
+	r, err := a.exec.ExecCopyFromDataRaw(copyStmt, lines)
+	if err != nil {
+		return nil, err
+	}
+	return &pgwire.QueryResult{
+		RowsAffected: r.RowsAffected,
+		Message:      r.Message,
 	}, nil
 }
 
