@@ -500,16 +500,17 @@ Async notification system. Niche but useful for real-time applications.
 
 ## 12. Prepared Statements and Cursors
 
-### 🔴 PREPARE / EXECUTE (server-side)
+### ✅ PREPARE / EXECUTE (server-side)
 
 ```sql
 PREPARE get_user(int) AS SELECT * FROM users WHERE id = $1;
 EXECUTE get_user(42);
+DEALLOCATE get_user;
 ```
 
-The pgwire protocol handles Parse/Bind/Execute messages for extended query
-protocol, but SQL-level PREPARE/EXECUTE is not supported. Parameter references
-(`$1`) are explicitly rejected by the analyzer.
+Implemented: SQL-level PREPARE stores parameterized queries with `$N` parameter
+references. EXECUTE substitutes parameters and runs through the full pipeline.
+DEALLOCATE and DEALLOCATE ALL supported. Works with SELECT, INSERT, UPDATE, DELETE.
 
 ### 🟡 DECLARE / FETCH / CLOSE (cursors)
 
@@ -630,9 +631,6 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-
-
-| PREPARE / EXECUTE | Prepared statements |
 
 ### Important for real-world applications (🟡)
 

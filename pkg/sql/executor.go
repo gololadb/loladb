@@ -56,6 +56,9 @@ type Executor struct {
 	// Transaction state
 	txState    TxState
 	savepoints []Savepoint
+
+	// Server-side prepared statements (session-scoped).
+	preparedStmts map[string]*PreparedStmt
 }
 
 // NewExecutor creates a SQL executor backed by the given catalog.
@@ -194,6 +197,17 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	// Handle VACUUM / ANALYZE statements.
 	if vs, ok := stmt.(*parser.VacuumStmt); ok {
 		return ex.execVacuumAnalyze(vs)
+	}
+
+	// Handle PREPARE / EXECUTE / DEALLOCATE statements.
+	if ps, ok := stmt.(*parser.PrepareStmt); ok {
+		return ex.execPrepare(ps)
+	}
+	if es, ok := stmt.(*parser.ExecuteStmt); ok {
+		return ex.execExecute(es)
+	}
+	if ds, ok := stmt.(*parser.DeallocateStmt); ok {
+		return ex.execDeallocate(ds)
 	}
 
 	// Handle SET statements.
