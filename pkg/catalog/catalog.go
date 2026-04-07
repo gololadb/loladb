@@ -82,6 +82,35 @@ func (a *engineAllocator) MarkDirty(pn uint32)                     { a.eng.Pool.
 
 // Catalog provides DDL operations backed by pg_class and pg_attribute
 // system tables that live in normal heap pages.
+// CheckConstraint holds a column-level or table-level CHECK constraint.
+type CheckConstraint struct {
+	Name    string // constraint name (auto-generated if empty)
+	Table   string // table name
+	Expr    string // SQL expression text (e.g., "price > 0")
+}
+
+// ForeignKeyAction specifies what happens on DELETE/UPDATE of the referenced row.
+type ForeignKeyAction int
+
+const (
+	FKActionNoAction  ForeignKeyAction = iota // default: error if referenced
+	FKActionRestrict                          // same as NO ACTION for immediate checks
+	FKActionCascade                           // CASCADE: delete/update child rows
+	FKActionSetNull                           // SET NULL: set FK columns to NULL
+	FKActionSetDefault                        // SET DEFAULT: set FK columns to default
+)
+
+// ForeignKey holds a foreign key constraint definition.
+type ForeignKey struct {
+	Name       string           // constraint name
+	Table      string           // child table (the one with the FK column)
+	Columns    []string         // FK column(s) in the child table
+	RefTable   string           // parent/referenced table
+	RefColumns []string         // referenced column(s) in the parent table
+	OnDelete   ForeignKeyAction // action on DELETE of parent row
+	OnUpdate   ForeignKeyAction // action on UPDATE of parent row
+}
+
 type Catalog struct {
 	Eng        *engine.Engine
 	alloc      *engineAllocator // shared page allocator
@@ -94,6 +123,10 @@ type Catalog struct {
 	Types      *typeStore       // in-memory custom type definitions (domains, enums)
 	cache      *syscache        // catalog lookup cache
 	SearchPath []string         // schema search path (default: ["public"])
+
+	// Constraints
+	CheckConstraints []CheckConstraint // CHECK constraints
+	ForeignKeys      []ForeignKey      // FOREIGN KEY constraints
 }
 
 // New wraps an engine with catalog operations. If the database is
@@ -1841,6 +1874,49 @@ func (c *Catalog) Vacuum(tableName string) (*engine.VacuumResult, error) {
 // or unique constraint index (convention: _pkey or _key suffix).
 func (c *Catalog) isUniqueIndex(idx IndexInfo) bool {
 	return strings.HasSuffix(idx.Name, "_pkey") || strings.HasSuffix(idx.Name, "_key")
+}
+
+// AddCheckConstraint registers a CHECK constraint for a table.
+func (c *Catalog) AddCheckConstraint(cc CheckConstraint) {
+	c.CheckConstraints = append(c.CheckConstraints, cc)
+}
+
+// GetCheckConstraints returns all CHECK constraints for the named table.
+func (c *Catalog) GetCheckConstraints(table string) []CheckConstraint {
+	var result []CheckConstraint
+	for _, cc := range c.CheckConstraints {
+		if strings.EqualFold(cc.Table, table) {
+			result = append(result, cc)
+		}
+	}
+	return result
+}
+
+// AddForeignKey registers a FOREIGN KEY constraint.
+func (c *Catalog) AddForeignKey(fk ForeignKey) {
+	c.ForeignKeys = append(c.ForeignKeys, fk)
+}
+
+// GetForeignKeys returns all FK constraints where the named table is the child.
+func (c *Catalog) GetForeignKeys(table string) []ForeignKey {
+	var result []ForeignKey
+	for _, fk := range c.ForeignKeys {
+		if strings.EqualFold(fk.Table, table) {
+			result = append(result, fk)
+		}
+	}
+	return result
+}
+
+// GetReferencingForeignKeys returns all FK constraints where the named table is the parent.
+func (c *Catalog) GetReferencingForeignKeys(table string) []ForeignKey {
+	var result []ForeignKey
+	for _, fk := range c.ForeignKeys {
+		if strings.EqualFold(fk.RefTable, table) {
+			result = append(result, fk)
+		}
+	}
+	return result
 }
 
 // datumToInt64Key converts a datum to an int64 key for index lookup,

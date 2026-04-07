@@ -354,7 +354,7 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 	}
 	switch u.Type {
 	case UtilCreateTable:
-		return &LogicalCreateTable{Table: u.TableName, Schema: u.TableSchema, Columns: u.Columns}, nil
+		return &LogicalCreateTable{Table: u.TableName, Schema: u.TableSchema, Columns: u.Columns, ForeignKeys: u.ForeignKeys}, nil
 	case UtilCreateIndex:
 		return &LogicalCreateIndex{Index: u.IndexName, Table: u.IndexTable, Column: u.IndexColumn, Method: u.IndexMethod}, nil
 	case UtilCreateSequence:
@@ -846,3 +846,10 @@ func foldEqual(a, b string) bool {
 	}
 	return true
 }
+
+// AnalyzedToExprPublic is an exported wrapper around analyzedToExpr.
+func AnalyzedToExprPublic(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
+	return analyzedToExpr(ae, rtes)
+}
+
+

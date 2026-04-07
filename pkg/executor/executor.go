@@ -1484,6 +1484,16 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 			return nil, err
 		}
 
+		// Validate CHECK constraints.
+		if err := ex.validateCheckConstraints(n.Table, colNames, values); err != nil {
+			return nil, err
+		}
+
+		// Validate FOREIGN KEY constraints.
+		if err := ex.validateForeignKeys(n.Table, colNames, values); err != nil {
+			return nil, err
+		}
+
 		insertedID, err := ex.Cat.InsertInto(n.Table, values)
 		if err != nil {
 			if n.OnConflict != nil && strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
@@ -1650,6 +1660,9 @@ func (ex *Executor) execOnConflictUpdate(
 	if err := ex.validateCustomTypes(tableCols, newVals); err != nil {
 		return nil, err
 	}
+	if err := ex.validateCheckConstraints(n.Table, colNames, newVals); err != nil {
+		return nil, err
+	}
 
 	oldCopy := make([]tuple.Datum, len(matchRow))
 	copy(oldCopy, matchRow)
@@ -1720,6 +1733,11 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 				retRow[i] = val
 			}
 			returningRows = append(returningRows, retRow)
+		}
+
+		// Enforce FK actions on parent side before deleting.
+		if err := ex.enforceForeignKeyOnDelete(n.Table, colNames, dt.row); err != nil {
+			return nil, err
 		}
 
 		ex.RecordMutation(Mutation{Kind: MutDelete, Table: n.Table, ItemID: dt.id, OldValues: dt.row})
@@ -1842,10 +1860,25 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 			return nil, err
 		}
 
+		// Validate CHECK constraints.
+		if err := ex.validateCheckConstraints(n.Table, colNames, newVals); err != nil {
+			return nil, err
+		}
+
+		// Validate FOREIGN KEY constraints (child side).
+		if err := ex.validateForeignKeys(n.Table, colNames, newVals); err != nil {
+			return nil, err
+		}
+
 		oldCopy := make([]tuple.Datum, len(t.row))
 		copy(oldCopy, t.row)
 		newID, _ := ex.Cat.Update(n.Table, t.id, newVals)
 		ex.RecordMutation(Mutation{Kind: MutUpdate, Table: n.Table, ItemID: t.id, NewItemID: newID, OldValues: oldCopy})
+
+		// Enforce FK actions on parent side (CASCADE, SET NULL, etc.).
+		if err := ex.enforceForeignKeyOnUpdate(n.Table, colNames, t.row, newVals); err != nil {
+			return nil, err
+		}
 
 		// Evaluate RETURNING against the new row values.
 		if len(n.ReturningExprs) > 0 {
@@ -1916,7 +1949,52 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 		}
 	}
 
+	// Register CHECK constraints.
+	for _, c := range n.Columns {
+		if c.CheckExpr != "" {
+			name := c.CheckName
+			if name == "" {
+				name = fmt.Sprintf("%s_%s_check", n.Table, c.Name)
+			}
+			ex.Cat.AddCheckConstraint(catalog.CheckConstraint{
+				Name: name, Table: n.Table, Expr: c.CheckExpr,
+			})
+		}
+	}
+
+	// Register FOREIGN KEY constraints.
+	for _, fk := range n.ForeignKeys {
+		name := fk.Name
+		if name == "" {
+			name = fmt.Sprintf("%s_%s_fkey", n.Table, strings.Join(fk.Columns, "_"))
+		}
+		ex.Cat.AddForeignKey(catalog.ForeignKey{
+			Name:       name,
+			Table:      n.Table,
+			Columns:    fk.Columns,
+			RefTable:   fk.RefTable,
+			RefColumns: fk.RefColumns,
+			OnDelete:   parseFKAction(fk.OnDelete),
+			OnUpdate:   parseFKAction(fk.OnUpdate),
+		})
+	}
+
 	return &Result{Message: fmt.Sprintf("CREATE TABLE %s", n.Table)}, nil
+}
+
+func parseFKAction(s string) catalog.ForeignKeyAction {
+	switch strings.ToUpper(s) {
+	case "CASCADE":
+		return catalog.FKActionCascade
+	case "SET NULL":
+		return catalog.FKActionSetNull
+	case "SET DEFAULT":
+		return catalog.FKActionSetDefault
+	case "RESTRICT":
+		return catalog.FKActionRestrict
+	default:
+		return catalog.FKActionNoAction
+	}
 }
 
 func (ex *Executor) execCreateIndex(n *planner.PhysCreateIndex) (*Result, error) {
@@ -2607,6 +2685,320 @@ func validateNotNull(cols []catalog.Column, values []tuple.Datum) error {
 		}
 		if i >= len(values) || values[i].Type == tuple.TypeNull {
 			return fmt.Errorf("null value in column %q violates not-null constraint", col.Name)
+		}
+	}
+	return nil
+}
+
+// validateCheckConstraints evaluates CHECK expressions against a row.
+func (ex *Executor) validateCheckConstraints(table string, colNames []string, values []tuple.Datum) error {
+	checks := ex.Cat.GetCheckConstraints(table)
+	if len(checks) == 0 {
+		return nil
+	}
+	for _, cc := range checks {
+		// Parse the CHECK expression as a SELECT expression.
+		sql := "SELECT " + cc.Expr
+		stmts, err := parser.Parse(strings.NewReader(sql), nil)
+		if err != nil {
+			return fmt.Errorf("check constraint %q: parse error: %w", cc.Name, err)
+		}
+		if len(stmts) == 0 {
+			continue
+		}
+		sel, ok := stmts[0].Stmt.(*parser.SelectStmt)
+		if !ok || len(sel.TargetList) == 0 {
+			continue
+		}
+
+		// Build a minimal analyzer with the table's columns in scope.
+		a := &planner.Analyzer{Cat: ex.Cat}
+		a.AddRangeTableEntry(table, "")
+
+		analyzed, err := a.TransformExpr(sel.TargetList[0].Val)
+		if err != nil {
+			return fmt.Errorf("check constraint %q: analyze error: %w", cc.Name, err)
+		}
+
+		expr := planner.AnalyzedToExprPublic(analyzed, a.GetRangeTable())
+
+		// Build a row for evaluation.
+		names := make([]string, len(colNames))
+		for i, cn := range colNames {
+			names[i] = table + "." + cn
+		}
+		row := &planner.Row{Columns: values, Names: names}
+
+		val, err := expr.Eval(row)
+		if err != nil {
+			return fmt.Errorf("check constraint %q: eval error: %w", cc.Name, err)
+		}
+		// PostgreSQL semantics: CHECK passes unless the result is explicitly false.
+		// NULL results (e.g., from NULL column values) are treated as passing.
+		if val.Type == tuple.TypeBool && !val.Bool {
+			return fmt.Errorf("new row violates check constraint %q", cc.Name)
+		}
+	}
+	return nil
+}
+
+// validateForeignKeys checks that FK column values reference existing rows in the parent table.
+func (ex *Executor) validateForeignKeys(table string, colNames []string, values []tuple.Datum) error {
+	fks := ex.Cat.GetForeignKeys(table)
+	if len(fks) == 0 {
+		return nil
+	}
+	for _, fk := range fks {
+		// Get FK column values from the row.
+		fkVals := make([]tuple.Datum, len(fk.Columns))
+		allNull := true
+		for i, fkCol := range fk.Columns {
+			for j, cn := range colNames {
+				if strings.EqualFold(fkCol, cn) && j < len(values) {
+					fkVals[i] = values[j]
+					if fkVals[i].Type != tuple.TypeNull {
+						allNull = false
+					}
+					break
+				}
+			}
+		}
+		// NULL FK values are allowed (no reference to check).
+		if allNull {
+			continue
+		}
+
+		// Scan the parent table for a matching row.
+		refColNames := ex.getTableColNames(fk.RefTable)
+		found := false
+		ex.Cat.SeqScan(fk.RefTable, func(_ slottedpage.ItemID, tup *tuple.Tuple) bool {
+			match := true
+			for i, refCol := range fk.RefColumns {
+				for j, cn := range refColNames {
+					if strings.EqualFold(refCol, cn) && j < len(tup.Columns) {
+						if planner.CompareDatums(fkVals[i], tup.Columns[j]) != 0 {
+							match = false
+						}
+						break
+					}
+				}
+				if !match {
+					break
+				}
+			}
+			if match {
+				found = true
+				return false // stop scanning
+			}
+			return true
+		})
+		if !found {
+			return fmt.Errorf("insert or update on table %q violates foreign key constraint %q", table, fk.Name)
+		}
+	}
+	return nil
+}
+
+// enforceForeignKeyOnDelete handles FK actions when a row is deleted from a parent table.
+func (ex *Executor) enforceForeignKeyOnDelete(table string, colNames []string, deletedRow []tuple.Datum) error {
+	refs := ex.Cat.GetReferencingForeignKeys(table)
+	if len(refs) == 0 {
+		return nil
+	}
+	for _, fk := range refs {
+		// Get the parent key values from the deleted row.
+		parentVals := make([]tuple.Datum, len(fk.RefColumns))
+		for i, refCol := range fk.RefColumns {
+			for j, cn := range colNames {
+				if strings.EqualFold(refCol, cn) && j < len(deletedRow) {
+					parentVals[i] = deletedRow[j]
+					break
+				}
+			}
+		}
+
+		// Find child rows that reference this parent row.
+		childColNames := ex.getTableColNames(fk.Table)
+		type childMatch struct {
+			id  slottedpage.ItemID
+			row []tuple.Datum
+		}
+		var matches []childMatch
+		ex.Cat.SeqScan(fk.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+			match := true
+			for i, fkCol := range fk.Columns {
+				for j, cn := range childColNames {
+					if strings.EqualFold(fkCol, cn) && j < len(tup.Columns) {
+						if planner.CompareDatums(parentVals[i], tup.Columns[j]) != 0 {
+							match = false
+						}
+						break
+					}
+				}
+				if !match {
+					break
+				}
+			}
+			if match {
+				row := make([]tuple.Datum, len(tup.Columns))
+				copy(row, tup.Columns)
+				matches = append(matches, childMatch{id: id, row: row})
+			}
+			return true
+		})
+
+		if len(matches) == 0 {
+			continue
+		}
+
+		switch fk.OnDelete {
+		case catalog.FKActionCascade:
+			for _, m := range matches {
+				ex.RecordMutation(Mutation{Kind: MutDelete, Table: fk.Table, ItemID: m.id, OldValues: m.row})
+				ex.Cat.Delete(fk.Table, m.id)
+			}
+		case catalog.FKActionSetNull:
+			for _, m := range matches {
+				newVals := make([]tuple.Datum, len(m.row))
+				copy(newVals, m.row)
+				for _, fkCol := range fk.Columns {
+					for j, cn := range childColNames {
+						if strings.EqualFold(fkCol, cn) {
+							newVals[j] = tuple.DNull()
+							break
+						}
+					}
+				}
+				oldCopy := make([]tuple.Datum, len(m.row))
+				copy(oldCopy, m.row)
+				newID, _ := ex.Cat.Update(fk.Table, m.id, newVals)
+				ex.RecordMutation(Mutation{Kind: MutUpdate, Table: fk.Table, ItemID: m.id, NewItemID: newID, OldValues: oldCopy})
+			}
+		case catalog.FKActionSetDefault:
+			childCols := ex.getTableColumns(fk.Table)
+			for _, m := range matches {
+				newVals := make([]tuple.Datum, len(m.row))
+				copy(newVals, m.row)
+				for _, fkCol := range fk.Columns {
+					for j, cn := range childColNames {
+						if strings.EqualFold(fkCol, cn) {
+							newVals[j] = ex.evalDefault(childCols[j])
+							break
+						}
+					}
+				}
+				oldCopy := make([]tuple.Datum, len(m.row))
+				copy(oldCopy, m.row)
+				newID, _ := ex.Cat.Update(fk.Table, m.id, newVals)
+				ex.RecordMutation(Mutation{Kind: MutUpdate, Table: fk.Table, ItemID: m.id, NewItemID: newID, OldValues: oldCopy})
+			}
+		default: // NO ACTION / RESTRICT
+			return fmt.Errorf("update or delete on table %q violates foreign key constraint %q on table %q",
+				table, fk.Name, fk.Table)
+		}
+	}
+	return nil
+}
+
+// enforceForeignKeyOnUpdate handles FK actions when a parent PK column is updated.
+func (ex *Executor) enforceForeignKeyOnUpdate(table string, colNames []string, oldRow, newRow []tuple.Datum) error {
+	refs := ex.Cat.GetReferencingForeignKeys(table)
+	if len(refs) == 0 {
+		return nil
+	}
+	for _, fk := range refs {
+		// Check if any referenced columns actually changed.
+		changed := false
+		parentOldVals := make([]tuple.Datum, len(fk.RefColumns))
+		parentNewVals := make([]tuple.Datum, len(fk.RefColumns))
+		for i, refCol := range fk.RefColumns {
+			for j, cn := range colNames {
+				if strings.EqualFold(refCol, cn) && j < len(oldRow) {
+					parentOldVals[i] = oldRow[j]
+					parentNewVals[i] = newRow[j]
+					if planner.CompareDatums(oldRow[j], newRow[j]) != 0 {
+						changed = true
+					}
+					break
+				}
+			}
+		}
+		if !changed {
+			continue
+		}
+
+		// Find child rows referencing the old parent values.
+		childColNames := ex.getTableColNames(fk.Table)
+		type childMatch struct {
+			id  slottedpage.ItemID
+			row []tuple.Datum
+		}
+		var matches []childMatch
+		ex.Cat.SeqScan(fk.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+			match := true
+			for i, fkCol := range fk.Columns {
+				for j, cn := range childColNames {
+					if strings.EqualFold(fkCol, cn) && j < len(tup.Columns) {
+						if planner.CompareDatums(parentOldVals[i], tup.Columns[j]) != 0 {
+							match = false
+						}
+						break
+					}
+				}
+				if !match {
+					break
+				}
+			}
+			if match {
+				row := make([]tuple.Datum, len(tup.Columns))
+				copy(row, tup.Columns)
+				matches = append(matches, childMatch{id: id, row: row})
+			}
+			return true
+		})
+
+		if len(matches) == 0 {
+			continue
+		}
+
+		switch fk.OnUpdate {
+		case catalog.FKActionCascade:
+			for _, m := range matches {
+				newVals := make([]tuple.Datum, len(m.row))
+				copy(newVals, m.row)
+				for i, fkCol := range fk.Columns {
+					for j, cn := range childColNames {
+						if strings.EqualFold(fkCol, cn) {
+							newVals[j] = parentNewVals[i]
+							break
+						}
+					}
+				}
+				oldCopy := make([]tuple.Datum, len(m.row))
+				copy(oldCopy, m.row)
+				newID, _ := ex.Cat.Update(fk.Table, m.id, newVals)
+				ex.RecordMutation(Mutation{Kind: MutUpdate, Table: fk.Table, ItemID: m.id, NewItemID: newID, OldValues: oldCopy})
+			}
+		case catalog.FKActionSetNull:
+			for _, m := range matches {
+				newVals := make([]tuple.Datum, len(m.row))
+				copy(newVals, m.row)
+				for _, fkCol := range fk.Columns {
+					for j, cn := range childColNames {
+						if strings.EqualFold(fkCol, cn) {
+							newVals[j] = tuple.DNull()
+							break
+						}
+					}
+				}
+				oldCopy := make([]tuple.Datum, len(m.row))
+				copy(oldCopy, m.row)
+				newID, _ := ex.Cat.Update(fk.Table, m.id, newVals)
+				ex.RecordMutation(Mutation{Kind: MutUpdate, Table: fk.Table, ItemID: m.id, NewItemID: newID, OldValues: oldCopy})
+			}
+		default: // NO ACTION / RESTRICT
+			return fmt.Errorf("update or delete on table %q violates foreign key constraint %q on table %q",
+				table, fk.Name, fk.Table)
 		}
 	}
 	return nil

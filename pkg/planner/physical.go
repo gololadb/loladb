@@ -300,9 +300,10 @@ func (n *PhysUpdate) Cost() PlanCost            { return n.Estimate }
 func (n *PhysUpdate) Children() []PhysicalNode  { return []PhysicalNode{n.Child} }
 
 type PhysCreateTable struct {
-	Table   string
-	Schema  string // target schema (empty = current)
-	Columns []ColDef
+	Table       string
+	Schema      string // target schema (empty = current)
+	Columns     []ColDef
+	ForeignKeys []ForeignKeyDef
 }
 
 func (n *PhysCreateTable) String() string            { return fmt.Sprintf("CreateTable %s", n.Table) }

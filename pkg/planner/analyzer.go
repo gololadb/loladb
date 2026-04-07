@@ -1843,6 +1843,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 	tableName := n.Relation.Relname
 	schemaName := n.Relation.Schemaname
 	var cols []ColDef
+	var foreignKeys []ForeignKeyDef
 	for _, elt := range n.TableElts {
 		colDef, ok := elt.(*parser.ColumnDef)
 		if !ok {
@@ -1858,6 +1859,8 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		primaryKey := false
 		unique := false
 		defaultExpr := ""
+		checkExpr := ""
+		checkName := ""
 		for _, c := range colDef.Constraints {
 			switch c.Contype {
 			case parser.CONSTR_NOTNULL:
@@ -1871,13 +1874,33 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 				notNull = true // PRIMARY KEY implies NOT NULL
 			case parser.CONSTR_UNIQUE:
 				unique = true
+			case parser.CONSTR_CHECK:
+				if c.RawExpr != nil {
+					checkExpr = parser.DeparseExpr(c.RawExpr)
+					checkName = c.Conname
+				}
+			case parser.CONSTR_FOREIGN:
+				// Column-level REFERENCES: single column FK.
+				refTable := ""
+				if c.PkTable != nil {
+					refTable = c.PkTable.Relname
+				}
+				fk := ForeignKeyDef{
+					Name:       c.Conname,
+					Columns:    []string{colDef.Colname},
+					RefTable:   refTable,
+					RefColumns: c.PkAttrs,
+					OnDelete:   c.FkDelAction,
+					OnUpdate:   c.FkUpdAction,
+				}
+				foreignKeys = append(foreignKeys, fk)
 			}
 		}
 		typmod := computeTypmodFromParser(colDef.TypeName, dt)
-		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, Typmod: typmod, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr})
+		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, Typmod: typmod, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr, CheckExpr: checkExpr, CheckName: checkName})
 	}
 
-	// Handle table-level constraints (e.g., PRIMARY KEY (col), UNIQUE (col)).
+	// Handle table-level constraints (e.g., PRIMARY KEY (col), UNIQUE (col), CHECK, FOREIGN KEY).
 	for _, elt := range n.TableElts {
 		con, ok := elt.(*parser.Constraint)
 		if !ok {
@@ -1901,11 +1924,37 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 					}
 				}
 			}
+		case parser.CONSTR_CHECK:
+			// Table-level CHECK: attach to the first column referenced,
+			// or store as a table-level check on the first column.
+			if con.RawExpr != nil {
+				expr := parser.DeparseExpr(con.RawExpr)
+				if len(cols) > 0 {
+					// Store on first column; the executor validates at table level.
+					cols[0].CheckExpr = expr
+					cols[0].CheckName = con.Conname
+				}
+			}
+		case parser.CONSTR_FOREIGN:
+			refTable := ""
+			if con.PkTable != nil {
+				refTable = con.PkTable.Relname
+			}
+			fk := ForeignKeyDef{
+				Name:       con.Conname,
+				Columns:    con.FkAttrs,
+				RefTable:   refTable,
+				RefColumns: con.PkAttrs,
+				OnDelete:   con.FkDelAction,
+				OnUpdate:   con.FkUpdAction,
+			}
+			foreignKeys = append(foreignKeys, fk)
 		}
 	}
 
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
-		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName, Columns: cols,
+		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName,
+		Columns: cols, ForeignKeys: foreignKeys,
 	}), nil
 }
 
@@ -3110,6 +3159,14 @@ func (a *Analyzer) TransformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 	return a.transformExpr(expr)
 }
 
+// AddRangeTableEntry is an exported wrapper for constraint evaluation.
+func (a *Analyzer) AddRangeTableEntry(tableName, alias string) {
+	a.addRangeTableEntry(tableName, alias)
+}
 
+// GetRangeTable returns the current range table.
+func (a *Analyzer) GetRangeTable() []*RangeTblEntry {
+	return a.rangeTable
+}
 
 

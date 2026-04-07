@@ -272,6 +272,10 @@ func (e *ExprBinOp) evalComparison(row *Row) (tuple.Datum, error) {
 	if err != nil {
 		return tuple.DNull(), err
 	}
+	// SQL three-valued logic: any comparison with NULL yields NULL.
+	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
+		return tuple.DNull(), nil
+	}
 	cmp := CompareDatums(lv, rv)
 	switch e.Op {
 	case OpEq:

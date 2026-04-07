@@ -228,9 +228,10 @@ func (n *LogicalUpdate) String() string        { return fmt.Sprintf("Update(%s)"
 func (n *LogicalUpdate) OutputColumns() []string { return n.ReturningNames }
 
 type LogicalCreateTable struct {
-	Table   string
-	Schema  string // target schema (empty = current)
-	Columns []ColDef
+	Table       string
+	Schema      string // target schema (empty = current)
+	Columns     []ColDef
+	ForeignKeys []ForeignKeyDef
 }
 
 type ColDef struct {
@@ -242,6 +243,18 @@ type ColDef struct {
 	PrimaryKey  bool   // column-level PRIMARY KEY constraint
 	Unique      bool   // column-level UNIQUE constraint
 	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
+	CheckExpr   string // SQL text of CHECK expression (empty = no check)
+	CheckName   string // optional constraint name for CHECK
+}
+
+// ForeignKeyDef holds a foreign key definition from CREATE TABLE.
+type ForeignKeyDef struct {
+	Name       string   // constraint name (may be empty)
+	Columns    []string // local column(s)
+	RefTable   string   // referenced table
+	RefColumns []string // referenced column(s)
+	OnDelete   string   // action: "", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"
+	OnUpdate   string   // action: "", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"
 }
 
 func (n *LogicalCreateTable) String() string        { return fmt.Sprintf("CreateTable(%s)", n.Table) }

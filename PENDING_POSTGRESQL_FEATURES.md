@@ -235,7 +235,7 @@ No row-level locks. The design doc mentions this as a future item.
 
 ## 5. Constraints
 
-### 🔴 FOREIGN KEY / REFERENCES
+### ✅ FOREIGN KEY / REFERENCES
 
 ```sql
 CREATE TABLE orders (
@@ -243,16 +243,20 @@ CREATE TABLE orders (
 );
 ```
 
-No foreign key support — no referential integrity enforcement, no CASCADE actions.
+Supports column-level `REFERENCES` and table-level `FOREIGN KEY` syntax.
+Referential integrity enforced on INSERT/UPDATE of child table and
+DELETE/UPDATE of parent table. Actions: NO ACTION (default), RESTRICT,
+CASCADE, SET NULL, SET DEFAULT.
 
-### 🔴 CHECK constraints (column-level)
+### ✅ CHECK constraints (column-level)
 
 ```sql
 CREATE TABLE products (price NUMERIC CHECK (price > 0));
 ```
 
-The parser recognizes `CONSTR_CHECK` and the analyzer sees it, but enforcement
-during INSERT/UPDATE is not implemented.
+CHECK expressions evaluated on INSERT and UPDATE. NULL values pass
+(SQL three-valued logic). Named constraints supported via
+`CONSTRAINT name CHECK (expr)`.
 
 ### 🟡 EXCLUDE constraints
 
@@ -618,8 +622,7 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| FOREIGN KEY | Constraints |
-| CHECK constraints | Constraints |
+
 | Type casting with `::` | Operators |
 | COPY | Bulk I/O |
 | VACUUM | Maintenance |

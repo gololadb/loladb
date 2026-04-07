@@ -262,6 +262,7 @@ type UtilityStmt struct {
 	TableName   string
 	TableSchema string // schema for CREATE TABLE / CREATE VIEW (empty = current)
 	Columns     []ColDef
+	ForeignKeys []ForeignKeyDef // FK constraints from CREATE TABLE
 	IndexName   string
 	IndexTable  string
 	IndexColumn string

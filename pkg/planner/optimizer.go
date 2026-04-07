@@ -72,7 +72,7 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 	case *LogicalUpdate:
 		return o.optimizeUpdate(n)
 	case *LogicalCreateTable:
-		return &PhysCreateTable{Table: n.Table, Schema: n.Schema, Columns: n.Columns}, nil
+		return &PhysCreateTable{Table: n.Table, Schema: n.Schema, Columns: n.Columns, ForeignKeys: n.ForeignKeys}, nil
 	case *LogicalCreateIndex:
 		return &PhysCreateIndex{Index: n.Index, Table: n.Table, Column: n.Column, Method: n.Method}, nil
 	case *LogicalExplain:
