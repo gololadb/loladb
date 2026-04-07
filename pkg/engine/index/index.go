@@ -13,7 +13,7 @@ import (
 	"hash/fnv"
 	"math"
 
-	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/engine/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 

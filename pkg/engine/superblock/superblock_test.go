@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gololadb/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/engine/pageio"
 )
 
 func TestNewDefaults(t *testing.T) {

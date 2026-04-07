@@ -26,8 +26,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/gololadb/loladb/pkg/index"
-	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/engine/index"
+	"github.com/gololadb/loladb/pkg/engine/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 

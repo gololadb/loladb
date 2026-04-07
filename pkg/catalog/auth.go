@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/engine/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 

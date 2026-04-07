@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/gololadb/loladb/pkg/engine/freelist"
-	"github.com/gololadb/loladb/pkg/pageio"
-	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/engine/pageio"
+	"github.com/gololadb/loladb/pkg/engine/slottedpage"
 	"github.com/gololadb/loladb/pkg/engine/superblock"
 	"github.com/gololadb/loladb/pkg/tuple"
 )

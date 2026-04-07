@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/gololadb/loladb/pkg/engine"
-	"github.com/gololadb/loladb/pkg/slottedpage"
+	"github.com/gololadb/loladb/pkg/engine/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 

@@ -3,7 +3,7 @@ package toast
 import (
 	"testing"
 
-	"github.com/gololadb/loladb/pkg/pageio"
+	"github.com/gololadb/loladb/pkg/engine/pageio"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 
