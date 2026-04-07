@@ -450,7 +450,7 @@ message handling for streaming bulk data from clients.
 
 ## 11. Maintenance and Administration
 
-### 🔴 VACUUM
+### ✅ VACUUM
 
 ```sql
 VACUUM;
@@ -458,18 +458,18 @@ VACUUM FULL users;
 VACUUM ANALYZE;
 ```
 
-Dead tuples from MVCC deletes/updates are never reclaimed. The design doc lists
-VACUUM as Phase 7 but it is not yet implemented.
+Implemented: VACUUM reclaims dead tuples from MVCC deletes/updates, compacts pages,
+and frees empty pages. Supports VACUUM, VACUUM FULL, VACUUM FREEZE, VACUUM ANALYZE,
+and bare VACUUM (all tables). FREEZE is accepted but is a no-op.
 
-### 🔴 ANALYZE (statistics collection)
+### ✅ ANALYZE (statistics collection)
 
 ```sql
 ANALYZE users;
 ```
 
-Column statistics exist in the catalog (`TableStats`, `ColumnStats`) but there
-is no SQL-level ANALYZE command to refresh them. Statistics may be stale or
-missing.
+Implemented: ANALYZE refreshes column statistics (NDistinct, NullFrac, MCV) via
+catalog.Stats(). Supports single-table and all-tables modes.
 
 ### 🟡 CLUSTER
 
@@ -631,8 +631,6 @@ SELECT pg_advisory_lock(12345);
 | Feature | Category |
 |---|---|
 
-
-| VACUUM | Maintenance |
 
 | PREPARE / EXECUTE | Prepared statements |
 

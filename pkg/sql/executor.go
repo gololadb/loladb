@@ -191,6 +191,11 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execCopy(cs)
 	}
 
+	// Handle VACUUM / ANALYZE statements.
+	if vs, ok := stmt.(*parser.VacuumStmt); ok {
+		return ex.execVacuumAnalyze(vs)
+	}
+
 	// Handle SET statements.
 	if setVar, ok := stmt.(*parser.VariableSetStmt); ok {
 		if strings.EqualFold(setVar.Name, "role") && len(setVar.Args) > 0 {
