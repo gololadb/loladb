@@ -76,6 +76,7 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 			Table: n.Table, Schema: n.Schema, Columns: n.Columns,
 			ForeignKeys: n.ForeignKeys, IsTemp: n.IsTemp,
 			PartitionStrategy: n.PartitionStrategy, PartitionKeyCols: n.PartitionKeyCols,
+			InheritParents: n.InheritParents,
 		}, nil
 	case *LogicalCreateIndex:
 		return &PhysCreateIndex{Index: n.Index, Table: n.Table, Column: n.Column, Method: n.Method}, nil

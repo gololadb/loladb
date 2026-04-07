@@ -528,6 +528,41 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 
 	result := &Result{Columns: colNames}
 
+	// If this table has inheritance children, scan parent + all children.
+	if children, ok := ex.Cat.Inheritance[n.Table]; ok && len(children) > 0 {
+		// Scan the parent table itself first.
+		ex.Cat.SeqScan(n.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+			row := &planner.Row{Columns: tup.Columns, Names: colNames}
+			if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
+				return true
+			}
+			rowCopy := make([]tuple.Datum, len(tup.Columns))
+			copy(rowCopy, tup.Columns)
+			result.Rows = append(result.Rows, rowCopy)
+			return true
+		})
+		// Then scan each child (child may have extra columns; truncate to parent width).
+		parentWidth := len(colNames)
+		for _, child := range children {
+			ex.Cat.SeqScan(child, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+				// Use only the first parentWidth columns for the parent's projection.
+				cols := tup.Columns
+				if len(cols) > parentWidth {
+					cols = cols[:parentWidth]
+				}
+				row := &planner.Row{Columns: cols, Names: colNames}
+				if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
+					return true
+				}
+				rowCopy := make([]tuple.Datum, len(cols))
+				copy(rowCopy, cols)
+				result.Rows = append(result.Rows, rowCopy)
+				return true
+			})
+		}
+		return result, nil
+	}
+
 	// If this is a partitioned parent, scan all child partitions instead.
 	if pinfo, ok := ex.Cat.Partitions[n.Table]; ok && len(pinfo.Children) > 0 {
 		for _, child := range pinfo.Children {
@@ -2915,6 +2950,11 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 	// Track temporary tables for session cleanup.
 	if n.IsTemp {
 		ex.Cat.TempTables[n.Table] = true
+	}
+
+	// Register inheritance relationships.
+	for _, parent := range n.InheritParents {
+		ex.Cat.Inheritance[parent] = append(ex.Cat.Inheritance[parent], n.Table)
 	}
 
 	// Register partition metadata for partitioned tables.

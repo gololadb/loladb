@@ -330,6 +330,27 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execAlterOwnerStmt(ao)
 	}
 
+	// Handle SECURITY LABEL (accept, store in comments map).
+	if sl, ok := stmt.(*parser.SecLabelStmt); ok {
+		objName := ""
+		if len(sl.Object) > 0 {
+			objName = sl.Object[len(sl.Object)-1]
+		}
+		key := fmt.Sprintf("seclabel:%s", objName)
+		if sl.IsNull {
+			delete(ex.Cat.Comments, key)
+		} else {
+			ex.Cat.Comments[key] = sl.Label
+		}
+		return &Result{Message: "SECURITY LABEL"}, nil
+	}
+
+	// Handle CREATE EVENT TRIGGER (accept, store metadata).
+	if et, ok := stmt.(*parser.CreateEventTrigStmt); ok {
+		ex.Cat.EventTriggers[et.Trigname] = et.Eventname
+		return &Result{Message: "CREATE EVENT TRIGGER"}, nil
+	}
+
 	// Handle CREATE EXTENSION (accept, no-op).
 	if ce, ok := stmt.(*parser.CreateExtensionStmt); ok {
 		return &Result{Message: fmt.Sprintf("CREATE EXTENSION %s", ce.Extname)}, nil
@@ -649,6 +670,22 @@ func (ex *Executor) execTransaction(ts *parser.TransactionStmt) (*Result, error)
 			return nil, fmt.Errorf("savepoint %q does not exist", name)
 		}
 		return &Result{Message: "RELEASE"}, nil
+
+	case parser.TRANS_STMT_PREPARE:
+		// PREPARE TRANSACTION 'gid' — two-phase commit.
+		// Accept as equivalent to COMMIT (no distributed transactions).
+		if ex.txState == TxFailed {
+			ex.exec.UndoMutationsFrom(0)
+			ex.txState = TxNone
+			ex.exec.TrackMutations = false
+			ex.savepoints = nil
+			return &Result{Message: "ROLLBACK"}, nil
+		}
+		ex.txState = TxNone
+		ex.exec.TrackMutations = false
+		ex.exec.ClearMutations()
+		ex.savepoints = nil
+		return &Result{Message: "PREPARE TRANSACTION"}, nil
 
 	default:
 		return &Result{Message: "OK"}, nil

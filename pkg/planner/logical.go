@@ -240,6 +240,7 @@ type LogicalCreateTable struct {
 	IsTemp            bool   // CREATE TEMPORARY TABLE
 	PartitionStrategy string // "range", "list", "hash", or "" (not partitioned)
 	PartitionKeyCols  []string
+	InheritParents    []string
 }
 
 type ColDef struct {

@@ -155,6 +155,12 @@ type Catalog struct {
 
 	// Partitions stores partition metadata keyed by parent table name.
 	Partitions map[string]*PartitionInfo
+
+	// Inheritance maps parent table name → list of child table names.
+	Inheritance map[string][]string
+
+	// EventTriggers stores event trigger name → event name.
+	EventTriggers map[string]string
 }
 
 // PartitionInfo describes a partitioned table.
@@ -201,6 +207,8 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		MatViews:         make(map[string]string),
 		CustomAggregates: make(map[string]*CustomAggregateDef),
 		Partitions:       make(map[string]*PartitionInfo),
+		Inheritance:      make(map[string][]string),
+		EventTriggers:   make(map[string]string),
 	}
 
 	if eng.Super.PgClassPage == 0 {

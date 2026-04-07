@@ -309,6 +309,7 @@ type PhysCreateTable struct {
 	IsTemp            bool   // CREATE TEMPORARY TABLE
 	PartitionStrategy string // "range", "list", "hash", or "" (not partitioned)
 	PartitionKeyCols  []string
+	InheritParents    []string
 }
 
 func (n *PhysCreateTable) String() string            { return fmt.Sprintf("CreateTable %s", n.Table) }

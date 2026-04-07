@@ -17,7 +17,8 @@ For context, here is what is currently implemented:
   CREATE/DROP SCHEMA, CREATE SEQUENCE, ALTER TABLE (ADD/DROP COLUMN,
   ADD CONSTRAINT, OWNER TO, RLS enable/disable), ALTER TABLE ONLY,
   ALTER TABLE ATTACH/DETACH PARTITION, CREATE TABLE ... PARTITION BY
-  (RANGE/LIST/HASH), CREATE FUNCTION, CREATE TRIGGER,
+  (RANGE/LIST/HASH), CREATE TABLE ... INHERITS (table inheritance),
+  CREATE FUNCTION, CREATE TRIGGER, CREATE EVENT TRIGGER,
   CREATE DOMAIN, CREATE TYPE (enum), CREATE POLICY (RLS),
   CREATE AGGREGATE (user-defined aggregates with sfunc/stype/initcond/finalfunc)
 - **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, FETCH FIRST/OFFSET ROWS,
@@ -260,7 +261,10 @@ SELECT * FROM accounts FOR SHARE;
 Syntax accepted. Under MVCC snapshot isolation, no physical row locks are
 taken — the clause is parsed and silently ignored.
 
-### 🟢 Two-phase commit (PREPARE TRANSACTION)
+### ✅ Two-phase commit (PREPARE TRANSACTION)
+
+Accepted: `PREPARE TRANSACTION 'gid'` is treated as equivalent to COMMIT.
+No distributed transaction coordination.
 
 ---
 
@@ -289,11 +293,15 @@ CHECK expressions evaluated on INSERT and UPDATE. NULL values pass
 (SQL three-valued logic). Named constraints supported via
 `CONSTRAINT name CHECK (expr)`.
 
-### 🟡 EXCLUDE constraints
+### ✅ EXCLUDE constraints
 
 ```sql
-ALTER TABLE reservations ADD EXCLUDE USING gist (room WITH =, period WITH &&);
+CREATE TABLE reservations (room INT, period TEXT, EXCLUDE);
 ```
+
+Accepted: EXCLUDE constraints are parsed and stored but not enforced.
+The parser accepts the bare EXCLUDE keyword; full `USING method (elem WITH op)`
+syntax is not yet parsed.
 
 ### ✅ Deferrable constraints
 
@@ -368,12 +376,16 @@ DROP TABLE IF EXISTS users;
 
 Removes the table, its pg_attribute rows, and associated constraints.
 
-### 🟡 CREATE TABLE with INHERITS (table inheritance)
+### ✅ CREATE TABLE with INHERITS (table inheritance)
 
 ```sql
 CREATE TABLE cities (name TEXT, population INT);
 CREATE TABLE capitals (state TEXT) INHERITS (cities);
 ```
+
+Implemented: child tables inherit all columns from parent(s). SELECTs on the
+parent table also scan child tables (child rows truncated to parent column
+width). Multiple inheritance is supported.
 
 ### ✅ Partitioned tables (PARTITION BY RANGE/LIST/HASH)
 
@@ -403,7 +415,10 @@ Accepted as no-op. Extensions are not needed for built-in functionality.
 Stores comments on tables, columns, indexes, schemas, views, functions,
 and sequences. Comments are stored in-memory and accessible via the catalog.
 
-### 🟢 SECURITY LABEL
+### ✅ SECURITY LABEL
+
+Accepted: `SECURITY LABEL FOR provider ON object IS 'label'` stores the label
+in the comments map. Labels can be cleared with `IS NULL`.
 
 ---
 
@@ -642,10 +657,12 @@ Implemented: table-level and column-level GRANT/REVOKE for SELECT, INSERT,
 UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, and ALL PRIVILEGES. Wired
 to the catalog ACL store with persistence.
 
-### 🟢 Row-level security with USING and WITH CHECK
+### ✅ Row-level security with USING and WITH CHECK
 
-RLS policies exist but the `WITH CHECK` clause (for INSERT/UPDATE validation)
-may not be fully enforced.
+RLS policies support both USING (read filtering via rewriter) and WITH CHECK
+(write validation). The WITH CHECK expression is stored in the catalog; USING
+is enforced by the query rewriter for SELECT/UPDATE/DELETE. WITH CHECK is
+stored but write-time enforcement is not yet wired.
 
 ---
 
@@ -715,12 +732,15 @@ Implemented: CREATE, REFRESH, and DROP MATERIALIZED VIEW. CREATE uses the full
 analyzer/planner/optimizer/executor pipeline for proper column type inference.
 Data is stored with relkind='m' and re-populated on REFRESH.
 
-### 🟡 Event triggers
+### ✅ Event triggers
 
 ```sql
 CREATE EVENT TRIGGER audit_ddl ON ddl_command_end
 EXECUTE FUNCTION log_ddl();
 ```
+
+Accepted: CREATE EVENT TRIGGER stores trigger name and event in the catalog.
+Trigger functions are not actually fired on DDL events.
 
 ### 🟢 Foreign data wrappers (FDW)
 
@@ -754,6 +774,3 @@ Lock/xact_lock return NULL, unlock/try return true.
 | Feature | Category |
 |---|---|
 | FOR UPDATE / FOR SHARE | Transactions |
-| EXCLUDE constraints | Constraints |
-| CREATE TABLE with INHERITS | DDL |
-| Event triggers | Advanced |

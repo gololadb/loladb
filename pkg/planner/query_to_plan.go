@@ -383,6 +383,7 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 			Table: u.TableName, Schema: u.TableSchema, Columns: u.Columns,
 			ForeignKeys: u.ForeignKeys, IsTemp: u.IsTemp,
 			PartitionStrategy: u.PartitionStrategy, PartitionKeyCols: u.PartitionKeyCols,
+			InheritParents: u.InheritParents,
 		}, nil
 	case UtilCreateIndex:
 		return &LogicalCreateIndex{Index: u.IndexName, Table: u.IndexTable, Column: u.IndexColumn, Method: u.IndexMethod}, nil

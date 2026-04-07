@@ -2349,6 +2349,30 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 	schemaName := n.Relation.Schemaname
 	var cols []ColDef
 	var foreignKeys []ForeignKeyDef
+	var inheritParents []string
+
+	// INHERITS: copy columns from parent table(s).
+	for _, inhNode := range n.InhRelations {
+		if rv, ok := inhNode.(*parser.RangeVar); ok && a.Cat != nil {
+			parentName := rv.Relname
+			inheritParents = append(inheritParents, parentName)
+			parentRel, _ := a.Cat.FindRelation(parentName)
+			if parentRel != nil {
+				parentCols, _ := a.Cat.GetColumns(parentRel.OID)
+				for _, pc := range parentCols {
+					cols = append(cols, ColDef{
+						Name:          pc.Name,
+						Type:          tuple.DatumType(pc.Type),
+						Typmod:        pc.Typmod,
+						NotNull:       pc.NotNull,
+						DefaultExpr:   pc.DefaultExpr,
+						GeneratedExpr: pc.GeneratedExpr,
+					})
+				}
+			}
+		}
+	}
+
 	for _, elt := range n.TableElts {
 		// Handle LIKE source_table: copy columns from the source table.
 		if like, ok := elt.(*parser.TableLikeClause); ok {
@@ -2493,6 +2517,8 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 				OnUpdate:   con.FkUpdAction,
 			}
 			foreignKeys = append(foreignKeys, fk)
+		case parser.CONSTR_EXCLUSION:
+			// EXCLUDE constraints: accepted but not enforced.
 		}
 	}
 
@@ -2514,6 +2540,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		IsTemp:            n.Persistence == parser.RELPERSISTENCE_TEMP,
 		PartitionStrategy: partStrategy,
 		PartitionKeyCols:  partKeyCols,
+		InheritParents:    inheritParents,
 	}), nil
 }
 

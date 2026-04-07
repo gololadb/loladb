@@ -370,6 +370,9 @@ type UtilityStmt struct {
 	PartitionStrategy string   // "range", "list", or "hash"
 	PartitionKeyCols  []string // partition key column names
 
+	// Inheritance
+	InheritParents []string // parent table names for INHERITS
+
 	// ALTER TABLE ... OWNER TO
 	NewOwner string
 }
