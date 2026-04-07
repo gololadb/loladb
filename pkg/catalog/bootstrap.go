@@ -177,6 +177,28 @@ func pgAttributeRow(relid int32, name string, typid, typlen int32, num int16, no
 		tuple.DInt32(0),            // attisdropped
 		tuple.DInt32(hasDef),       // atthasdef
 		tuple.DText(defaultExpr),   // attdefault
+		tuple.DText(""),            // attgenerated
+	}
+}
+
+// pgAttributeRowGenerated builds a pg_attribute tuple for a generated column.
+func pgAttributeRowGenerated(relid int32, name string, typid, typlen int32, num int16, notNull bool, generatedExpr string, typmod int32) []tuple.Datum {
+	var nn int32
+	if notNull {
+		nn = 1
+	}
+	return []tuple.Datum{
+		tuple.DInt32(relid),          // attrelid
+		tuple.DText(name),            // attname
+		tuple.DInt32(typid),          // atttypid
+		tuple.DInt32(typlen),         // attlen
+		tuple.DInt32(int32(num)),     // attnum
+		tuple.DInt32(typmod),         // atttypmod
+		tuple.DInt32(nn),             // attnotnull
+		tuple.DInt32(0),              // attisdropped
+		tuple.DInt32(0),              // atthasdef (generated cols don't use atthasdef)
+		tuple.DText(""),              // attdefault
+		tuple.DText(generatedExpr),   // attgenerated
 	}
 }
 

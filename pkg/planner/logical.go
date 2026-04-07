@@ -15,6 +15,7 @@ const (
 	JoinLeft
 	JoinRight
 	JoinCross
+	JoinFull
 )
 
 func (j JoinType) String() string {
@@ -27,6 +28,8 @@ func (j JoinType) String() string {
 		return "RIGHT"
 	case JoinCross:
 		return "CROSS"
+	case JoinFull:
+		return "FULL"
 	default:
 		return "?"
 	}
@@ -235,16 +238,17 @@ type LogicalCreateTable struct {
 }
 
 type ColDef struct {
-	Name        string
-	Type        tuple.DatumType
-	TypeName    string // original SQL type name (for domain/enum validation)
-	Typmod      int32  // type modifier (-1 = unspecified; for NUMERIC: ((p<<16)|s)+4)
-	NotNull     bool   // column-level NOT NULL constraint
-	PrimaryKey  bool   // column-level PRIMARY KEY constraint
-	Unique      bool   // column-level UNIQUE constraint
-	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
-	CheckExpr   string // SQL text of CHECK expression (empty = no check)
-	CheckName   string // optional constraint name for CHECK
+	Name          string
+	Type          tuple.DatumType
+	TypeName      string // original SQL type name (for domain/enum validation)
+	Typmod        int32  // type modifier (-1 = unspecified; for NUMERIC: ((p<<16)|s)+4)
+	NotNull       bool   // column-level NOT NULL constraint
+	PrimaryKey    bool   // column-level PRIMARY KEY constraint
+	Unique        bool   // column-level UNIQUE constraint
+	DefaultExpr   string // SQL text of DEFAULT expression (empty = no default)
+	CheckExpr     string // SQL text of CHECK expression (empty = no check)
+	CheckName     string // optional constraint name for CHECK
+	GeneratedExpr string // SQL text of GENERATED ALWAYS AS (expr) STORED (empty = not generated)
 }
 
 // ForeignKeyDef holds a foreign key definition from CREATE TABLE.

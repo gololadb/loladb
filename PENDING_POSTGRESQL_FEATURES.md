@@ -138,13 +138,13 @@ FROM shipments WHERE shipments.order_id = orders.id;
 Supports multi-table UPDATE with FROM clause. SET expressions can
 reference columns from joined tables.
 
-### 🟡 FULL OUTER JOIN
+### ✅ FULL OUTER JOIN
 
 ```sql
 SELECT * FROM a FULL OUTER JOIN b ON a.id = b.id;
 ```
 
-INNER, LEFT, RIGHT, and CROSS joins are supported. FULL OUTER is not.
+Implemented in nested loop and hash join executors with inner-row tracking.
 
 ### 🟡 LATERAL joins
 
@@ -214,14 +214,16 @@ COMMIT;  -- only row 1 is committed
 Supports nested savepoints, ROLLBACK TO (including recovery from failed
 transaction state), and RELEASE SAVEPOINT.
 
-### 🟡 Transaction isolation levels
+### ✅ Transaction isolation levels
 
 ```sql
-BEGIN ISOLATION LEVEL SERIALIZABLE;
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+SHOW transaction_isolation;
 ```
 
-The MVCC layer implements snapshot isolation, but there is no way to select
-READ COMMITTED, REPEATABLE READ, or SERIALIZABLE from SQL.
+SET TRANSACTION ISOLATION LEVEL is accepted (all levels map to snapshot
+isolation). SHOW transaction_isolation / default_transaction_isolation /
+server_version and other session variables are supported.
 
 ### 🟡 Row-level locking (SELECT ... FOR UPDATE / FOR SHARE)
 
@@ -425,15 +427,19 @@ table_schema, table_name, table_type), `information_schema.columns`
 `pg_namespace`. Accessible both qualified (`pg_catalog.pg_tables`) and
 unqualified (`pg_tables`). Generated dynamically from catalog metadata.
 
-### 🟡 System information functions
+### ✅ System information functions
 
 `current_user`, `current_database()`, `current_schema()`, `version()`,
-`pg_typeof()`, `pg_table_size()`, `pg_total_relation_size()`.
+`pg_typeof()`, `pg_table_size()`, `pg_total_relation_size()`,
+`pg_table_is_visible()`, `pg_backend_pid()`, `pg_postmaster_start_time()`,
+`inet_server_addr()`, `inet_server_port()`, `has_table_privilege()`,
+`has_schema_privilege()`, `has_database_privilege()`, and more.
 
-### 🟡 Object information functions
+### ✅ Object information functions
 
-`obj_description()`, `col_description()`, `pg_get_viewdef()`,
-`pg_get_indexdef()`, `pg_get_constraintdef()`.
+`obj_description()`, `col_description()`, `shobj_description()`,
+`pg_get_viewdef()`, `pg_get_indexdef()`, `pg_get_constraintdef()`,
+`pg_get_expr()`.
 
 ---
 
@@ -582,7 +588,7 @@ PERFORM, EXECUTE, but EXCEPTION blocks are not implemented.
 
 ## 15. Advanced Features
 
-### 🟡 Generated columns (STORED)
+### ✅ Generated columns (STORED)
 
 ```sql
 CREATE TABLE t (
@@ -591,6 +597,9 @@ CREATE TABLE t (
   c INT GENERATED ALWAYS AS (a + b) STORED
 );
 ```
+
+Stored generated columns are computed on INSERT and UPDATE. Explicit writes
+to generated columns are rejected.
 
 ### 🟡 Identity columns (GENERATED ALWAYS AS IDENTITY)
 
@@ -644,11 +653,8 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| FULL OUTER JOIN | Queries |
 | LATERAL joins | Queries |
 | GROUPING SETS / CUBE / ROLLUP | Queries |
-| ALTER TABLE ALTER/RENAME COLUMN | DDL |
-| Transaction isolation levels | Transactions |
 | FOR UPDATE / FOR SHARE | Transactions |
 
 | TEMPORARY tables | DDL |
@@ -661,6 +667,4 @@ SELECT pg_advisory_lock(12345);
 | GRANT / REVOKE | Security |
 | PL/pgSQL EXCEPTION blocks | PL/pgSQL |
 | Materialized views | DDL |
-| Generated columns | DDL |
 | ANALYZE command | Maintenance |
-| System information functions | Introspection |

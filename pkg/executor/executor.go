@@ -703,9 +703,12 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 	colNames := append(outer.Columns, inner.Columns...)
 	result := &Result{Columns: colNames}
 
+	// Track which inner rows matched (for FULL JOIN).
+	innerMatched := make([]bool, len(inner.Rows))
+
 	for _, outerRow := range outer.Rows {
 		matched := false
-		for _, innerRow := range inner.Rows {
+		for j, innerRow := range inner.Rows {
 			combined := append(append([]tuple.Datum{}, outerRow...), innerRow...)
 			if n.Condition != nil {
 				r := &planner.Row{Columns: combined, Names: colNames}
@@ -714,10 +717,11 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 				}
 			}
 			matched = true
+			innerMatched[j] = true
 			result.Rows = append(result.Rows, combined)
 		}
-		// LEFT JOIN: emit outer row with NULLs if no match.
-		if !matched && n.Type == planner.JoinLeft {
+		// LEFT/FULL JOIN: emit outer row with NULLs if no match.
+		if !matched && (n.Type == planner.JoinLeft || n.Type == planner.JoinFull) {
 			nulls := make([]tuple.Datum, len(inner.Columns))
 			for i := range nulls {
 				nulls[i] = tuple.DNull()
@@ -727,26 +731,18 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 		}
 	}
 
-	// RIGHT JOIN: emit inner rows with NULLs if no match.
-	if n.Type == planner.JoinRight {
-		for _, innerRow := range inner.Rows {
-			matched := false
-			for _, outerRow := range outer.Rows {
-				combined := append(append([]tuple.Datum{}, outerRow...), innerRow...)
-				r := &planner.Row{Columns: combined, Names: colNames}
-				if n.Condition == nil || planner.EvalBool(n.Condition, r) {
-					matched = true
-					break
-				}
+	// RIGHT/FULL JOIN: emit unmatched inner rows with NULL outer columns.
+	if n.Type == planner.JoinRight || n.Type == planner.JoinFull {
+		for j, innerRow := range inner.Rows {
+			if innerMatched[j] {
+				continue
 			}
-			if !matched {
-				nulls := make([]tuple.Datum, len(outer.Columns))
-				for i := range nulls {
-					nulls[i] = tuple.DNull()
-				}
-				combined := append(append([]tuple.Datum{}, nulls...), innerRow...)
-				result.Rows = append(result.Rows, combined)
+			nulls := make([]tuple.Datum, len(outer.Columns))
+			for i := range nulls {
+				nulls[i] = tuple.DNull()
 			}
+			combined := append(append([]tuple.Datum{}, nulls...), innerRow...)
+			result.Rows = append(result.Rows, combined)
 		}
 	}
 
@@ -899,23 +895,40 @@ func (ex *Executor) execHashJoin(n *planner.PhysHashJoin) (*Result, error) {
 	}
 
 	result := &Result{Columns: colNames}
+	innerMatched := make([]bool, len(inner.Rows))
 	for _, outerRow := range outer.Rows {
 		var k string
 		if outerKeyIdx >= 0 && outerKeyIdx < len(outerRow) {
 			k = datumHashKey(outerRow[outerKeyIdx])
 		}
 		matched := false
-		for _, innerIdx := range hashTable[k] {
-			combined := append(append([]tuple.Datum{}, outerRow...), inner.Rows[innerIdx]...)
+		for _, idx := range hashTable[k] {
+			combined := append(append([]tuple.Datum{}, outerRow...), inner.Rows[idx]...)
 			matched = true
+			innerMatched[idx] = true
 			result.Rows = append(result.Rows, combined)
 		}
-		if !matched && n.Type == planner.JoinLeft {
+		if !matched && (n.Type == planner.JoinLeft || n.Type == planner.JoinFull) {
 			nulls := make([]tuple.Datum, len(inner.Columns))
 			for i := range nulls {
 				nulls[i] = tuple.DNull()
 			}
 			combined := append(append([]tuple.Datum{}, outerRow...), nulls...)
+			result.Rows = append(result.Rows, combined)
+		}
+	}
+
+	// RIGHT/FULL JOIN: emit unmatched inner rows.
+	if n.Type == planner.JoinRight || n.Type == planner.JoinFull {
+		for j, innerRow := range inner.Rows {
+			if innerMatched[j] {
+				continue
+			}
+			nulls := make([]tuple.Datum, len(outer.Columns))
+			for i := range nulls {
+				nulls[i] = tuple.DNull()
+			}
+			combined := append(append([]tuple.Datum{}, nulls...), innerRow...)
 			result.Rows = append(result.Rows, combined)
 		}
 	}
@@ -1443,6 +1456,15 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 			provided[i] = val
 		}
 
+		// Reject explicit values for generated columns.
+		if colIndexMap != nil {
+			for i, j := range colIndexMap {
+				if i < len(provided) && tableCols[j].GeneratedExpr != "" {
+					return nil, fmt.Errorf("cannot insert a non-DEFAULT value into column %q because it is a generated column", tableCols[j].Name)
+				}
+			}
+		}
+
 		// Build full-width row, applying defaults for missing columns.
 		values := make([]tuple.Datum, len(tableCols))
 		if colIndexMap != nil {
@@ -1464,6 +1486,9 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		} else {
 			copy(values, provided)
 		}
+
+		// Compute GENERATED ALWAYS AS (expr) STORED columns.
+		ex.evalGeneratedColumns(tableCols, colNames, values)
 
 		if hasTriggers {
 			newMap := rowToMap(colNames, values)
@@ -1825,6 +1850,15 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 	})
 
 	var returningRows [][]tuple.Datum
+	// Reject explicit updates to generated columns.
+	for _, a := range n.Assignments {
+		for _, tc := range tableCols {
+			if strings.EqualFold(tc.Name, a.Column) && tc.GeneratedExpr != "" {
+				return nil, fmt.Errorf("column %q can only be updated to DEFAULT because it is a generated column", tc.Name)
+			}
+		}
+	}
+
 	childCols := child.Columns
 	for _, t := range targets {
 		newVals := make([]tuple.Datum, len(t.row))
@@ -1843,6 +1877,9 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 				}
 			}
 		}
+
+		// Recompute GENERATED ALWAYS AS (expr) STORED columns.
+		ex.evalGeneratedColumns(tableCols, colNames, newVals)
 
 		if hasTriggers {
 			oldMap := rowToMap(colNames, t.row)
@@ -1930,7 +1967,7 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error) {
 	cols := make([]catalog.ColumnDef, len(n.Columns))
 	for i, c := range n.Columns {
-		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName, Typmod: c.Typmod, NotNull: c.NotNull, DefaultExpr: c.DefaultExpr}
+		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName, Typmod: c.Typmod, NotNull: c.NotNull, DefaultExpr: c.DefaultExpr, GeneratedExpr: c.GeneratedExpr}
 	}
 	// Set the owner to the current session user.
 	var ownerOID int32
@@ -2468,6 +2505,48 @@ func (ex *Executor) evalDefault(col catalog.Column) tuple.Datum {
 		return tuple.DNull()
 	}
 	return val
+}
+
+// evalGeneratedColumns computes GENERATED ALWAYS AS (expr) STORED columns.
+// It sets up a temporary range table so the analyzer can resolve column
+// references, then evaluates the expression against the current row.
+func (ex *Executor) evalGeneratedColumns(cols []catalog.Column, colNames []string, values []tuple.Datum) {
+	for i, col := range cols {
+		if col.GeneratedExpr == "" || i >= len(values) {
+			continue
+		}
+		sql := "SELECT " + col.GeneratedExpr
+		stmts, err := parser.Parse(strings.NewReader(sql), nil)
+		if err != nil || len(stmts) == 0 {
+			continue
+		}
+		sel, ok := stmts[0].Stmt.(*parser.SelectStmt)
+		if !ok || len(sel.TargetList) == 0 {
+			continue
+		}
+		// Build RTE columns from the table's catalog columns so the
+		// analyzer can resolve column references in the expression.
+		rteCols := make([]planner.RTEColumn, len(cols))
+		for j, c := range cols {
+			rteCols[j] = planner.RTEColumn{
+				Name:   c.Name,
+				Type:   tuple.DatumType(c.Type),
+				ColNum: int32(j + 1),
+			}
+		}
+		a := planner.NewAnalyzerWithRTE(ex.Cat, rteCols)
+		analyzed, err := a.TransformExpr(sel.TargetList[0].Val)
+		if err != nil {
+			continue
+		}
+		expr := planner.AnalyzedToExpr(analyzed, nil)
+		row := &planner.Row{Columns: values, Names: colNames}
+		val, err := expr.Eval(row)
+		if err != nil {
+			continue
+		}
+		values[i] = val
+	}
 }
 
 // validateNotNull checks that NOT NULL columns do not contain NULL values.

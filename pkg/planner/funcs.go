@@ -1547,6 +1547,69 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		}
 		return tuple.DBool(CompareDatums(lv, rv) == 0), nil
 
+	case "current_database", "current_catalog":
+		return tuple.DText("loladb"), nil
+
+	case "version":
+		return tuple.DText("LolaDB 0.1.0 (PostgreSQL-compatible)"), nil
+
+	case "pg_typeof":
+		if len(args) != 1 {
+			return tuple.DNull(), fmt.Errorf("pg_typeof requires 1 argument")
+		}
+		v, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		return tuple.DText(datumTypeName(v.Type)), nil
+
+	case "pg_table_size", "pg_total_relation_size", "pg_relation_size":
+		// Return 0 — we don't track physical sizes.
+		return tuple.DInt64(0), nil
+
+	case "pg_table_is_visible":
+		return tuple.DBool(true), nil
+
+	case "obj_description", "col_description", "shobj_description":
+		// Return NULL — no descriptions stored.
+		return tuple.DNull(), nil
+
+	case "pg_get_viewdef":
+		return tuple.DText(""), nil
+
+	case "pg_get_indexdef":
+		return tuple.DText(""), nil
+
+	case "pg_get_constraintdef":
+		return tuple.DText(""), nil
+
+	case "pg_get_expr":
+		// Return the first argument as-is (it's already a text expression).
+		if len(args) > 0 {
+			v, err := args[0].Eval(row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			return v, nil
+		}
+		return tuple.DNull(), nil
+
+	case "pg_backend_pid":
+		return tuple.DInt32(1), nil
+
+	case "pg_postmaster_start_time":
+		return tuple.DTimestamp(time.Now().UTC().UnixMicro()), nil
+
+	case "inet_server_addr":
+		return tuple.DText("127.0.0.1"), nil
+
+	case "inet_server_port":
+		return tuple.DInt32(5432), nil
+
+	case "has_table_privilege", "has_schema_privilege", "has_database_privilege",
+		"has_column_privilege", "has_function_privilege", "has_sequence_privilege":
+		return tuple.DBool(true), nil
+
 	case "starts_with":
 		if len(args) != 2 {
 			return tuple.DNull(), fmt.Errorf("starts_with requires 2 arguments")
@@ -1592,6 +1655,34 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 
 	default:
 		return tuple.DNull(), fmt.Errorf("function %s is not supported", name)
+	}
+}
+
+// datumTypeName returns the PostgreSQL type name for a datum type.
+func datumTypeName(t tuple.DatumType) string {
+	switch t {
+	case tuple.TypeNull:
+		return "unknown"
+	case tuple.TypeInt32:
+		return "integer"
+	case tuple.TypeInt64:
+		return "bigint"
+	case tuple.TypeText:
+		return "text"
+	case tuple.TypeBool:
+		return "boolean"
+	case tuple.TypeFloat64:
+		return "double precision"
+	case tuple.TypeNumeric:
+		return "numeric"
+	case tuple.TypeJSON:
+		return "json"
+	case tuple.TypeUUID:
+		return "uuid"
+	case tuple.TypeBytea:
+		return "bytea"
+	default:
+		return "unknown"
 	}
 }
 

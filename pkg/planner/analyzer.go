@@ -32,6 +32,20 @@ type Analyzer struct {
 	cteMap map[string]*CTEDef
 }
 
+// NewAnalyzerWithRTE creates an Analyzer pre-loaded with a single range
+// table entry. Used by the executor to evaluate generated column expressions
+// where column references must resolve against the table's columns.
+func NewAnalyzerWithRTE(cat *catalog.Catalog, cols []RTEColumn) *Analyzer {
+	a := &Analyzer{Cat: cat}
+	rte := &RangeTblEntry{
+		RTIndex: 1,
+		Alias:   "",
+		Columns: cols,
+	}
+	a.rangeTable = []*RangeTblEntry{rte}
+	return a
+}
+
 // Analyze transforms a raw parse tree statement into a Query.
 // This is the main entry point, equivalent to PostgreSQL's
 // parse_analyze().
@@ -625,6 +639,8 @@ func (a *Analyzer) transformJoinExpr(j *parser.JoinExpr) (JoinTreeNode, error) {
 		jtype = JoinRight
 	case parser.JOIN_CROSS:
 		jtype = JoinCross
+	case parser.JOIN_FULL:
+		jtype = JoinFull
 	}
 
 	node := &JoinNode{
@@ -2021,6 +2037,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		defaultExpr := ""
 		checkExpr := ""
 		checkName := ""
+		generatedExpr := ""
 		for _, c := range colDef.Constraints {
 			switch c.Contype {
 			case parser.CONSTR_NOTNULL:
@@ -2038,6 +2055,10 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 				if c.RawExpr != nil {
 					checkExpr = parser.DeparseExpr(c.RawExpr)
 					checkName = c.Conname
+				}
+			case parser.CONSTR_GENERATED:
+				if c.RawExpr != nil {
+					generatedExpr = parser.DeparseExpr(c.RawExpr)
 				}
 			case parser.CONSTR_FOREIGN:
 				// Column-level REFERENCES: single column FK.
@@ -2057,7 +2078,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 			}
 		}
 		typmod := computeTypmodFromParser(colDef.TypeName, dt)
-		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, Typmod: typmod, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr, CheckExpr: checkExpr, CheckName: checkName})
+		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, Typmod: typmod, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr, CheckExpr: checkExpr, CheckName: checkName, GeneratedExpr: generatedExpr})
 	}
 
 	// Handle table-level constraints (e.g., PRIMARY KEY (col), UNIQUE (col), CHECK, FOREIGN KEY).
@@ -3301,8 +3322,18 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 		retType = tuple.TypeText // returns matched text or NULL
 	case "starts_with":
 		retType = tuple.TypeBool
+	case "pg_table_is_visible",
+		"has_table_privilege", "has_schema_privilege", "has_database_privilege",
+		"has_column_privilege", "has_function_privilege", "has_sequence_privilege":
+		retType = tuple.TypeBool
 	case "num_nonnulls", "num_nulls":
 		retType = tuple.TypeInt64
+	case "pg_table_size", "pg_total_relation_size", "pg_relation_size":
+		retType = tuple.TypeInt64
+	case "pg_backend_pid", "inet_server_port":
+		retType = tuple.TypeInt32
+	case "pg_postmaster_start_time":
+		retType = tuple.TypeTimestamp
 	// Preserve input type
 	case "coalesce", "nullif", "greatest", "least":
 		if len(args) > 0 {

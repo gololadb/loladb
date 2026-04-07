@@ -189,6 +189,22 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return nil, fmt.Errorf("current transaction is aborted, commands ignored until end of transaction block")
 	}
 
+	// Handle RENAME statements (ALTER TABLE ... RENAME COLUMN/TO).
+	if rs, ok := stmt.(*parser.RenameStmt); ok {
+		return ex.execRenameStmt(rs)
+	}
+
+	// Handle ALTER TABLE column-level operations directly.
+	if alt, ok := stmt.(*parser.AlterTableStmt); ok {
+		if r, handled := ex.tryExecAlterTable(alt); handled {
+			if strings.HasPrefix(r.Message, "catalog:") || strings.HasPrefix(r.Message, "type ") {
+				return nil, fmt.Errorf("%s", r.Message)
+			}
+			return r, nil
+		}
+		// Fall through to analyzer for ADD COLUMN, DROP COLUMN, etc.
+	}
+
 	// Handle COPY statements (bypass analyzer — COPY is a utility).
 	if cs, ok := stmt.(*parser.CopyStmt); ok {
 		return ex.execCopy(cs)
@@ -539,6 +555,43 @@ func (ex *Executor) execShow(n *parser.VariableShowStmt) (*Result, error) {
 		return &Result{
 			Columns: []string{"search_path"},
 			Rows:    [][]tuple.Datum{{tuple.DText(val)}},
+			Message: "SHOW",
+		}, nil
+	case "transaction_isolation", "default_transaction_isolation":
+		// LolaDB uses snapshot isolation which maps to "read committed" in PG terms.
+		return &Result{
+			Columns: []string{name},
+			Rows:    [][]tuple.Datum{{tuple.DText("read committed")}},
+			Message: "SHOW",
+		}, nil
+	case "server_version":
+		return &Result{
+			Columns: []string{"server_version"},
+			Rows:    [][]tuple.Datum{{tuple.DText("15.0 (LolaDB)")}},
+			Message: "SHOW",
+		}, nil
+	case "server_encoding":
+		return &Result{
+			Columns: []string{"server_encoding"},
+			Rows:    [][]tuple.Datum{{tuple.DText("UTF8")}},
+			Message: "SHOW",
+		}, nil
+	case "client_encoding":
+		return &Result{
+			Columns: []string{"client_encoding"},
+			Rows:    [][]tuple.Datum{{tuple.DText("UTF8")}},
+			Message: "SHOW",
+		}, nil
+	case "standard_conforming_strings":
+		return &Result{
+			Columns: []string{"standard_conforming_strings"},
+			Rows:    [][]tuple.Datum{{tuple.DText("on")}},
+			Message: "SHOW",
+		}, nil
+	case "is_superuser":
+		return &Result{
+			Columns: []string{"is_superuser"},
+			Rows:    [][]tuple.Datum{{tuple.DText("on")}},
 			Message: "SHOW",
 		}, nil
 	default:

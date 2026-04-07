@@ -30,12 +30,13 @@ const (
 
 // ColumnDef describes a column in a table.
 type ColumnDef struct {
-	Name        string
-	Type        tuple.DatumType
-	TypeName    string // original SQL type name (for domain/enum validation)
-	Typmod      int32  // type modifier (-1 = unspecified; for NUMERIC: ((p<<16)|s)+4)
-	NotNull     bool   // column-level NOT NULL constraint
-	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
+	Name          string
+	Type          tuple.DatumType
+	TypeName      string // original SQL type name (for domain/enum validation)
+	Typmod        int32  // type modifier (-1 = unspecified; for NUMERIC: ((p<<16)|s)+4)
+	NotNull       bool   // column-level NOT NULL constraint
+	DefaultExpr   string // SQL text of DEFAULT expression (empty = no default)
+	GeneratedExpr string // SQL text of GENERATED ALWAYS AS (expr) STORED (empty = not generated)
 }
 
 // Relation holds metadata about a table or index (a row from pg_class).
@@ -51,14 +52,15 @@ type Relation struct {
 
 // Column holds metadata about a column (a row from pg_attribute).
 type Column struct {
-	RelID       int32
-	Name        string
-	Num         int32  // 1-based
-	Type        int32  // maps to tuple.DatumType
-	TypeOID     int32  // raw pg_type OID (for custom type lookup)
-	Typmod      int32  // atttypmod (-1 = unspecified; for NUMERIC: ((precision<<16)|scale)+4)
-	NotNull     bool   // attnotnull
-	DefaultExpr string // SQL text of DEFAULT expression (empty = no default)
+	RelID         int32
+	Name          string
+	Num           int32  // 1-based
+	Type          int32  // maps to tuple.DatumType
+	TypeOID       int32  // raw pg_type OID (for custom type lookup)
+	Typmod        int32  // atttypmod (-1 = unspecified; for NUMERIC: ((precision<<16)|scale)+4)
+	NotNull       bool   // attnotnull
+	DefaultExpr   string // SQL text of DEFAULT expression (empty = no default)
+	GeneratedExpr string // SQL text of GENERATED ALWAYS AS (expr) STORED (empty = not generated)
 }
 
 // IndexInfo holds metadata about an index (extra fields in the pg_class
@@ -256,7 +258,7 @@ func (c *Catalog) CreateTableInSchema(name string, cols []ColumnDef, ownerOID in
 		return 0, fmt.Errorf("catalog: insert pg_class: %w", err)
 	}
 
-	// Insert into pg_attribute (new 8-column format).
+	// Insert into pg_attribute.
 	for i, col := range cols {
 		typeOID := datumTypeToPgTypeOID(col.Type)
 		// If the column uses a custom type (domain/enum), store its OID instead.
@@ -265,9 +267,13 @@ func (c *Catalog) CreateTableInSchema(name string, cols []ColumnDef, ownerOID in
 				typeOID = ct.OID
 			}
 		}
-		_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, pgAttributeRow(
-			oid, col.Name, typeOID, -1, int16(i+1), col.NotNull, col.DefaultExpr, col.Typmod,
-		))
+		var row []tuple.Datum
+		if col.GeneratedExpr != "" {
+			row = pgAttributeRowGenerated(oid, col.Name, typeOID, -1, int16(i+1), col.NotNull, col.GeneratedExpr, col.Typmod)
+		} else {
+			row = pgAttributeRow(oid, col.Name, typeOID, -1, int16(i+1), col.NotNull, col.DefaultExpr, col.Typmod)
+		}
+		_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, row)
 		if err != nil {
 			c.Eng.TxMgr.Abort(xid)
 			return 0, fmt.Errorf("catalog: insert pg_attribute col %q: %w", col.Name, err)
@@ -768,9 +774,13 @@ func (c *Catalog) getColumnsWithSnapshot(oid int32, snap *mvcc.Snapshot) ([]Colu
 			Typmod:  typmod,
 			NotNull: tup.Columns[PgAttrAttnotnull].I32 != 0,
 		}
-		// Read default expression if present (10-column format).
-		if len(tup.Columns) >= PgAttrNumCols && tup.Columns[PgAttrAtthasdef].I32 != 0 {
+		// Read default expression if present.
+		if len(tup.Columns) > PgAttrAttdefault && tup.Columns[PgAttrAtthasdef].I32 != 0 {
 			col.DefaultExpr = tup.Columns[PgAttrAttdefault].Text
+		}
+		// Read generated expression if present.
+		if len(tup.Columns) > PgAttrAttgenerated {
+			col.GeneratedExpr = tup.Columns[PgAttrAttgenerated].Text
 		}
 		cols = append(cols, col)
 		return true
@@ -1198,6 +1208,163 @@ func (c *Catalog) DropColumn(tableName string, colName string, ifExists bool) er
 		c.Eng.TxMgr.Abort(xid)
 		return err
 	}
+	c.Eng.TxMgr.Commit(xid)
+	c.cache.invalidate()
+	return nil
+}
+
+// RenameRelation renames a table or view.
+func (c *Catalog) RenameRelation(oldName, newName string) error {
+	rel, err := c.FindRelation(oldName)
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		return fmt.Errorf("catalog: relation %q not found", oldName)
+	}
+
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+
+	var targetID slottedpage.ItemID
+	var oldRow []tuple.Datum
+	found := false
+	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) > PgClassRelname && tup.Columns[PgClassOID].I32 == rel.OID {
+			targetID = id
+			oldRow = make([]tuple.Datum, len(tup.Columns))
+			copy(oldRow, tup.Columns)
+			found = true
+			return false
+		}
+		return true
+	})
+
+	if !found {
+		c.Eng.TxMgr.Commit(xid)
+		return fmt.Errorf("catalog: relation %q not found in pg_class", oldName)
+	}
+
+	oldRow[PgClassRelname] = tuple.DText(newName)
+
+	if err := c.Eng.Delete(xid, targetID); err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+	if _, err := c.Eng.Insert(xid, c.Eng.Super.PgClassPage, oldRow); err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+
+	c.Eng.TxMgr.Commit(xid)
+	c.cache.invalidate()
+	return nil
+}
+
+// AlterColumnSetNotNull sets the NOT NULL constraint on a column.
+func (c *Catalog) AlterColumnSetNotNull(tableName, colName string) error {
+	return c.updatePgAttribute(tableName, colName, func(row []tuple.Datum) []tuple.Datum {
+		row[PgAttrAttnotnull] = tuple.DInt32(1)
+		return row
+	})
+}
+
+// AlterColumnDropNotNull removes the NOT NULL constraint from a column.
+func (c *Catalog) AlterColumnDropNotNull(tableName, colName string) error {
+	return c.updatePgAttribute(tableName, colName, func(row []tuple.Datum) []tuple.Datum {
+		row[PgAttrAttnotnull] = tuple.DInt32(0)
+		return row
+	})
+}
+
+// AlterColumnSetDefault sets the DEFAULT expression on a column.
+func (c *Catalog) AlterColumnSetDefault(tableName, colName, defaultExpr string) error {
+	return c.updatePgAttribute(tableName, colName, func(row []tuple.Datum) []tuple.Datum {
+		for len(row) < PgAttrNumCols {
+			row = append(row, tuple.DInt32(0))
+		}
+		row[PgAttrAtthasdef] = tuple.DInt32(1)
+		row[PgAttrAttdefault] = tuple.DText(defaultExpr)
+		return row
+	})
+}
+
+// AlterColumnDropDefault removes the DEFAULT expression from a column.
+func (c *Catalog) AlterColumnDropDefault(tableName, colName string) error {
+	return c.updatePgAttribute(tableName, colName, func(row []tuple.Datum) []tuple.Datum {
+		for len(row) < PgAttrNumCols {
+			row = append(row, tuple.DInt32(0))
+		}
+		row[PgAttrAtthasdef] = tuple.DInt32(0)
+		row[PgAttrAttdefault] = tuple.DText("")
+		return row
+	})
+}
+
+// AlterColumnType changes the type of a column.
+func (c *Catalog) AlterColumnType(tableName, colName string, newTypeOID int32) error {
+	return c.updatePgAttribute(tableName, colName, func(row []tuple.Datum) []tuple.Datum {
+		row[PgAttrAtttypid] = tuple.DInt32(newTypeOID)
+		return row
+	})
+}
+
+// RenameColumn renames a column in a table.
+func (c *Catalog) RenameColumn(tableName, oldName, newName string) error {
+	return c.updatePgAttribute(tableName, oldName, func(row []tuple.Datum) []tuple.Datum {
+		row[PgAttrAttname] = tuple.DText(newName)
+		return row
+	})
+}
+
+// updatePgAttribute finds a pg_attribute row by (tableName, colName),
+// applies the mutator function, and writes the updated row back.
+func (c *Catalog) updatePgAttribute(tableName, colName string, mutate func([]tuple.Datum) []tuple.Datum) error {
+	rel, err := c.FindRelation(tableName)
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		return fmt.Errorf("catalog: table %q not found", tableName)
+	}
+
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+
+	var targetID slottedpage.ItemID
+	var oldRow []tuple.Datum
+	found := false
+	c.Eng.SeqScan(c.Eng.Super.PgAttrPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) < 8 {
+			return true
+		}
+		if tup.Columns[0].I32 == rel.OID && tup.Columns[1].Text == colName {
+			targetID = id
+			oldRow = make([]tuple.Datum, len(tup.Columns))
+			copy(oldRow, tup.Columns)
+			found = true
+			return false
+		}
+		return true
+	})
+
+	if !found {
+		c.Eng.TxMgr.Commit(xid)
+		return fmt.Errorf("catalog: column %q of relation %q does not exist", colName, tableName)
+	}
+
+	newRow := mutate(oldRow)
+
+	// Delete old row and insert new one (MVCC update).
+	if err := c.Eng.Delete(xid, targetID); err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+	if _, err := c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, newRow); err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+
 	c.Eng.TxMgr.Commit(xid)
 	c.cache.invalidate()
 	return nil
