@@ -590,8 +590,15 @@ func isPLpgSQLFragment(s string) bool {
 		}
 	}
 	// Also skip lines that are just variable declarations or assignments
-	// typical of PL/pgSQL.
-	if strings.Contains(upper, ":=") {
+	// typical of PL/pgSQL — but NOT full SQL statements (like CREATE FUNCTION)
+	// whose dollar-quoted body may contain := assignments.
+	if strings.Contains(upper, ":=") &&
+		!strings.HasPrefix(upper, "CREATE ") &&
+		!strings.HasPrefix(upper, "ALTER ") &&
+		!strings.HasPrefix(upper, "SELECT ") &&
+		!strings.HasPrefix(upper, "INSERT ") &&
+		!strings.HasPrefix(upper, "UPDATE ") &&
+		!strings.HasPrefix(upper, "DELETE ") {
 		return true
 	}
 	return false
@@ -602,42 +609,11 @@ func isPLpgSQLFragment(s string) bool {
 // skip them silently instead of printing noisy errors.
 func isExpectedParseFailure(sql string, err error) bool {
 	upper := strings.ToUpper(strings.TrimSpace(sql))
-	// Common pg dump patterns our parser can't handle.
-	skipPrefixes := []string{
-		"ALTER ", // covers ALTER ... OWNER TO, ALTER TABLE ... ATTACH PARTITION
-		"CREATE DOMAIN",
-		"CREATE TYPE",
-		"CREATE FUNCTION",
-		"CREATE OR REPLACE FUNCTION",
-		"CREATE TRIGGER",
-		"CREATE AGGREGATE",
-		"CREATE MATERIALIZED VIEW",
-		"REVOKE",
-		"GRANT",
-		"COMMENT ON",
-		"SELECT PG_CATALOG.SETVAL",
-		"COPY ",
-	}
-	for _, prefix := range skipPrefixes {
-		if strings.HasPrefix(upper, prefix) {
-			errStr := err.Error()
-			if strings.Contains(errStr, "parse error") {
-				return true
-			}
-			if strings.Contains(upper, "OWNER TO") ||
-				strings.Contains(upper, "ATTACH PARTITION") {
-				return true
-			}
-		}
-	}
 
-	// Also skip parse errors for specific unsupported syntax patterns
-	// regardless of statement prefix (e.g., USING gist in CREATE INDEX).
-	errStr := err.Error()
-	if strings.Contains(errStr, "parse error") {
-		if strings.Contains(upper, "USING GIST") ||
-			strings.Contains(upper, "USING GIN") ||
-			strings.Contains(upper, "MATERIALIZED VIEW") {
+	// SELECT pg_catalog.setval(...) is used in dumps to restore sequence
+	// values but is not supported by the parser.
+	if strings.HasPrefix(upper, "SELECT PG_CATALOG.SETVAL") {
+		if strings.Contains(err.Error(), "parse error") {
 			return true
 		}
 	}
