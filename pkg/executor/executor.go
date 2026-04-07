@@ -316,6 +316,10 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 	case *planner.PhysNoOp:
 		return &Result{Message: n.Message}, nil
 	case *planner.PhysCreateSequence:
+		_, err := ex.Cat.CreateSequence(n.Name)
+		if err != nil {
+			return nil, err
+		}
 		return &Result{Message: fmt.Sprintf("CREATE SEQUENCE %s", n.Name)}, nil
 	case *planner.PhysCreateView:
 		return ex.execCreateView(n)

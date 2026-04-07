@@ -287,6 +287,32 @@ func (c *Catalog) getAM(method string) index.IndexAM {
 // It allocates a heap page for the table, inserts metadata into
 // pg_class and pg_attribute, and returns the OID.
 // ownerOID is the OID of the role that owns this table (0 = no owner).
+// CreateSequence registers a sequence in pg_class with relkind='S'.
+// No heap page or pg_attribute entries are needed — sequence state is
+// managed in-memory by the planner's nextval/currval/setval functions.
+func (c *Catalog) CreateSequence(name string) (int32, error) {
+	existing, err := c.FindRelation(name)
+	if err != nil {
+		return 0, err
+	}
+	if existing != nil {
+		return existing.OID, nil // IF NOT EXISTS semantics
+	}
+
+	oid := int32(c.Eng.Super.AllocOID())
+	xid := c.Eng.TxMgr.Begin()
+	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, pgClassRow(
+		oid, name, OIDPublic, RelKindSequence_S,
+		0, 0, 0, 0, "", 0, 0, 0,
+	))
+	if err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return 0, fmt.Errorf("catalog: insert pg_class for sequence: %w", err)
+	}
+	c.Eng.TxMgr.Commit(xid)
+	return oid, nil
+}
+
 func (c *Catalog) CreateTable(name string, cols []ColumnDef) (int32, error) {
 	return c.CreateTableOwned(name, cols, 0)
 }
