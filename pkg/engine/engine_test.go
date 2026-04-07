@@ -6,7 +6,7 @@ import (
 
 	"github.com/gololadb/loladb/pkg/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
-	"github.com/gololadb/loladb/pkg/wal"
+	"github.com/gololadb/loladb/pkg/engine/wal"
 )
 
 func tempDir(t *testing.T) string {
