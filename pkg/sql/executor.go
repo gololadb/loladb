@@ -855,23 +855,15 @@ func (ex *Executor) execCreateAggregate(ds *parser.DefineStmt) (*Result, error) 
 	for _, d := range ds.Definition {
 		switch strings.ToLower(d.Defname) {
 		case "sfunc":
-			if s, ok := d.Arg.(*parser.String); ok {
-				aggDef.SFunc = s.Str
-			}
+			aggDef.SFunc = defElemToName(d.Arg)
 		case "stype":
-			if s, ok := d.Arg.(*parser.String); ok {
-				aggDef.SType = s.Str
-			} else if tn, ok := d.Arg.(*parser.TypeName); ok && len(tn.Names) > 0 {
-				aggDef.SType = tn.Names[len(tn.Names)-1]
-			}
+			aggDef.SType = defElemToName(d.Arg)
 		case "initcond":
 			if s, ok := d.Arg.(*parser.String); ok {
 				aggDef.InitCond = s.Str
 			}
 		case "finalfunc":
-			if s, ok := d.Arg.(*parser.String); ok {
-				aggDef.FinalFunc = s.Str
-			}
+			aggDef.FinalFunc = defElemToName(d.Arg)
 		}
 	}
 
@@ -1091,6 +1083,20 @@ func (ex *Executor) execCloseCursor(cp *parser.ClosePortalStmt) (*Result, error)
 	}
 	delete(ex.cursors, name)
 	return &Result{Message: "CLOSE CURSOR"}, nil
+}
+
+// defElemToName extracts a name string from a DefElem argument node.
+// Handles *parser.String ("name") and *parser.TypeName (schema-qualified "schema.name").
+func defElemToName(n parser.Node) string {
+	switch v := n.(type) {
+	case *parser.String:
+		return v.Str
+	case *parser.TypeName:
+		if len(v.Names) > 0 {
+			return v.Names[len(v.Names)-1]
+		}
+	}
+	return ""
 }
 
 // execTsvectorUpdateTrigger implements the built-in tsvector_update_trigger

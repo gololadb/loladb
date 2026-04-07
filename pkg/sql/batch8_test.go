@@ -90,6 +90,30 @@ func TestCreateAggregate(t *testing.T) {
 	}
 }
 
+func TestCreateAggregateSchemaQualified(t *testing.T) {
+	ex := newTestExecutor(t)
+
+	// Schema-qualified sfunc should be accepted (schema prefix stripped).
+	mustExec(t, ex, `CREATE AGGREGATE public.group_concat(text) (
+		SFUNC = public.array_append,
+		STYPE = anyarray,
+		INITCOND = '{}'
+	)`)
+
+	mustExec(t, ex, `CREATE TABLE gc_test (val TEXT)`)
+	mustExec(t, ex, `INSERT INTO gc_test VALUES ('a')`)
+	mustExec(t, ex, `INSERT INTO gc_test VALUES ('b')`)
+
+	r, err := ex.Exec(`SELECT group_concat(val) FROM gc_test`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := r.Rows[0][0].Text
+	if !strings.Contains(got, "a") || !strings.Contains(got, "b") {
+		t.Fatalf("expected array with a,b, got %q", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // CREATE MATERIALIZED VIEW (full pipeline)
 // ---------------------------------------------------------------------------
