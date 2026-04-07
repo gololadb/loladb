@@ -112,7 +112,7 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 	case *LogicalCreateFunction:
 		return &PhysCreateFunction{Name: n.Name, Language: n.Language, Body: n.Body, ReturnType: n.ReturnType, ParamNames: n.ParamNames, ParamTypes: n.ParamTypes, Replace: n.Replace}, nil
 	case *LogicalCreateTrigger:
-		return &PhysCreateTrigger{TrigName: n.TrigName, Table: n.Table, FuncName: n.FuncName, Timing: n.Timing, Events: n.Events, ForEach: n.ForEach, Replace: n.Replace}, nil
+		return &PhysCreateTrigger{TrigName: n.TrigName, Table: n.Table, FuncName: n.FuncName, Timing: n.Timing, Events: n.Events, ForEach: n.ForEach, Replace: n.Replace, Args: n.Args}, nil
 	case *LogicalDropFunction:
 		return &PhysDropFunction{Name: n.Name, MissingOk: n.MissingOk}, nil
 	case *LogicalDropTrigger:

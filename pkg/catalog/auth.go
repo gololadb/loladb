@@ -33,15 +33,18 @@ type RoleMembership struct {
 type Privilege int32
 
 const (
-	PrivSelect   Privilege = 1 << 0
-	PrivInsert   Privilege = 1 << 1
-	PrivUpdate   Privilege = 1 << 2
-	PrivDelete   Privilege = 1 << 3
-	PrivTruncate Privilege = 1 << 4
+	PrivSelect     Privilege = 1 << 0
+	PrivInsert     Privilege = 1 << 1
+	PrivUpdate     Privilege = 1 << 2
+	PrivDelete     Privilege = 1 << 3
+	PrivTruncate   Privilege = 1 << 4
 	PrivReferences Privilege = 1 << 5
-	PrivTrigger  Privilege = 1 << 6
-	PrivAll      Privilege = PrivSelect | PrivInsert | PrivUpdate | PrivDelete |
-		PrivTruncate | PrivReferences | PrivTrigger
+	PrivTrigger    Privilege = 1 << 6
+	PrivUsage      Privilege = 1 << 7
+	PrivCreate     Privilege = 1 << 8
+	PrivExecute    Privilege = 1 << 9
+	PrivAll        Privilege = PrivSelect | PrivInsert | PrivUpdate | PrivDelete |
+		PrivTruncate | PrivReferences | PrivTrigger | PrivUsage | PrivCreate | PrivExecute
 )
 
 // ParsePrivilege converts a privilege name to a Privilege bitmask.
@@ -61,6 +64,12 @@ func ParsePrivilege(name string) Privilege {
 		return PrivReferences
 	case "TRIGGER":
 		return PrivTrigger
+	case "USAGE":
+		return PrivUsage
+	case "CREATE":
+		return PrivCreate
+	case "EXECUTE":
+		return PrivExecute
 	case "ALL", "ALL PRIVILEGES":
 		return PrivAll
 	default:

@@ -19,6 +19,12 @@ import (
 )
 
 // evalBuiltinFunc evaluates a built-in SQL function by name.
+// EvalBuiltinFunc evaluates a built-in function by name. Exported for use by
+// the executor (e.g. custom aggregate sfunc/finalfunc evaluation).
+func EvalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, error) {
+	return evalBuiltinFunc(name, args, row)
+}
+
 func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, error) {
 	switch strings.ToLower(name) {
 	case "now", "current_timestamp":
@@ -1653,6 +1659,35 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		}
 		return tuple.DInt64(count), nil
 
+	case "array_append":
+		// array_append(anyarray, anyelement) → anyarray
+		// Appends an element to a PG array literal.
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("array_append requires 2 arguments")
+		}
+		arrVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		elemVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		arrStr := arrVal.Text
+		elemStr := datumToString(elemVal)
+		// Parse existing array.
+		if arrStr == "" || arrStr == "{}" {
+			return tuple.DText("{" + elemStr + "}"), nil
+		}
+		if len(arrStr) >= 2 && arrStr[0] == '{' && arrStr[len(arrStr)-1] == '}' {
+			inner := arrStr[1 : len(arrStr)-1]
+			if inner == "" {
+				return tuple.DText("{" + elemStr + "}"), nil
+			}
+			return tuple.DText("{" + inner + "," + elemStr + "}"), nil
+		}
+		return tuple.DText("{" + arrStr + "," + elemStr + "}"), nil
+
 	case "unnest":
 		// unnest() is a set-returning function. When evaluated as a scalar
 		// (e.g. in evalBuiltinFunc), just return the array value. The actual
@@ -1661,6 +1696,55 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 			return args[0].Eval(row)
 		}
 		return tuple.DNull(), nil
+
+	case "set_config":
+		// set_config(name text, value text, is_local boolean) → text
+		// Sets a session configuration parameter and returns the new value.
+		if len(args) < 2 {
+			return tuple.DNull(), fmt.Errorf("set_config requires at least 2 arguments")
+		}
+		nameVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		valVal, err := args[1].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		settingName := nameVal.Text
+		settingValue := valVal.Text
+		if SetConfigFunc != nil {
+			SetConfigFunc(settingName, settingValue)
+		}
+		return tuple.DText(settingValue), nil
+
+	case "current_setting":
+		// current_setting(name text [, missing_ok boolean]) → text
+		if len(args) < 1 {
+			return tuple.DNull(), fmt.Errorf("current_setting requires at least 1 argument")
+		}
+		nameVal, err := args[0].Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		settingName := nameVal.Text
+		missingOk := false
+		if len(args) >= 2 {
+			mokVal, err := args[1].Eval(row)
+			if err == nil && mokVal.Type == tuple.TypeBool {
+				missingOk = mokVal.Bool
+			}
+		}
+		if CurrentSettingFunc != nil {
+			val := CurrentSettingFunc(settingName)
+			if val != "" {
+				return tuple.DText(val), nil
+			}
+		}
+		if missingOk {
+			return tuple.DNull(), nil
+		}
+		return tuple.DNull(), fmt.Errorf("unrecognized configuration parameter %q", settingName)
 
 	default:
 		return tuple.DNull(), fmt.Errorf("function %s is not supported", name)
@@ -1898,6 +1982,12 @@ func castDatum(val tuple.Datum, targetType tuple.DatumType, typeName string) (tu
 // In-memory sequence state. Sequences are identified by name and
 // auto-increment on each nextval() call. This is sufficient for
 // the Pagila dataset and learning purposes.
+// Session setting callbacks — wired by the SQL executor.
+var (
+	SetConfigFunc      func(name, value string) // set_config
+	CurrentSettingFunc func(name string) string  // current_setting
+)
+
 var (
 	seqMu   sync.Mutex
 	seqVals = map[string]int64{}

@@ -47,6 +47,7 @@ const (
 	RelKindOrdinaryTable_S = "r"
 	RelKindIndex_S         = "i"
 	RelKindView_S          = "v"
+	RelKindMatView_S       = "m"
 	RelKindSequence_S      = "S"
 	RelKindToastTable_S    = "t"
 

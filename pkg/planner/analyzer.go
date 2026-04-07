@@ -3090,6 +3090,24 @@ func (a *Analyzer) transformCreateTrigStmt(n *parser.CreateTrigStmt) (*Query, er
 		forEach = "ROW"
 	}
 
+	// Extract trigger function arguments as string values.
+	var trigArgs []string
+	for _, arg := range n.Args {
+		switch a := arg.(type) {
+		case *parser.A_Const:
+			trigArgs = append(trigArgs, a.Val.Str)
+		case *parser.ColumnRef:
+			// Fields are []Node containing *parser.String nodes.
+			if len(a.Fields) > 0 {
+				if s, ok := a.Fields[len(a.Fields)-1].(*parser.String); ok {
+					trigArgs = append(trigArgs, s.Str)
+				}
+			}
+		default:
+			trigArgs = append(trigArgs, fmt.Sprintf("%v", a))
+		}
+	}
+
 	return a.makeUtilityQuery(UtilCreateTrigger, &UtilityStmt{
 		Type:        UtilCreateTrigger,
 		TrigName:    n.Trigname,
@@ -3099,6 +3117,7 @@ func (a *Analyzer) transformCreateTrigStmt(n *parser.CreateTrigStmt) (*Query, er
 		TrigEvents:  n.Events,
 		TrigForEach: forEach,
 		TrigReplace: n.Replace,
+		TrigArgs:    trigArgs,
 	}), nil
 }
 
@@ -3546,7 +3565,7 @@ func expandGroupingSet(gs *parser.GroupingSet) [][]parser.Expr {
 	return nil
 }
 
-func isAggregateFunc(name string) bool {
+func (a *Analyzer) isAggregateFunc(name string) bool {
 	switch strings.ToLower(name) {
 	case "count", "sum", "avg", "min", "max",
 		"bool_and", "bool_or", "every",
@@ -3557,6 +3576,12 @@ func isAggregateFunc(name string) bool {
 		"rank", "dense_rank", "percent_rank", "cume_dist",
 		"json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg":
 		return true
+	}
+	// Check custom aggregates in the catalog.
+	if a.Cat != nil {
+		if _, ok := a.Cat.CustomAggregates[strings.ToLower(name)]; ok {
+			return true
+		}
 	}
 	return false
 }
@@ -3585,7 +3610,7 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 	}
 
 	// Aggregate functions produce AggRef nodes.
-	if isAggregateFunc(name) {
+	if a.isAggregateFunc(name) {
 		var retType tuple.DatumType
 		switch name {
 		case "count":

@@ -33,14 +33,16 @@ type TriggerExecFunc func(body string, td *TriggerContext) (map[string]tuple.Dat
 
 // TriggerContext holds the context for a trigger invocation.
 type TriggerContext struct {
-	TgName   string
-	TgTable  string
-	TgOp     string // INSERT, UPDATE, DELETE
-	TgWhen   string // BEFORE, AFTER
-	TgLevel  string // ROW, STATEMENT
-	NewRow   map[string]tuple.Datum
-	OldRow   map[string]tuple.Datum
-	ColNames []string
+	TgName     string
+	TgTable    string
+	TgOp       string // INSERT, UPDATE, DELETE
+	TgWhen     string // BEFORE, AFTER
+	TgLevel    string // ROW, STATEMENT
+	TgFuncName string // trigger function name
+	TgArgs     []string // trigger function arguments
+	NewRow     map[string]tuple.Datum
+	OldRow     map[string]tuple.Datum
+	ColNames   []string
 }
 
 // SQLExecFunc executes a SQL statement and returns the result.
@@ -1182,6 +1184,9 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 						st.arrBuf = append(st.arrBuf, val2)
 					}
 				}
+			default:
+				// Custom aggregates: collect all values for sfunc processing.
+				st.arrBuf = append(st.arrBuf, val)
 			}
 			st.hasVal = true
 		}
@@ -1514,7 +1519,12 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 					row = append(row, tuple.DFloat64(float64(count+1)/n))
 				}
 			default:
-				row = append(row, tuple.DNull())
+				// Try custom aggregate execution.
+				result, err := ex.execCustomAggregate(ad.Func, st.arrBuf)
+				if err != nil {
+					return nil, err
+				}
+				row = append(row, result)
 			}
 		}
 		// Apply HAVING filter.
@@ -1585,6 +1595,47 @@ func datumToFloat64(d tuple.Datum) float64 {
 	default:
 		return 0
 	}
+}
+
+// execCustomAggregate runs a user-defined aggregate by iterating sfunc over
+// collected values, then optionally applying finalfunc.
+func (ex *Executor) execCustomAggregate(funcName string, values []tuple.Datum) (tuple.Datum, error) {
+	aggDef, ok := ex.Cat.CustomAggregates[strings.ToLower(funcName)]
+	if !ok {
+		return tuple.DNull(), nil
+	}
+
+	// Initialize state from initcond.
+	state := tuple.DText(aggDef.InitCond)
+
+	// Apply sfunc(state, value) for each collected value.
+	sfunc := strings.ToLower(aggDef.SFunc)
+	for _, val := range values {
+		args := []planner.AnalyzedExpr{
+			&planner.Const{Value: state, ConstType: state.Type},
+			&planner.Const{Value: val, ConstType: val.Type},
+		}
+		result, err := planner.EvalBuiltinFunc(sfunc, args, &planner.Row{})
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("custom aggregate %q sfunc %q: %w", funcName, sfunc, err)
+		}
+		state = result
+	}
+
+	// Apply finalfunc if specified.
+	if aggDef.FinalFunc != "" {
+		ffunc := strings.ToLower(aggDef.FinalFunc)
+		args := []planner.AnalyzedExpr{
+			&planner.Const{Value: state, ConstType: state.Type},
+		}
+		result, err := planner.EvalBuiltinFunc(ffunc, args, &planner.Row{})
+		if err != nil {
+			return tuple.DNull(), fmt.Errorf("custom aggregate %q finalfunc %q: %w", funcName, ffunc, err)
+		}
+		state = result
+	}
+
+	return state, nil
 }
 
 // execGroupingSets runs the aggregation once per grouping set, producing
@@ -3027,14 +3078,16 @@ func (ex *Executor) fireTriggersLevel(tableName string, timing int, event int, l
 		}
 
 		tc := &TriggerContext{
-			TgName:   trig.Name,
-			TgTable:  tableName,
-			TgOp:     tgOp,
-			TgWhen:   tgWhen,
-			TgLevel:  trig.ForEach,
-			NewRow:   currentNew,
-			OldRow:   oldRow,
-			ColNames: colNames,
+			TgName:     trig.Name,
+			TgTable:    tableName,
+			TgOp:       tgOp,
+			TgWhen:     tgWhen,
+			TgLevel:    trig.ForEach,
+			TgFuncName: fn.Name,
+			TgArgs:     trig.Args,
+			NewRow:     currentNew,
+			OldRow:     oldRow,
+			ColNames:   colNames,
 		}
 
 		modifiedNew, err := ex.TriggerExec(fn.Body, tc)
@@ -3806,6 +3859,7 @@ func (ex *Executor) execCreateTrigger(n *planner.PhysCreateTrigger) (*Result, er
 		Timing:   n.Timing,
 		Events:   n.Events,
 		ForEach:  n.ForEach,
+		Args:     n.Args,
 	})
 	if err != nil {
 		return nil, err

@@ -23,9 +23,10 @@ import (
 // string constants from oids.go (RelKindOrdinaryTable, etc.), but
 // these are kept for backward compatibility during the transition.
 const (
-	RelKindTable = 0
-	RelKindIndex = 1
-	RelKindView  = 2
+	RelKindTable   = 0
+	RelKindIndex   = 1
+	RelKindView    = 2
+	RelKindMatView = 3
 )
 
 // ColumnDef describes a column in a table.
@@ -40,6 +41,16 @@ type ColumnDef struct {
 }
 
 // Relation holds metadata about a table or index (a row from pg_class).
+// CustomAggregateDef stores a user-defined aggregate created via CREATE AGGREGATE.
+type CustomAggregateDef struct {
+	Name      string // aggregate name
+	SFunc     string // state transition function name
+	SType     string // state type name (e.g. "integer", "text[]", "anyarray")
+	InitCond  string // initial condition (literal value for the state)
+	FinalFunc string // optional final function name
+	ArgTypes  []string // argument type names
+}
+
 type Relation struct {
 	OID          int32
 	Name         string
@@ -138,6 +149,9 @@ type Catalog struct {
 
 	// MatViews stores materialized view query definitions keyed by name.
 	MatViews map[string]string
+
+	// CustomAggregates stores user-defined aggregate definitions keyed by name.
+	CustomAggregates map[string]*CustomAggregateDef
 }
 
 // New wraps an engine with catalog operations. If the database is
@@ -163,9 +177,10 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		Funcs: newFuncStore(), Triggers: newTriggerStore(), Types: newTypeStore(),
 		cache:      newSyscache(),
 		SearchPath: searchPath,
-		TempTables: make(map[string]bool),
-		Comments:   make(map[string]string),
-		MatViews:   make(map[string]string),
+		TempTables:       make(map[string]bool),
+		Comments:         make(map[string]string),
+		MatViews:         make(map[string]string),
+		CustomAggregates: make(map[string]*CustomAggregateDef),
 	}
 
 	if eng.Super.PgClassPage == 0 {
@@ -193,7 +208,27 @@ func New(eng *engine.Engine) (*Catalog, error) {
 	}
 	c.loadCustomTypes()
 
+	// Register built-in trigger functions so CREATE TRIGGER can reference them.
+	c.registerBuiltinTriggerFunctions()
+
 	return c, nil
+}
+
+// registerBuiltinTriggerFunctions adds built-in trigger functions (like
+// tsvector_update_trigger) to the function store if not already present.
+func (c *Catalog) registerBuiltinTriggerFunctions() {
+	builtins := []FuncDef{
+		{Name: "tsvector_update_trigger", Language: "internal", Body: "tsvector_update_trigger", ReturnType: "trigger"},
+		{Name: "tsvector_update_trigger_column", Language: "internal", Body: "tsvector_update_trigger_column", ReturnType: "trigger"},
+	}
+	for _, b := range builtins {
+		if c.Funcs.findByName(b.Name) == nil {
+			oid := c.Eng.Super.NextOID
+			c.Eng.Super.NextOID++
+			b.OID = int32(oid)
+			c.Funcs.add(&b)
+		}
+	}
 }
 
 // getAM returns the IndexAM for the given method name. Falls back to btree.
@@ -294,6 +329,64 @@ func (c *Catalog) CreateTableInSchema(name string, cols []ColumnDef, ownerOID in
 
 	c.Eng.TxMgr.Commit(xid)
 	c.cache.invalidate()
+	return oid, nil
+}
+
+// CreateMatView creates a materialized view — a real table (with storage)
+// that has relkind='m' and a stored query definition.
+func (c *Catalog) CreateMatView(name string, cols []ColumnDef, queryDef string) (int32, error) {
+	nsOID := c.CurrentSchemaOID()
+	existing, _ := c.findRelationInNamespace(name, nsOID)
+	if existing != nil {
+		return 0, fmt.Errorf("catalog: relation %q already exists", name)
+	}
+
+	// Allocate a heap page for data storage (unlike views, matviews store data).
+	headPage, err := c.Eng.AllocPage()
+	if err != nil {
+		return 0, fmt.Errorf("catalog: alloc page for matview: %w", err)
+	}
+
+	// Init the heap page.
+	buf, err := c.Eng.Pool.FetchPage(headPage)
+	if err != nil {
+		return 0, err
+	}
+	sp := slottedpage.Init(slottedpage.PageTypeHeap, headPage, 0)
+	copy(buf, sp.Bytes())
+	c.Eng.Pool.MarkDirty(headPage)
+	c.Eng.Pool.ReleasePage(headPage)
+
+	oid := int32(c.Eng.Super.AllocOID())
+	xid := c.Eng.TxMgr.Begin()
+
+	_, err = c.Eng.Insert(xid, c.Eng.Super.PgClassPage, pgClassRow(
+		oid, name, nsOID, RelKindMatView_S,
+		1, 0, 0, 0, "heap", int32(headPage), 0, 0,
+	))
+	if err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return 0, fmt.Errorf("catalog: insert pg_class for matview: %w", err)
+	}
+
+	for i, col := range cols {
+		typeOID := datumTypeToPgTypeOID(col.Type)
+		if col.TypeName != "" {
+			if ct := c.Types.findByName(col.TypeName); ct != nil {
+				typeOID = ct.OID
+			}
+		}
+		row := pgAttributeRow(oid, col.Name, typeOID, -1, int16(i+1), col.NotNull, col.DefaultExpr, col.Typmod)
+		_, err = c.Eng.Insert(xid, c.Eng.Super.PgAttrPage, row)
+		if err != nil {
+			c.Eng.TxMgr.Abort(xid)
+			return 0, fmt.Errorf("catalog: insert pg_attribute for matview col %q: %w", col.Name, err)
+		}
+	}
+
+	c.Eng.TxMgr.Commit(xid)
+	c.cache.invalidate()
+	c.MatViews[name] = queryDef
 	return oid, nil
 }
 
@@ -661,7 +754,9 @@ func relKindStringToInt(s string) int32 {
 	case RelKindIndex_S:
 		return 1 // RelKindIndex (int)
 	case RelKindView_S:
-		return 2 // RelKindView (int)
+		return RelKindView
+	case RelKindMatView_S:
+		return RelKindMatView
 	default:
 		return RelKindTable
 	}
@@ -1001,7 +1096,7 @@ func (c *Catalog) TruncateTable(name string) error {
 	if rel == nil {
 		return fmt.Errorf("catalog: table %q not found", name)
 	}
-	if rel.Kind != RelKindTable {
+	if rel.Kind != RelKindTable && rel.Kind != RelKindMatView {
 		return fmt.Errorf("catalog: %q is not a table", name)
 	}
 
@@ -1112,7 +1207,7 @@ func (c *Catalog) DropTable(name string, missingOk bool) error {
 		}
 		return fmt.Errorf("catalog: table %q does not exist", name)
 	}
-	if rel.Kind != RelKindTable {
+	if rel.Kind != RelKindTable && rel.Kind != RelKindMatView {
 		return fmt.Errorf("catalog: %q is not a table", name)
 	}
 

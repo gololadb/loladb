@@ -27,9 +27,10 @@ type TriggerDef struct {
 	Name     string
 	TableOID int32
 	FuncOID  int32
-	Timing   int    // BEFORE=2, AFTER=4, INSTEAD=8
-	Events   int    // INSERT=16, DELETE=32, UPDATE=64, TRUNCATE=128
-	ForEach  string // "ROW" or "STATEMENT"
+	Timing   int      // BEFORE=2, AFTER=4, INSTEAD=8
+	Events   int      // INSERT=16, DELETE=32, UPDATE=64, TRUNCATE=128
+	ForEach  string   // "ROW" or "STATEMENT"
+	Args     []string // trigger function arguments (e.g. for tsvector_update_trigger)
 }
 
 // Trigger timing/event constants matching gopgsql parser.

@@ -510,6 +510,7 @@ type PhysCreateTrigger struct {
 	Events   int
 	ForEach  string // "ROW" or "STATEMENT"
 	Replace  bool
+	Args     []string
 }
 
 func (n *PhysCreateTrigger) String() string            { return fmt.Sprintf("CreateTrigger %s ON %s", n.TrigName, n.Table) }

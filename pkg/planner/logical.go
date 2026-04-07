@@ -446,6 +446,7 @@ type LogicalCreateTrigger struct {
 	Events   int
 	ForEach  string
 	Replace  bool
+	Args     []string
 }
 
 func (n *LogicalCreateTrigger) String() string         { return fmt.Sprintf("CreateTrigger(%s ON %s)", n.TrigName, n.Table) }

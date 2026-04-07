@@ -2,6 +2,7 @@ package sql
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/gololadb/gopgsql/parser"
@@ -62,6 +63,9 @@ type Executor struct {
 
 	// Server-side cursors (session-scoped).
 	cursors map[string]*CursorState
+
+	// Session-level GUC settings (set via SET or set_config()).
+	sessionSettings map[string]string
 }
 
 // CursorState holds the materialized result set and current position for a cursor.
@@ -75,8 +79,9 @@ type CursorState struct {
 func NewExecutor(cat *catalog.Catalog) *Executor {
 	a := &planner.Analyzer{Cat: cat}
 	ex := &Executor{
-		Cat:       cat,
-		analyzer:  a,
+		Cat:             cat,
+		analyzer:        a,
+		sessionSettings: map[string]string{},
 		rewriter:  rewriter.New(cat, a),
 		optimizer: &planner.Optimizer{Cat: cat, Costs: planner.DefaultCosts()},
 		exec:      executor.NewExecutor(cat),
@@ -132,6 +137,11 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 	})
 
 	ex.exec.TriggerExec = func(body string, tc *executor.TriggerContext) (map[string]tuple.Datum, error) {
+		// Handle built-in trigger functions natively.
+		if tc.TgFuncName == "tsvector_update_trigger" || tc.TgFuncName == "tsvector_update_trigger_column" {
+			return execTsvectorUpdateTrigger(tc)
+		}
+
 		td := &plpgsql.TriggerData{
 			TgName:   tc.TgName,
 			TgTable:  tc.TgTable,
@@ -163,7 +173,66 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 		}, nil
 	}
 
+	// Wire session settings callbacks for set_config() / current_setting().
+	planner.SetConfigFunc = func(name, value string) {
+		ex.SetSessionSetting(name, value)
+	}
+	planner.CurrentSettingFunc = func(name string) string {
+		return ex.GetSessionSetting(name)
+	}
+
 	return ex
+}
+
+// SetSessionSetting stores a session-level GUC parameter.
+func (ex *Executor) SetSessionSetting(name, value string) {
+	name = strings.ToLower(name)
+	ex.sessionSettings[name] = value
+	// Keep special settings in sync.
+	if name == "search_path" {
+		schemas := strings.Split(value, ",")
+		for i := range schemas {
+			schemas[i] = strings.TrimSpace(schemas[i])
+		}
+		_ = ex.Cat.SetSearchPath(schemas)
+	}
+	if name == "role" {
+		ex.SetRole(value)
+	}
+}
+
+// GetSessionSetting retrieves a session-level GUC parameter.
+func (ex *Executor) GetSessionSetting(name string) string {
+	name = strings.ToLower(name)
+	// Check session overrides first.
+	if v, ok := ex.sessionSettings[name]; ok {
+		return v
+	}
+	// Fall back to well-known defaults.
+	switch name {
+	case "search_path":
+		return strings.Join(ex.Cat.SearchPath, ", ")
+	case "server_version":
+		return "15.0 (LolaDB)"
+	case "server_encoding", "client_encoding":
+		return "UTF8"
+	case "standard_conforming_strings", "is_superuser":
+		return "on"
+	case "transaction_isolation", "default_transaction_isolation":
+		return "read committed"
+	case "datestyle":
+		return "ISO, MDY"
+	case "timezone":
+		return "UTC"
+	case "lc_messages", "lc_monetary", "lc_numeric", "lc_time":
+		return "en_US.UTF-8"
+	case "max_identifier_length":
+		return "63"
+	case "integer_datetimes":
+		return "on"
+	default:
+		return ""
+	}
 }
 
 // SetRole sets the session-level current user for RLS policy evaluation.
@@ -241,6 +310,13 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execDeallocate(ds)
 	}
 
+	// Handle CREATE AGGREGATE (DefineStmt).
+	if ds, ok := stmt.(*parser.DefineStmt); ok {
+		if ds.Kind == parser.OBJECT_AGGREGATE {
+			return ex.execCreateAggregate(ds)
+		}
+	}
+
 	// Handle DO blocks (anonymous PL/pgSQL).
 	if ds, ok := stmt.(*parser.DoStmt); ok {
 		return ex.execDo(ds)
@@ -298,28 +374,17 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 
 	// Handle SET statements.
 	if setVar, ok := stmt.(*parser.VariableSetStmt); ok {
-		if strings.EqualFold(setVar.Name, "role") && len(setVar.Args) > 0 {
-			role := extractSetValue(setVar.Args[0])
-			if role != "" {
-				ex.SetRole(role)
-				return &Result{Message: fmt.Sprintf("SET ROLE %s", role)}, nil
+		name := strings.ToLower(setVar.Name)
+		var vals []string
+		for _, arg := range setVar.Args {
+			v := extractSetValue(arg)
+			if v != "" {
+				vals = append(vals, v)
 			}
 		}
-		if strings.EqualFold(setVar.Name, "search_path") {
-			var schemas []string
-			for _, arg := range setVar.Args {
-				v := extractSetValue(arg)
-				if v != "" {
-					schemas = append(schemas, v)
-				}
-			}
-			if len(schemas) > 0 {
-				if err := ex.Cat.SetSearchPath(schemas); err != nil {
-					return nil, err
-				}
-				return &Result{Message: fmt.Sprintf("SET search_path = %s", strings.Join(schemas, ", "))}, nil
-			}
-		}
+		value := strings.Join(vals, ", ")
+		ex.SetSessionSetting(name, value)
+		return &Result{Message: fmt.Sprintf("SET %s = %s", setVar.Name, value)}, nil
 	}
 
 	// Handle SHOW statements.
@@ -614,54 +679,12 @@ func extractSetValue(expr parser.Expr) string {
 
 func (ex *Executor) execShow(n *parser.VariableShowStmt) (*Result, error) {
 	name := strings.ToLower(n.Name)
-	switch name {
-	case "search_path":
-		val := strings.Join(ex.Cat.SearchPath, ", ")
-		return &Result{
-			Columns: []string{"search_path"},
-			Rows:    [][]tuple.Datum{{tuple.DText(val)}},
-			Message: "SHOW",
-		}, nil
-	case "transaction_isolation", "default_transaction_isolation":
-		// LolaDB uses snapshot isolation which maps to "read committed" in PG terms.
-		return &Result{
-			Columns: []string{name},
-			Rows:    [][]tuple.Datum{{tuple.DText("read committed")}},
-			Message: "SHOW",
-		}, nil
-	case "server_version":
-		return &Result{
-			Columns: []string{"server_version"},
-			Rows:    [][]tuple.Datum{{tuple.DText("15.0 (LolaDB)")}},
-			Message: "SHOW",
-		}, nil
-	case "server_encoding":
-		return &Result{
-			Columns: []string{"server_encoding"},
-			Rows:    [][]tuple.Datum{{tuple.DText("UTF8")}},
-			Message: "SHOW",
-		}, nil
-	case "client_encoding":
-		return &Result{
-			Columns: []string{"client_encoding"},
-			Rows:    [][]tuple.Datum{{tuple.DText("UTF8")}},
-			Message: "SHOW",
-		}, nil
-	case "standard_conforming_strings":
-		return &Result{
-			Columns: []string{"standard_conforming_strings"},
-			Rows:    [][]tuple.Datum{{tuple.DText("on")}},
-			Message: "SHOW",
-		}, nil
-	case "is_superuser":
-		return &Result{
-			Columns: []string{"is_superuser"},
-			Rows:    [][]tuple.Datum{{tuple.DText("on")}},
-			Message: "SHOW",
-		}, nil
-	default:
-		return &Result{Message: fmt.Sprintf("SHOW %s", n.Name)}, nil
-	}
+	val := ex.GetSessionSetting(name)
+	return &Result{
+		Columns: []string{name},
+		Rows:    [][]tuple.Datum{{tuple.DText(val)}},
+		Message: "SHOW",
+	}, nil
 }
 
 func (ex *Executor) execCreateMatView(cmv *parser.CreateMatViewStmt) (*Result, error) {
@@ -674,15 +697,41 @@ func (ex *Executor) execCreateMatView(cmv *parser.CreateMatViewStmt) (*Result, e
 
 	querySQL := parser.Deparse(cmv.Query)
 
-	// Execute the query to get column definitions and data.
-	r, err := ex.Exec(querySQL)
+	// Analyze the query through the full pipeline to get proper column types.
+	selStmt, ok := cmv.Query.(*parser.SelectStmt)
+	if !ok {
+		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: query must be a SELECT")
+	}
+	query, err := ex.analyzer.Analyze(selStmt)
 	if err != nil {
-		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: %w", err)
+		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: analyze: %w", err)
 	}
 
-	// Build column definitions from the result set.
+	// Build the logical plan.
+	logPlan, err := planner.QueryToLogicalPlan(query)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: plan: %w", err)
+	}
+
+	// Optimize to physical plan.
+	physPlan, err := ex.optimizer.Optimize(logPlan)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: optimize: %w", err)
+	}
+
+	// Execute the physical plan to get the result set.
+	r, err := ex.exec.Execute(physPlan)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: execute: %w", err)
+	}
+
+	// Build column definitions from the result set with proper types.
 	cols := make([]catalog.ColumnDef, len(r.Columns))
 	for i, colName := range r.Columns {
+		// Strip table-qualified prefix (e.g. "src.id" → "id").
+		if dot := strings.LastIndex(colName, "."); dot >= 0 {
+			colName = colName[dot+1:]
+		}
 		dt := tuple.TypeText
 		if len(r.Rows) > 0 && i < len(r.Rows[0]) {
 			dt = r.Rows[0][i].Type
@@ -693,13 +742,10 @@ func (ex *Executor) execCreateMatView(cmv *parser.CreateMatViewStmt) (*Result, e
 		cols[i] = catalog.ColumnDef{Name: colName, Type: dt, Typmod: -1}
 	}
 
-	// Create the backing table.
-	if _, err := ex.Cat.CreateTable(name, cols); err != nil {
+	// Create the materialized view in the catalog (relkind='m', with storage).
+	if _, err := ex.Cat.CreateMatView(name, cols, querySQL); err != nil {
 		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: %w", err)
 	}
-
-	// Store the query definition.
-	ex.Cat.MatViews[name] = querySQL
 
 	// Insert data if WITH DATA (default).
 	count := int64(0)
@@ -786,6 +832,60 @@ func (ex *Executor) execComment(cs *parser.CommentStmt) (*Result, error) {
 	return &Result{Message: "COMMENT"}, nil
 }
 
+// execCreateAggregate handles CREATE AGGREGATE statements.
+func (ex *Executor) execCreateAggregate(ds *parser.DefineStmt) (*Result, error) {
+	name := ""
+	if len(ds.Defnames) > 0 {
+		name = ds.Defnames[len(ds.Defnames)-1]
+	}
+	if name == "" {
+		return nil, fmt.Errorf("CREATE AGGREGATE: missing name")
+	}
+
+	aggDef := &catalog.CustomAggregateDef{Name: name}
+
+	// Extract argument types.
+	for _, arg := range ds.Args {
+		if tn, ok := arg.(*parser.TypeName); ok && len(tn.Names) > 0 {
+			aggDef.ArgTypes = append(aggDef.ArgTypes, tn.Names[len(tn.Names)-1])
+		}
+	}
+
+	// Extract definition options (sfunc, stype, initcond, finalfunc).
+	for _, d := range ds.Definition {
+		switch strings.ToLower(d.Defname) {
+		case "sfunc":
+			if s, ok := d.Arg.(*parser.String); ok {
+				aggDef.SFunc = s.Str
+			}
+		case "stype":
+			if s, ok := d.Arg.(*parser.String); ok {
+				aggDef.SType = s.Str
+			} else if tn, ok := d.Arg.(*parser.TypeName); ok && len(tn.Names) > 0 {
+				aggDef.SType = tn.Names[len(tn.Names)-1]
+			}
+		case "initcond":
+			if s, ok := d.Arg.(*parser.String); ok {
+				aggDef.InitCond = s.Str
+			}
+		case "finalfunc":
+			if s, ok := d.Arg.(*parser.String); ok {
+				aggDef.FinalFunc = s.Str
+			}
+		}
+	}
+
+	if aggDef.SFunc == "" {
+		return nil, fmt.Errorf("CREATE AGGREGATE: sfunc is required")
+	}
+	if aggDef.SType == "" {
+		return nil, fmt.Errorf("CREATE AGGREGATE: stype is required")
+	}
+
+	ex.Cat.CustomAggregates[strings.ToLower(name)] = aggDef
+	return &Result{Message: "CREATE AGGREGATE"}, nil
+}
+
 // execDo executes an anonymous PL/pgSQL block (DO $$ ... $$).
 func (ex *Executor) execDo(ds *parser.DoStmt) (*Result, error) {
 	body := ""
@@ -843,10 +943,23 @@ func (ex *Executor) execGrant(gs *parser.GrantStmt) (*Result, error) {
 	}
 
 	for _, objName := range gs.Objects {
-		tableName := objName[len(objName)-1]
-		rel, err := ex.Cat.FindRelation(tableName)
-		if err != nil || rel == nil {
-			return nil, fmt.Errorf("relation \"%s\" does not exist", tableName)
+		name := objName[len(objName)-1]
+
+		// Resolve the target object OID based on TargetType.
+		var targetOID int32
+		switch gs.TargetType {
+		case parser.OBJECT_SCHEMA:
+			targetOID = ex.Cat.SchemaOID(name)
+			if targetOID == 0 {
+				return nil, fmt.Errorf("schema \"%s\" does not exist", name)
+			}
+		default:
+			// Table / relation target (original behavior).
+			rel, err := ex.Cat.FindRelation(name)
+			if err != nil || rel == nil {
+				return nil, fmt.Errorf("relation \"%s\" does not exist", name)
+			}
+			targetOID = rel.OID
 		}
 
 		for _, grantee := range gs.Grantees {
@@ -878,10 +991,10 @@ func (ex *Executor) execGrant(gs *parser.GrantStmt) (*Result, error) {
 						if i < len(gs.PrivCols) && gs.PrivCols[i] != nil {
 							cols = gs.PrivCols[i]
 						}
-						ex.Cat.GrantObjectPrivilegeColumns(rel.OID, granteeOID, grantorOID, priv, cols)
+						ex.Cat.GrantObjectPrivilegeColumns(targetOID, granteeOID, grantorOID, priv, cols)
 					}
 				} else {
-					ex.Cat.GrantObjectPrivilege(rel.OID, granteeOID, grantorOID, privs)
+					ex.Cat.GrantObjectPrivilege(targetOID, granteeOID, grantorOID, privs)
 				}
 			} else {
 				if len(gs.PrivCols) > 0 {
@@ -891,10 +1004,10 @@ func (ex *Executor) execGrant(gs *parser.GrantStmt) (*Result, error) {
 						if i < len(gs.PrivCols) && gs.PrivCols[i] != nil {
 							cols = gs.PrivCols[i]
 						}
-						ex.Cat.RevokeObjectPrivilegeColumns(rel.OID, granteeOID, grantorOID, priv, cols)
+						ex.Cat.RevokeObjectPrivilegeColumns(targetOID, granteeOID, grantorOID, priv, cols)
 					}
 				} else {
-					ex.Cat.RevokeObjectPrivilege(rel.OID, granteeOID, grantorOID, privs)
+					ex.Cat.RevokeObjectPrivilege(targetOID, granteeOID, grantorOID, privs)
 				}
 			}
 		}
@@ -979,3 +1092,72 @@ func (ex *Executor) execCloseCursor(cp *parser.ClosePortalStmt) (*Result, error)
 	delete(ex.cursors, name)
 	return &Result{Message: "CLOSE CURSOR"}, nil
 }
+
+// execTsvectorUpdateTrigger implements the built-in tsvector_update_trigger
+// function natively in Go. It expects trigger args: [tsvec_col, config, col1, col2, ...].
+// It tokenizes the text from the source columns and builds a tsvector string
+// that is stored in the target column of NEW.
+func execTsvectorUpdateTrigger(tc *executor.TriggerContext) (map[string]tuple.Datum, error) {
+	if len(tc.TgArgs) < 3 {
+		return nil, fmt.Errorf("tsvector_update_trigger: requires at least 3 arguments (tsvec_col, config, source_col...)")
+	}
+
+	tsvecCol := tc.TgArgs[0]
+	// tc.TgArgs[1] is the text search config (e.g. "english") — we accept but
+	// don't use it for dictionary-specific stemming; we do simple tokenization.
+	srcCols := tc.TgArgs[2:]
+
+	if tc.NewRow == nil {
+		return nil, fmt.Errorf("tsvector_update_trigger: NEW is null (only valid for INSERT/UPDATE)")
+	}
+
+	// Collect text from source columns.
+	var parts []string
+	for _, col := range srcCols {
+		if d, ok := tc.NewRow[col]; ok && d.Type != tuple.TypeNull {
+			parts = append(parts, d.Text)
+		}
+	}
+
+	// Build a tsvector: tokenize words, deduplicate, sort, and format as
+	// 'word1' 'word2' ... (simplified tsvector representation).
+	tsvec := buildTsvector(strings.Join(parts, " "))
+
+	// Set the tsvector column in NEW.
+	result := make(map[string]tuple.Datum, len(tc.NewRow))
+	for k, v := range tc.NewRow {
+		result[k] = v
+	}
+	result[tsvecCol] = tuple.DText(tsvec)
+	return result, nil
+}
+
+// buildTsvector tokenizes text into a simplified tsvector representation.
+// Words are lowercased, deduplicated, sorted, and formatted as 'w1' 'w2' ...
+func buildTsvector(text string) string {
+	words := strings.Fields(strings.ToLower(text))
+	seen := make(map[string]bool, len(words))
+	var unique []string
+	for _, w := range words {
+		w = strings.Trim(w, ".,;:!?\"'()[]{}—–-")
+		if w == "" || seen[w] {
+			continue
+		}
+		seen[w] = true
+		unique = append(unique, w)
+	}
+	sort.Strings(unique)
+
+	var buf strings.Builder
+	for i, w := range unique {
+		if i > 0 {
+			buf.WriteByte(' ')
+		}
+		buf.WriteByte('\'')
+		buf.WriteString(w)
+		buf.WriteByte('\'')
+	}
+	return buf.String()
+}
+
+

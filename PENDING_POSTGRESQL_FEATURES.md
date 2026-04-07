@@ -16,7 +16,8 @@ For context, here is what is currently implemented:
 - **DDL:** CREATE/DROP TABLE, CREATE/DROP INDEX, CREATE/DROP VIEW,
   CREATE/DROP SCHEMA, CREATE SEQUENCE, ALTER TABLE (ADD/DROP COLUMN,
   ADD CONSTRAINT, RLS enable/disable), CREATE FUNCTION, CREATE TRIGGER,
-  CREATE DOMAIN, CREATE TYPE (enum), CREATE POLICY (RLS)
+  CREATE DOMAIN, CREATE TYPE (enum), CREATE POLICY (RLS),
+  CREATE AGGREGATE (user-defined aggregates with sfunc/stype/initcond/finalfunc)
 - **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, GROUP BY, HAVING,
   JOIN (INNER, LEFT, RIGHT, CROSS), DISTINCT, UNION/INTERSECT/EXCEPT,
   WITH / WITH RECURSIVE (CTEs), subqueries in FROM,
@@ -36,7 +37,9 @@ For context, here is what is currently implemented:
 - **Concurrency:** MVCC with snapshot isolation, transaction manager
 - **Optimizer:** Cost-based with DP join reordering, hash join, nested loop join,
   index scan, bitmap scan, selectivity estimation, column statistics
-- **Other:** PL/pgSQL interpreter, pgwire protocol, EXPLAIN, rewrite rules, RLS
+- **Other:** PL/pgSQL interpreter, pgwire protocol, EXPLAIN, rewrite rules, RLS,
+  set_config/current_setting (session GUC), tsvector_update_trigger (built-in),
+  GRANT/REVOKE ON SCHEMA
 
 ---
 
@@ -662,8 +665,9 @@ REFRESH MATERIALIZED VIEW monthly_sales;
 DROP MATERIALIZED VIEW monthly_sales;
 ```
 
-Implemented: CREATE, REFRESH, and DROP MATERIALIZED VIEW. Data is stored in a
-backing table and re-populated on REFRESH.
+Implemented: CREATE, REFRESH, and DROP MATERIALIZED VIEW. CREATE uses the full
+analyzer/planner/optimizer/executor pipeline for proper column type inference.
+Data is stored with relkind='m' and re-populated on REFRESH.
 
 ### 🟡 Event triggers
 

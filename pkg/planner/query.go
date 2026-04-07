@@ -345,6 +345,7 @@ type UtilityStmt struct {
 	TrigEvents     int
 	TrigForEach    string // "ROW" or "STATEMENT"
 	TrigReplace    bool
+	TrigArgs       []string // trigger function arguments
 
 	// Schema fields
 	SchemaName      string

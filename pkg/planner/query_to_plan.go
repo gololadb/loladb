@@ -420,7 +420,7 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 		return &LogicalCreateTrigger{
 			TrigName: u.TrigName, Table: u.TrigTable, FuncName: u.TrigFuncName,
 			Timing: u.TrigTiming, Events: u.TrigEvents, ForEach: u.TrigForEach,
-			Replace: u.TrigReplace,
+			Replace: u.TrigReplace, Args: u.TrigArgs,
 		}, nil
 	case UtilDropFunction:
 		return &LogicalDropFunction{Name: u.FuncName, MissingOk: u.DropMissingOk}, nil
