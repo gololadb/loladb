@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gololadb/loladb/pkg/catalog"
 	"github.com/gololadb/loladb/pkg/engine"
@@ -326,6 +327,29 @@ func insertCopyRow(cat *catalog.Catalog, tableName string, colNames []string, co
 			}
 		case tuple.TypeBool:
 			values[i] = tuple.DBool(raw == "t" || raw == "true" || raw == "TRUE" || raw == "1")
+		case tuple.TypeDate:
+			t, err := time.Parse("2006-01-02", raw)
+			if err != nil {
+				values[i] = tuple.DNull()
+			} else {
+				days := t.Unix() / 86400
+				values[i] = tuple.DDate(days)
+			}
+		case tuple.TypeTimestamp:
+			t, err := parseTimestampCopy(raw)
+			if err != nil {
+				values[i] = tuple.DNull()
+			} else {
+				us := t.UnixMicro()
+				values[i] = tuple.DTimestamp(us)
+			}
+		case tuple.TypeNumeric:
+			values[i] = tuple.DNumeric(raw)
+		case tuple.TypeJSON:
+			raw = unescapeCopyText(raw)
+			values[i] = tuple.DJSON(raw)
+		case tuple.TypeUUID:
+			values[i] = tuple.DUUID(raw)
 		default:
 			// Text and everything else stored as text.
 			// Unescape PostgreSQL COPY escapes.
@@ -619,4 +643,22 @@ func isExpectedParseFailure(sql string, err error) bool {
 	}
 
 	return false
+}
+
+// parseTimestampCopy parses common PostgreSQL COPY timestamp formats.
+func parseTimestampCopy(s string) (time.Time, error) {
+	formats := []string{
+		"2006-01-02 15:04:05.999999-07",
+		"2006-01-02 15:04:05.999999-07:00",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05-07",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognized timestamp: %q", s)
 }
