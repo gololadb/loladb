@@ -11,12 +11,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/gololadb/loladb/pkg/catalog"
-	"github.com/gololadb/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/storage"
 	loladbsql "github.com/gololadb/loladb/pkg/sql"
 )
 
 func runTUI(path string) {
-	eng, err := engine.Open(path, 0)
+	eng, err := storage.Open(path, 0)
 	if err != nil {
 		fatal(fmt.Sprintf("Failed to open database: %v", err))
 	}
@@ -99,7 +99,7 @@ type historyEntry struct {
 
 type tuiModel struct {
 	path      string
-	eng       *engine.Engine
+	eng       *storage.Engine
 	cat       *catalog.Catalog
 	exec      *loladbsql.Executor
 	input     textarea.Model
@@ -113,7 +113,7 @@ type tuiModel struct {
 	ready     bool
 }
 
-func newTUIModel(path string, eng *engine.Engine, cat *catalog.Catalog, ex *loladbsql.Executor) tuiModel {
+func newTUIModel(path string, eng *storage.Engine, cat *catalog.Catalog, ex *loladbsql.Executor) tuiModel {
 	ta := textarea.New()
 	ta.Placeholder = "Type SQL here... (Enter to execute, Shift+Enter for newline)"
 	ta.Focus()

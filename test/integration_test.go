@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gololadb/loladb/pkg/engine/freelist"
-	"github.com/gololadb/loladb/pkg/engine/pageio"
-	"github.com/gololadb/loladb/pkg/engine/slottedpage"
-	"github.com/gololadb/loladb/pkg/engine/superblock"
+	"github.com/gololadb/loladb/pkg/storage/freelist"
+	"github.com/gololadb/loladb/pkg/storage/pageio"
+	"github.com/gololadb/loladb/pkg/storage/slottedpage"
+	"github.com/gololadb/loladb/pkg/storage/superblock"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 

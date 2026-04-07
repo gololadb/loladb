@@ -14,9 +14,9 @@ import (
 
 	"github.com/gololadb/gopgsql/parser"
 	"github.com/gololadb/loladb/pkg/catalog"
-	"github.com/gololadb/loladb/pkg/engine/index"
+	"github.com/gololadb/loladb/pkg/storage/index"
 	"github.com/gololadb/loladb/pkg/planner"
-	"github.com/gololadb/loladb/pkg/engine/slottedpage"
+	"github.com/gololadb/loladb/pkg/storage/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 

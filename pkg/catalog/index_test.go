@@ -3,14 +3,14 @@ package catalog
 import (
 	"testing"
 
-	"github.com/gololadb/loladb/pkg/engine"
-	"github.com/gololadb/loladb/pkg/engine/slottedpage"
+	"github.com/gololadb/loladb/pkg/storage"
+	"github.com/gololadb/loladb/pkg/storage/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 
-func openEngine(t *testing.T, path string) (*engine.Engine, error) {
+func openEngine(t *testing.T, path string) (*storage.Engine, error) {
 	t.Helper()
-	return engine.Open(path, 32)
+	return storage.Open(path, 32)
 }
 
 func TestCreateIndex(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/gololadb/loladb/pkg/catalog"
-	"github.com/gololadb/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/storage"
 	"github.com/gololadb/loladb/pkg/sql"
 )
 
@@ -18,7 +18,7 @@ func newPagilaDB(t *testing.T) *sql.Executor {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pagila.lodb")
-	eng, err := engine.Open(path, 4096) // larger buffer pool for bulk load
+	eng, err := storage.Open(path, 4096) // larger buffer pool for bulk load
 	if err != nil {
 		t.Fatal(err)
 	}

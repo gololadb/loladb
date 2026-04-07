@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gololadb/loladb/pkg/engine"
-	"github.com/gololadb/loladb/pkg/engine/slottedpage"
+	"github.com/gololadb/loladb/pkg/storage"
+	"github.com/gololadb/loladb/pkg/storage/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 
@@ -13,7 +13,7 @@ func newTestCatalog(t *testing.T) *Catalog {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.lodb")
-	eng, err := engine.Open(path, 32)
+	eng, err := storage.Open(path, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestPersistAcrossRestart(t *testing.T) {
 	path := filepath.Join(dir, "test.lodb")
 
 	// Session 1: create table and insert
-	eng, err := engine.Open(path, 32)
+	eng, err := storage.Open(path, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestPersistAcrossRestart(t *testing.T) {
 	eng.Close()
 
 	// Session 2: reopen and verify
-	eng2, err := engine.Open(path, 32)
+	eng2, err := storage.Open(path, 32)
 	if err != nil {
 		t.Fatal(err)
 	}

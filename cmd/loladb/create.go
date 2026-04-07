@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/gololadb/loladb/pkg/catalog"
-	"github.com/gololadb/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/storage"
 )
 
 func runCreate(path string) {
@@ -13,7 +13,7 @@ func runCreate(path string) {
 		fatal(fmt.Sprintf("File already exists: %s", path))
 	}
 
-	eng, err := engine.Open(path, 0)
+	eng, err := storage.Open(path, 0)
 	if err != nil {
 		fatal(fmt.Sprintf("Failed to create database: %v", err))
 	}

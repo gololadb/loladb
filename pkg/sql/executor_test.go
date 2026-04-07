@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/gololadb/loladb/pkg/catalog"
-	"github.com/gololadb/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/storage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 
@@ -16,7 +16,7 @@ func newTestExecutor(t *testing.T) *Executor {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.lodb")
-	eng, err := engine.Open(path, 64)
+	eng, err := storage.Open(path, 64)
 	if err != nil {
 		t.Fatal(err)
 	}

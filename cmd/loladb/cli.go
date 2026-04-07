@@ -9,12 +9,12 @@ import (
 	"github.com/chzyer/readline"
 
 	"github.com/gololadb/loladb/pkg/catalog"
-	"github.com/gololadb/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/storage"
 	"github.com/gololadb/loladb/pkg/sql"
 )
 
 func runCLI(path string) {
-	eng, err := engine.Open(path, 0)
+	eng, err := storage.Open(path, 0)
 	if err != nil {
 		fatal(fmt.Sprintf("Failed to open database: %v", err))
 	}

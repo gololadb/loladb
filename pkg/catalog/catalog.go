@@ -5,17 +5,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gololadb/loladb/pkg/engine"
-	"github.com/gololadb/loladb/pkg/engine/index"
-	"github.com/gololadb/loladb/pkg/engine/index/brin"
-	"github.com/gololadb/loladb/pkg/engine/index/btree"
-	"github.com/gololadb/loladb/pkg/engine/index/gin"
-	"github.com/gololadb/loladb/pkg/engine/index/gist"
-	"github.com/gololadb/loladb/pkg/engine/index/hash"
-	"github.com/gololadb/loladb/pkg/engine/index/spgist"
+	"github.com/gololadb/loladb/pkg/storage"
+	"github.com/gololadb/loladb/pkg/storage/index"
+	"github.com/gololadb/loladb/pkg/storage/index/brin"
+	"github.com/gololadb/loladb/pkg/storage/index/btree"
+	"github.com/gololadb/loladb/pkg/storage/index/gin"
+	"github.com/gololadb/loladb/pkg/storage/index/gist"
+	"github.com/gololadb/loladb/pkg/storage/index/hash"
+	"github.com/gololadb/loladb/pkg/storage/index/spgist"
 	"github.com/gololadb/loladb/pkg/mvcc"
-	"github.com/gololadb/loladb/pkg/engine/slottedpage"
-	"github.com/gololadb/loladb/pkg/engine/toast"
+	"github.com/gololadb/loladb/pkg/storage/slottedpage"
+	"github.com/gololadb/loladb/pkg/storage/toast"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 
@@ -85,7 +85,7 @@ type IndexInfo struct {
 
 // engineAllocator adapts the engine to the index.PageAllocator interface.
 type engineAllocator struct {
-	eng *engine.Engine
+	eng *storage.Engine
 }
 
 func (a *engineAllocator) AllocPage() (uint32, error)              { return a.eng.AllocPage() }
@@ -125,7 +125,7 @@ type ForeignKey struct {
 }
 
 type Catalog struct {
-	Eng        *engine.Engine
+	Eng        *storage.Engine
 	alloc      *engineAllocator // shared page allocator
 	IdxAMs     map[string]index.IndexAM // AM registry: method name → IndexAM
 	Rules      *ruleStore       // in-memory rewrite rule storage (pg_rewrite)
@@ -190,7 +190,7 @@ type PartitionChild struct {
 
 // New wraps an engine with catalog operations. If the database is
 // freshly created (PgClassPage == 0), it bootstraps the system tables.
-func New(eng *engine.Engine) (*Catalog, error) {
+func New(eng *storage.Engine) (*Catalog, error) {
 	alloc := &engineAllocator{eng: eng}
 	ams := map[string]index.IndexAM{
 		"btree":  btree.NewAM(alloc),
@@ -2338,7 +2338,7 @@ func datumKey(d tuple.Datum) string {
 }
 
 // Vacuum reclaims space from dead tuples in the named table.
-func (c *Catalog) Vacuum(tableName string) (*engine.VacuumResult, error) {
+func (c *Catalog) Vacuum(tableName string) (*storage.VacuumResult, error) {
 	rel, err := c.FindRelation(tableName)
 	if err != nil {
 		return nil, err

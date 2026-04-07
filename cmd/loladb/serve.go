@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/gololadb/loladb/pkg/catalog"
-	"github.com/gololadb/loladb/pkg/engine"
+	"github.com/gololadb/loladb/pkg/storage"
 	"github.com/gololadb/loladb/pkg/pgwire"
 	"github.com/gololadb/loladb/pkg/sql"
 )
@@ -252,7 +252,7 @@ func runServe(args []string) {
 		fatal("Usage: loladb serve <path> [addr] [--tls-cert FILE --tls-key FILE] [--no-tls] [--no-auth]")
 	}
 
-	eng, err := engine.Open(opts.path, 0)
+	eng, err := storage.Open(opts.path, 0)
 	if err != nil {
 		fatal(fmt.Sprintf("Failed to open database: %v", err))
 	}
