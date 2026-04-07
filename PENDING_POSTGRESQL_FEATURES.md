@@ -15,7 +15,9 @@ For context, here is what is currently implemented:
   INSERT/UPDATE/DELETE ... RETURNING
 - **DDL:** CREATE/DROP TABLE, CREATE/DROP INDEX, CREATE/DROP VIEW,
   CREATE/DROP SCHEMA, CREATE SEQUENCE, ALTER TABLE (ADD/DROP COLUMN,
-  ADD CONSTRAINT, RLS enable/disable), CREATE FUNCTION, CREATE TRIGGER,
+  ADD CONSTRAINT, OWNER TO, RLS enable/disable), ALTER TABLE ONLY,
+  ALTER TABLE ATTACH/DETACH PARTITION, CREATE TABLE ... PARTITION BY
+  (RANGE/LIST/HASH), CREATE FUNCTION, CREATE TRIGGER,
   CREATE DOMAIN, CREATE TYPE (enum), CREATE POLICY (RLS),
   CREATE AGGREGATE (user-defined aggregates with sfunc/stype/initcond/finalfunc)
 - **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, FETCH FIRST/OFFSET ROWS,
@@ -363,12 +365,20 @@ CREATE TABLE cities (name TEXT, population INT);
 CREATE TABLE capitals (state TEXT) INHERITS (cities);
 ```
 
-### 🟡 Partitioned tables (PARTITION BY RANGE/LIST/HASH)
+### ✅ Partitioned tables (PARTITION BY RANGE/LIST/HASH)
 
 ```sql
 CREATE TABLE logs (ts TIMESTAMP, msg TEXT) PARTITION BY RANGE (ts);
-CREATE TABLE logs_2024 PARTITION OF logs FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+CREATE TABLE logs_2024 (ts TIMESTAMP, msg TEXT);
+ALTER TABLE logs ATTACH PARTITION logs_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
 ```
+
+Implemented: CREATE TABLE ... PARTITION BY {RANGE|LIST|HASH} stores partition
+metadata. Child tables are attached via ALTER TABLE ... ATTACH PARTITION
+(LIST with IN, RANGE with FROM/TO, DEFAULT). INSERTs into the parent are
+routed to the matching child. SELECTs on the parent scan all children.
+DETACH PARTITION is also supported. Note: CREATE TABLE ... PARTITION OF
+syntax is not yet supported — use CREATE TABLE + ATTACH PARTITION instead.
 
 ### 🟢 CREATE TABLESPACE
 
@@ -722,7 +732,6 @@ SELECT pg_advisory_lock(12345);
 |---|---|
 | GROUPING SETS / CUBE / ROLLUP | Queries |
 | FOR UPDATE / FOR SHARE | Transactions |
-| Table partitioning | DDL |
 | JSON additional operators (`?|`, `?&`, `-`, `#-`) | Operators |
 | Array operators and indexing | Types |
 | Ordered-set aggregates | Aggregates |

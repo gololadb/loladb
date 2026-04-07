@@ -281,6 +281,11 @@ func (ex *Executor) SetRole(role string) {
 // Exec parses and executes one or more SQL statements through the
 // full pipeline: parse → analyze → plan → optimize → execute.
 func (ex *Executor) Exec(sql string) (*Result, error) {
+	// Pre-parse: handle statements the parser doesn't support.
+	if r, handled := ex.tryPreParse(sql); handled {
+		return r, nil
+	}
+
 	stmts, err := parser.Parse(strings.NewReader(sql), nil)
 	if err != nil {
 		if ex.txState == TxActive {
@@ -318,6 +323,11 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 			return r, nil
 		}
 		// Fall through to analyzer for ADD COLUMN, DROP COLUMN, etc.
+	}
+
+	// Handle ALTER ... OWNER TO for non-table objects.
+	if ao, ok := stmt.(*parser.AlterOwnerStmt); ok {
+		return ex.execAlterOwnerStmt(ao)
 	}
 
 	// Handle COPY statements (bypass analyzer — COPY is a utility).

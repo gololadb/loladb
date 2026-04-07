@@ -152,6 +152,25 @@ type Catalog struct {
 
 	// CustomAggregates stores user-defined aggregate definitions keyed by name.
 	CustomAggregates map[string]*CustomAggregateDef
+
+	// Partitions stores partition metadata keyed by parent table name.
+	Partitions map[string]*PartitionInfo
+}
+
+// PartitionInfo describes a partitioned table.
+type PartitionInfo struct {
+	Strategy string   // "range", "list", or "hash"
+	KeyCols  []string // partition key column names
+	Children []PartitionChild
+}
+
+// PartitionChild describes a child partition attached to a partitioned table.
+type PartitionChild struct {
+	TableName  string   // child table name
+	BoundType  string   // "range", "list", or "default"
+	ListValues []string // for LIST partitions: literal values
+	RangeFrom  []string // for RANGE partitions: lower bound values (inclusive)
+	RangeTo    []string // for RANGE partitions: upper bound values (exclusive)
 }
 
 // New wraps an engine with catalog operations. If the database is
@@ -181,6 +200,7 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		Comments:         make(map[string]string),
 		MatViews:         make(map[string]string),
 		CustomAggregates: make(map[string]*CustomAggregateDef),
+		Partitions:       make(map[string]*PartitionInfo),
 	}
 
 	if eng.Super.PgClassPage == 0 {
@@ -1450,6 +1470,54 @@ func (c *Catalog) RenameRelation(oldName, newName string) error {
 	}
 
 	oldRow[PgClassRelname] = tuple.DText(newName)
+
+	if err := c.Eng.Delete(xid, targetID); err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+	if _, err := c.Eng.Insert(xid, c.Eng.Super.PgClassPage, oldRow); err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+
+	c.Eng.TxMgr.Commit(xid)
+	c.cache.invalidate()
+	return nil
+}
+
+// ChangeRelationOwner updates the relowner column in pg_class for the given relation.
+func (c *Catalog) ChangeRelationOwner(tableName string, newOwnerOID int32) error {
+	rel, err := c.FindRelation(tableName)
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		return fmt.Errorf("catalog: relation %q not found", tableName)
+	}
+
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+
+	var targetID slottedpage.ItemID
+	var oldRow []tuple.Datum
+	found := false
+	c.Eng.SeqScan(c.Eng.Super.PgClassPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) > PgClassRelowner && tup.Columns[PgClassOID].I32 == rel.OID {
+			targetID = id
+			oldRow = make([]tuple.Datum, len(tup.Columns))
+			copy(oldRow, tup.Columns)
+			found = true
+			return false
+		}
+		return true
+	})
+
+	if !found {
+		c.Eng.TxMgr.Commit(xid)
+		return fmt.Errorf("catalog: relation %q not found in pg_class", tableName)
+	}
+
+	oldRow[PgClassRelowner] = tuple.DInt32(newOwnerOID)
 
 	if err := c.Eng.Delete(xid, targetID); err != nil {
 		c.Eng.TxMgr.Abort(xid)

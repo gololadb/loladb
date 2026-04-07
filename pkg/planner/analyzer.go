@@ -2477,10 +2477,24 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		}
 	}
 
+	// Extract partition spec if present.
+	var partStrategy string
+	var partKeyCols []string
+	if n.PartitionSpec != nil {
+		partStrategy = strings.ToLower(n.PartitionSpec.Strategy)
+		for _, pe := range n.PartitionSpec.PartParams {
+			if pe.Name != "" {
+				partKeyCols = append(partKeyCols, pe.Name)
+			}
+		}
+	}
+
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
 		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName,
 		Columns: cols, ForeignKeys: foreignKeys,
-		IsTemp: n.Persistence == parser.RELPERSISTENCE_TEMP,
+		IsTemp:            n.Persistence == parser.RELPERSISTENCE_TEMP,
+		PartitionStrategy: partStrategy,
+		PartitionKeyCols:  partKeyCols,
 	}), nil
 }
 

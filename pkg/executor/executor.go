@@ -526,6 +526,24 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 	}
 
 	result := &Result{Columns: colNames}
+
+	// If this is a partitioned parent, scan all child partitions instead.
+	if pinfo, ok := ex.Cat.Partitions[n.Table]; ok && len(pinfo.Children) > 0 {
+		for _, child := range pinfo.Children {
+			ex.Cat.SeqScan(child.TableName, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+				row := &planner.Row{Columns: tup.Columns, Names: colNames}
+				if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
+					return true
+				}
+				rowCopy := make([]tuple.Datum, len(tup.Columns))
+				copy(rowCopy, tup.Columns)
+				result.Rows = append(result.Rows, rowCopy)
+				return true
+			})
+		}
+		return result, nil
+	}
+
 	ex.Cat.SeqScan(n.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
 		row := &planner.Row{Columns: tup.Columns, Names: colNames}
 		if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
@@ -2263,6 +2281,12 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		return nil, err
 	}
 
+	// Partition routing: if the target is a partitioned parent, route each row
+	// to the correct child partition. A partitioned parent never holds data directly.
+	if pinfo, ok := ex.Cat.Partitions[n.Table]; ok {
+		return ex.execInsertPartitioned(n, pinfo)
+	}
+
 	tableCols := ex.getTableColumns(n.Table)
 	colNames := make([]string, len(tableCols))
 	for i, c := range tableCols {
@@ -2880,7 +2904,149 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 		ex.Cat.TempTables[n.Table] = true
 	}
 
+	// Register partition metadata for partitioned tables.
+	if n.PartitionStrategy != "" {
+		ex.Cat.Partitions[n.Table] = &catalog.PartitionInfo{
+			Strategy: n.PartitionStrategy,
+			KeyCols:  n.PartitionKeyCols,
+		}
+	}
+
 	return &Result{Message: fmt.Sprintf("CREATE TABLE %s", n.Table)}, nil
+}
+
+// execInsertPartitioned routes INSERT rows to the correct child partition.
+func (ex *Executor) execInsertPartitioned(n *planner.PhysInsert, pinfo *catalog.PartitionInfo) (*Result, error) {
+	parentCols := ex.getTableColumns(n.Table)
+	parentColNames := make([]string, len(parentCols))
+	for i, c := range parentCols {
+		parentColNames[i] = c.Name
+	}
+
+	// Find the partition key column index in the parent table.
+	keyColIdxs := make([]int, len(pinfo.KeyCols))
+	for k, keyCol := range pinfo.KeyCols {
+		found := false
+		for i, cn := range parentColNames {
+			if strings.EqualFold(cn, keyCol) {
+				keyColIdxs[k] = i
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("partition key column %q not found in table %q", keyCol, n.Table)
+		}
+	}
+
+	// If explicit column list, remap key index.
+	if len(n.Columns) > 0 {
+		for k, keyCol := range pinfo.KeyCols {
+			found := false
+			for i, cn := range n.Columns {
+				if strings.EqualFold(cn, keyCol) {
+					keyColIdxs[k] = i
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("partition key column %q must be specified in INSERT", keyCol)
+			}
+		}
+	}
+
+	var totalCount int64
+	for _, rowExprs := range n.Values {
+		provided := make([]tuple.Datum, len(rowExprs))
+		for i, expr := range rowExprs {
+			val, err := expr.Eval(&planner.Row{})
+			if err != nil {
+				return nil, err
+			}
+			provided[i] = val
+		}
+
+		// Determine partition key value(s).
+		keyVals := make([]string, len(keyColIdxs))
+		for k, idx := range keyColIdxs {
+			if idx < len(provided) {
+				keyVals[k] = datumToStringVal(provided[idx])
+			}
+		}
+
+		// Find matching child partition.
+		childTable := ""
+		for _, child := range pinfo.Children {
+			if matchesPartition(pinfo.Strategy, child, keyVals) {
+				childTable = child.TableName
+				break
+			}
+		}
+		if childTable == "" {
+			// Check for a default partition.
+			for _, child := range pinfo.Children {
+				if child.BoundType == "default" {
+					childTable = child.TableName
+					break
+				}
+			}
+		}
+		if childTable == "" {
+			return nil, fmt.Errorf("no partition of relation %q found for row", n.Table)
+		}
+
+		// Redirect the single row to the child table.
+		childInsert := &planner.PhysInsert{
+			Table:   childTable,
+			Columns: n.Columns,
+			Values:  [][]planner.Expr{rowExprs},
+		}
+		r, err := ex.execInsert(childInsert)
+		if err != nil {
+			return nil, err
+		}
+		totalCount += r.RowsAffected
+	}
+
+	return &Result{
+		Message:      fmt.Sprintf("INSERT 0 %d", totalCount),
+		RowsAffected: totalCount,
+	}, nil
+}
+
+// matchesPartition checks if key values match a child partition's bounds.
+func matchesPartition(strategy string, child catalog.PartitionChild, keyVals []string) bool {
+	switch strategy {
+	case "list":
+		if child.BoundType == "default" {
+			return false // default is checked as fallback
+		}
+		if len(keyVals) == 0 {
+			return false
+		}
+		for _, lv := range child.ListValues {
+			if strings.EqualFold(strings.TrimSpace(lv), strings.TrimSpace(keyVals[0])) {
+				return true
+			}
+		}
+	case "range":
+		if child.BoundType == "default" {
+			return false
+		}
+		if len(keyVals) == 0 || len(child.RangeFrom) == 0 || len(child.RangeTo) == 0 {
+			return false
+		}
+		// Simple string comparison for the first key column.
+		val := strings.TrimSpace(keyVals[0])
+		from := strings.TrimSpace(child.RangeFrom[0])
+		to := strings.TrimSpace(child.RangeTo[0])
+		return val >= from && val < to
+	case "hash":
+		// Hash partitioning: not commonly used, accept any child for now.
+		return true
+	}
+	return false
 }
 
 func parseFKAction(s string) catalog.ForeignKeyAction {

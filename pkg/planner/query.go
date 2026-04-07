@@ -361,6 +361,21 @@ type UtilityStmt struct {
 	AlterColDef     *ColDef // column definition for ADD COLUMN
 	AlterIfNotExists bool  // IF NOT EXISTS for ADD COLUMN
 	AlterIfExists   bool   // IF EXISTS for DROP COLUMN
+
+	// Partition fields
+	PartitionStrategy string   // "range", "list", or "hash"
+	PartitionKeyCols  []string // partition key column names
+
+	// ALTER TABLE ... OWNER TO
+	NewOwner string
+}
+
+// PartitionBound describes the bounds for ATTACH PARTITION.
+type PartitionBound struct {
+	BoundType  string   // "range", "list", or "default"
+	ListValues []string
+	RangeFrom  []string
+	RangeTo    []string
 }
 
 type UtilityType int

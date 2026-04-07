@@ -231,11 +231,13 @@ func (n *LogicalUpdate) String() string        { return fmt.Sprintf("Update(%s)"
 func (n *LogicalUpdate) OutputColumns() []string { return n.ReturningNames }
 
 type LogicalCreateTable struct {
-	Table       string
-	Schema      string // target schema (empty = current)
-	Columns     []ColDef
-	ForeignKeys []ForeignKeyDef
-	IsTemp      bool // CREATE TEMPORARY TABLE
+	Table             string
+	Schema            string // target schema (empty = current)
+	Columns           []ColDef
+	ForeignKeys       []ForeignKeyDef
+	IsTemp            bool   // CREATE TEMPORARY TABLE
+	PartitionStrategy string // "range", "list", "hash", or "" (not partitioned)
+	PartitionKeyCols  []string
 }
 
 type ColDef struct {
