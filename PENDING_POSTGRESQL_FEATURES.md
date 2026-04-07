@@ -333,13 +333,16 @@ CREATE TABLE logs_2024 PARTITION OF logs FOR VALUES FROM ('2024-01-01') TO ('202
 
 ## 7. Functions and Operators
 
-### 🔴 Type casting with `::`
+### ✅ Type casting with `::`
 
 ```sql
 SELECT '42'::integer;
 ```
 
-CAST(x AS type) works, but the `::` shorthand syntax support depends on the parser.
+Both `CAST(x AS type)` and `::` shorthand syntax supported. Casts between
+text, integer, bigint, float, boolean, date, timestamp, numeric, json,
+uuid, interval, bytea, and arrays. Chained casts (`42::text::integer`)
+and casts in expressions (`WHERE val::integer > 100`) work.
 
 ### 🟡 Array constructors and operators
 
@@ -623,7 +626,7 @@ SELECT pg_advisory_lock(12345);
 | Feature | Category |
 |---|---|
 
-| Type casting with `::` | Operators |
+
 | COPY | Bulk I/O |
 | VACUUM | Maintenance |
 | information_schema | Introspection |
