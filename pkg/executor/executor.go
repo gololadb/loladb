@@ -762,6 +762,12 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 		return ex.execParamNestedLoop(n)
 	}
 
+	// LATERAL subquery: re-execute inner plan per outer row with outer
+	// column values visible via OuterRowContext.
+	if sub, ok := n.Inner.(*planner.PhysSubqueryScan); ok && sub.Lateral {
+		return ex.execLateralNestedLoop(n, sub)
+	}
+
 	outer, err := ex.Execute(n.Outer)
 	if err != nil {
 		return nil, err
@@ -813,6 +819,66 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 				nulls[i] = tuple.DNull()
 			}
 			combined := append(append([]tuple.Datum{}, nulls...), innerRow...)
+			result.Rows = append(result.Rows, combined)
+		}
+	}
+
+	return result, nil
+}
+
+// execLateralNestedLoop executes a nested loop where the inner side is a
+// LATERAL subquery. For each outer row, the inner plan is re-executed with
+// the outer row's columns visible via OuterRowContext.
+func (ex *Executor) execLateralNestedLoop(n *planner.PhysNestedLoopJoin, sub *planner.PhysSubqueryScan) (*Result, error) {
+	outer, err := ex.Execute(n.Outer)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build inner column names.
+	innerColNames := make([]string, len(sub.Columns))
+	for i, c := range sub.Columns {
+		innerColNames[i] = sub.Alias + "." + c
+	}
+	colNames := append(outer.Columns, innerColNames...)
+	result := &Result{Columns: colNames}
+
+	savedOuter := planner.OuterRowContext
+	defer func() { planner.OuterRowContext = savedOuter }()
+
+	for _, outerRow := range outer.Rows {
+		// Set the outer row context so ExprColumn.Eval can resolve
+		// references to outer table columns.
+		planner.OuterRowContext = &planner.Row{
+			Columns: outerRow,
+			Names:   outer.Columns,
+		}
+
+		inner, err := ex.Execute(sub.Child)
+		if err != nil {
+			return nil, fmt.Errorf("executor: lateral subquery %q: %w", sub.Alias, err)
+		}
+
+		matched := false
+		for _, innerRow := range inner.Rows {
+			combined := append(append([]tuple.Datum{}, outerRow...), innerRow...)
+			if n.Condition != nil {
+				r := &planner.Row{Columns: combined, Names: colNames}
+				if !planner.EvalBool(n.Condition, r) {
+					continue
+				}
+			}
+			matched = true
+			result.Rows = append(result.Rows, combined)
+		}
+
+		// LEFT JOIN: emit outer row with NULLs if no match.
+		if !matched && (n.Type == planner.JoinLeft || n.Type == planner.JoinFull) {
+			nulls := make([]tuple.Datum, len(innerColNames))
+			for i := range nulls {
+				nulls[i] = tuple.DNull()
+			}
+			combined := append(append([]tuple.Datum{}, outerRow...), nulls...)
 			result.Rows = append(result.Rows, combined)
 		}
 	}
@@ -1052,6 +1118,13 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 		vals   []tuple.Datum // for DISTINCT
 		strBuf strings.Builder // for string_agg
 		arrBuf []tuple.Datum   // for array_agg
+		// Two-variable statistics (corr, covar, regr_*).
+		sumX   float64
+		sumY   float64
+		sumXX  float64
+		sumYY  float64
+		sumXY  float64
+		countN int64 // count of non-null pairs
 	}
 
 	type groupEntry struct {
@@ -1150,6 +1223,24 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				v := datumToFloat64(val)
 				st.sum += v
 				st.sumSq += v * v
+			case "corr", "covar_pop", "covar_samp",
+				"regr_slope", "regr_intercept", "regr_count", "regr_r2",
+				"regr_avgx", "regr_avgy", "regr_sxx", "regr_syy", "regr_sxy":
+				// Two-variable: first arg = Y, second arg = X.
+				y := datumToFloat64(val)
+				x := 0.0
+				if len(ad.ArgExprs) >= 2 {
+					xv, err := ad.ArgExprs[1].Eval(r)
+					if err == nil && xv.Type != tuple.TypeNull {
+						x = datumToFloat64(xv)
+					}
+				}
+				st.sumX += x
+				st.sumY += y
+				st.sumXX += x * x
+				st.sumYY += y * y
+				st.sumXY += x * y
+				st.countN++
 			case "min":
 				if !st.hasVal || planner.CompareDatums(val, st.min) < 0 {
 					st.min = val
@@ -1352,6 +1443,111 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				} else {
 					n := float64(st.count)
 					row = append(row, tuple.DFloat64((st.sumSq-st.sum*st.sum/n)/n))
+				}
+			case "corr":
+				if st.countN < 2 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					covXY := st.sumXY - st.sumX*st.sumY/n
+					varX := st.sumXX - st.sumX*st.sumX/n
+					varY := st.sumYY - st.sumY*st.sumY/n
+					if varX == 0 || varY == 0 {
+						row = append(row, tuple.DNull())
+					} else {
+						row = append(row, tuple.DFloat64(covXY/math.Sqrt(varX*varY)))
+					}
+				}
+			case "covar_pop":
+				if st.countN == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					row = append(row, tuple.DFloat64((st.sumXY-st.sumX*st.sumY/n)/n))
+				}
+			case "covar_samp":
+				if st.countN < 2 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					row = append(row, tuple.DFloat64((st.sumXY-st.sumX*st.sumY/n)/(n-1)))
+				}
+			case "regr_slope":
+				if st.countN < 2 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					varX := st.sumXX - st.sumX*st.sumX/n
+					if varX == 0 {
+						row = append(row, tuple.DNull())
+					} else {
+						covXY := st.sumXY - st.sumX*st.sumY/n
+						row = append(row, tuple.DFloat64(covXY/varX))
+					}
+				}
+			case "regr_intercept":
+				if st.countN < 2 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					varX := st.sumXX - st.sumX*st.sumX/n
+					if varX == 0 {
+						row = append(row, tuple.DNull())
+					} else {
+						covXY := st.sumXY - st.sumX*st.sumY/n
+						slope := covXY / varX
+						row = append(row, tuple.DFloat64(st.sumY/n-slope*st.sumX/n))
+					}
+				}
+			case "regr_count":
+				row = append(row, tuple.DInt64(st.countN))
+			case "regr_r2":
+				if st.countN < 2 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					varX := st.sumXX - st.sumX*st.sumX/n
+					varY := st.sumYY - st.sumY*st.sumY/n
+					if varX == 0 || varY == 0 {
+						row = append(row, tuple.DNull())
+					} else {
+						covXY := st.sumXY - st.sumX*st.sumY/n
+						r := covXY / math.Sqrt(varX*varY)
+						row = append(row, tuple.DFloat64(r*r))
+					}
+				}
+			case "regr_avgx":
+				if st.countN == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, tuple.DFloat64(st.sumX/float64(st.countN)))
+				}
+			case "regr_avgy":
+				if st.countN == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					row = append(row, tuple.DFloat64(st.sumY/float64(st.countN)))
+				}
+			case "regr_sxx":
+				if st.countN == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					row = append(row, tuple.DFloat64(st.sumXX-st.sumX*st.sumX/n))
+				}
+			case "regr_syy":
+				if st.countN == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					row = append(row, tuple.DFloat64(st.sumYY-st.sumY*st.sumY/n))
+				}
+			case "regr_sxy":
+				if st.countN == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.countN)
+					row = append(row, tuple.DFloat64(st.sumXY-st.sumX*st.sumY/n))
 				}
 			case "percentile_cont":
 				if len(st.arrBuf) == 0 {

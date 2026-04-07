@@ -18,17 +18,20 @@ For context, here is what is currently implemented:
   ADD CONSTRAINT, RLS enable/disable), CREATE FUNCTION, CREATE TRIGGER,
   CREATE DOMAIN, CREATE TYPE (enum), CREATE POLICY (RLS),
   CREATE AGGREGATE (user-defined aggregates with sfunc/stype/initcond/finalfunc)
-- **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, GROUP BY, HAVING,
-  JOIN (INNER, LEFT, RIGHT, CROSS), DISTINCT, UNION/INTERSECT/EXCEPT,
-  WITH / WITH RECURSIVE (CTEs), subqueries in FROM,
+- **Clauses:** WHERE, ORDER BY, LIMIT, OFFSET, FETCH FIRST/OFFSET ROWS,
+  GROUP BY, HAVING,
+  JOIN (INNER, LEFT, RIGHT, CROSS), LATERAL joins, DISTINCT,
+  UNION/INTERSECT/EXCEPT, WITH / WITH RECURSIVE (CTEs), subqueries in FROM,
   subqueries in expressions (IN, EXISTS, NOT IN, ANY, ALL, scalar, correlated)
 - **Expressions:** Arithmetic (+, -, *, /, %), comparison (=, <>, <, >, <=, >=),
   AND/OR/NOT, IS [NOT] NULL, IS TRUE/FALSE/UNKNOWN, CASE (simple + searched),
   CAST, COALESCE, NULLIF, GREATEST, LEAST, LIKE/ILIKE/NOT LIKE/NOT ILIKE,
   BETWEEN, IN (value list), IS [NOT] DISTINCT FROM, string concatenation (`||`),
-  JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`)
+  array concatenation (`||`), JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`)
 - **Constraints:** PRIMARY KEY, UNIQUE (with auto-index creation and enforcement)
-- **Aggregates:** count, sum, avg, min, max, bool_and, bool_or, every, string_agg, array_agg
+- **Aggregates:** count, sum, avg, min, max, bool_and, bool_or, every, string_agg, array_agg,
+  corr, covar_pop, covar_samp, regr_slope, regr_intercept, regr_count, regr_r2,
+  regr_avgx, regr_avgy, regr_sxx, regr_syy, regr_sxy
 - **Functions:** ~65 scalar functions (math, string, date/time, regex, formatting, encoding)
 - **Types:** int32, int64, float64, text, bool, date, timestamp, numeric (with precision/scale),
   json/jsonb, uuid, interval, bytea, money, arrays (+ domains, enums)
@@ -37,7 +40,9 @@ For context, here is what is currently implemented:
 - **Concurrency:** MVCC with snapshot isolation, transaction manager
 - **Optimizer:** Cost-based with DP join reordering, hash join, nested loop join,
   index scan, bitmap scan, selectivity estimation, column statistics
-- **Other:** PL/pgSQL interpreter, pgwire protocol, EXPLAIN, rewrite rules, RLS,
+- **Other:** PL/pgSQL interpreter (EXCEPTION blocks, FOREACH ARRAY,
+  RETURN NEXT/QUERY, user-defined function calls in SQL expressions),
+  pgwire protocol, EXPLAIN, rewrite rules, RLS,
   set_config/current_setting (session GUC), tsvector_update_trigger (built-in),
   GRANT/REVOKE ON SCHEMA
 
@@ -151,13 +156,16 @@ SELECT * FROM a FULL OUTER JOIN b ON a.id = b.id;
 
 Implemented in nested loop and hash join executors with inner-row tracking.
 
-### 🟡 LATERAL joins
+### ✅ LATERAL joins
 
 ```sql
 SELECT * FROM users u, LATERAL (
   SELECT * FROM orders o WHERE o.user_id = u.id ORDER BY date DESC LIMIT 3
 ) recent;
 ```
+
+Implemented: analyzer marks outer column references for lateral subqueries;
+executor re-evaluates inner plan per outer row via OuterRowContext.
 
 ### ✅ GROUPING SETS / CUBE / ROLLUP
 
@@ -193,9 +201,10 @@ Implemented: column alias lists on both table and subquery aliases.
 SELECT * FROM big_table TABLESAMPLE BERNOULLI(10);
 ```
 
-### 🟢 FETCH FIRST / OFFSET ... ROWS (SQL standard syntax)
+### ✅ FETCH FIRST / OFFSET ... ROWS (SQL standard syntax)
 
-LIMIT/OFFSET work, but the SQL:2008 standard syntax is not supported.
+Implemented: parser already translates FETCH FIRST N ROWS ONLY → LIMIT N
+and OFFSET N ROWS → OFFSET N, so standard syntax works out of the box.
 
 ---
 
@@ -317,7 +326,9 @@ CREATE TABLE new_users (LIKE users INCLUDING ALL);
 Copies column definitions (name, type, NOT NULL, defaults, generated) from
 the source table. Additional columns can be added alongside LIKE.
 
-### 🟡 ALTER INDEX
+### ✅ ALTER INDEX RENAME
+
+Implemented: `ALTER INDEX old_name RENAME TO new_name` via RenameStmt handler.
 
 ### ✅ REINDEX
 
@@ -427,11 +438,12 @@ SELECT mode() WITHIN GROUP (ORDER BY status) FROM orders;
 Implemented: `percentile_cont` (continuous interpolation), `percentile_disc`
 (discrete), `mode` (most frequent value).
 
-### ✅ Statistical aggregates (basic)
+### ✅ Statistical aggregates (basic + two-variable)
 
 Implemented: `stddev`, `stddev_pop`, `stddev_samp`, `variance`, `var_pop`,
-`var_samp`. Still missing: `corr`, `covar_pop`, `covar_samp`, `regr_*`
-(two-variable statistics).
+`var_samp`, `corr`, `covar_pop`, `covar_samp`, `regr_slope`, `regr_intercept`,
+`regr_count`, `regr_r2`, `regr_avgx`, `regr_avgy`, `regr_sxx`, `regr_syy`,
+`regr_sxy`.
 
 ### ✅ Hypothetical-set aggregates
 
@@ -610,7 +622,7 @@ may not be fully enforced.
 
 ## 14. Procedural Languages
 
-### 🟡 PL/pgSQL: EXCEPTION handling
+### ✅ PL/pgSQL: EXCEPTION handling
 
 ```sql
 BEGIN
@@ -620,12 +632,17 @@ EXCEPTION WHEN unique_violation THEN
 END;
 ```
 
-The PL/pgSQL interpreter supports IF, CASE, LOOP, WHILE, FOR, RETURN, RAISE,
-PERFORM, EXECUTE, but EXCEPTION blocks are not implemented.
+Implemented: catches any error (not just RAISE), matches by condition name,
+SQLSTATE code, or substring. Sets SQLERRM and SQLSTATE variables.
 
-### 🟡 PL/pgSQL: FOREACH ... IN ARRAY
+### ✅ PL/pgSQL: FOREACH ... IN ARRAY
 
-### 🟡 PL/pgSQL: RETURN NEXT / RETURN QUERY (set-returning functions)
+Implemented: iterates over array elements with EXIT/CONTINUE support.
+
+### ✅ PL/pgSQL: RETURN NEXT / RETURN QUERY (set-returning functions)
+
+Implemented: accumulates rows via RETURN NEXT (single value) or RETURN QUERY
+(SQL result set) and returns them as a set-returning function result.
 
 ### 🟢 Other PL languages (PL/Python, PL/Perl, PL/v8)
 
@@ -703,16 +720,13 @@ SELECT pg_advisory_lock(12345);
 
 | Feature | Category |
 |---|---|
-| LATERAL joins | Queries |
 | GROUPING SETS / CUBE / ROLLUP | Queries |
 | FOR UPDATE / FOR SHARE | Transactions |
 | Table partitioning | DDL |
 | JSON additional operators (`?|`, `?&`, `-`, `#-`) | Operators |
 | Array operators and indexing | Types |
-| Statistical aggregates | Aggregates |
 | Ordered-set aggregates | Aggregates |
 | Cursors | Queries |
 | GRANT / REVOKE | Security |
-| PL/pgSQL EXCEPTION blocks | PL/pgSQL |
 | Materialized views | DDL |
 | ANALYZE command | Maintenance |

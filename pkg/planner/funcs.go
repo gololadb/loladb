@@ -1747,8 +1747,24 @@ func evalBuiltinFunc(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, e
 		return tuple.DNull(), fmt.Errorf("unrecognized configuration parameter %q", settingName)
 
 	default:
+		// Try user-defined function callback.
+		if UserFuncExecutor != nil {
+			return UserFuncExecutor(name, args, row)
+		}
 		return tuple.DNull(), fmt.Errorf("function %s is not supported", name)
 	}
+}
+
+// UserFuncExecFunc executes a user-defined function by name with the given
+// arguments. The implementation is injected by the SQL executor.
+type UserFuncExecFunc func(name string, args []AnalyzedExpr, row *Row) (tuple.Datum, error)
+
+// UserFuncExecutor is set by the SQL executor to provide UDF execution.
+var UserFuncExecutor UserFuncExecFunc
+
+// EvalAnalyzedExpr evaluates an AnalyzedExpr against a row.
+func EvalAnalyzedExpr(ae AnalyzedExpr, row *Row) (tuple.Datum, error) {
+	return ae.Eval(row)
 }
 
 // datumTypeName returns the PostgreSQL type name for a datum type.

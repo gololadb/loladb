@@ -510,6 +510,7 @@ func joinTreeNodeToPlan(node JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, 
 					ChildPlan:     recPlan,
 					IsRecursive:   true,
 					RecursiveInit: initPlan,
+					Lateral:       rte.Lateral,
 				}, nil
 			}
 			childPlan, err := QueryToLogicalPlan(rte.Subquery)
@@ -520,6 +521,7 @@ func joinTreeNodeToPlan(node JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, 
 				Alias:     rte.Alias,
 				Columns:   colNames,
 				ChildPlan: childPlan,
+				Lateral:   rte.Lateral,
 			}, nil
 		}
 

@@ -627,10 +627,14 @@ func (a *Analyzer) transformRangeSubselect(rs *parser.RangeSubselect) (JoinTreeN
 		alias = rs.Alias.Aliasname
 	}
 
-	// Analyze the subquery in its own scope.
+	// Analyze the subquery. For LATERAL subqueries, keep the outer range
+	// table visible so column references to preceding FROM items resolve.
 	savedRT := a.rangeTable
 	savedCTEs := a.cteMap
-	a.rangeTable = nil
+	outerRTCount := len(a.rangeTable)
+	if !rs.Lateral {
+		a.rangeTable = nil
+	}
 	subQuery, err := a.transformSelectStmt(selectStmt)
 	if err != nil {
 		a.rangeTable = savedRT
@@ -639,6 +643,18 @@ func (a *Analyzer) transformRangeSubselect(rs *parser.RangeSubselect) (JoinTreeN
 	}
 	a.rangeTable = savedRT
 	a.cteMap = savedCTEs
+
+	// For LATERAL subqueries, mark outer column references with AttIndex=-1
+	// so they resolve via OuterRowContext at execution time rather than by
+	// positional index (which would be wrong since the inner plan's rows
+	// don't include outer columns).
+	if rs.Lateral && outerRTCount > 0 {
+		outerRTIs := make(map[int]bool, outerRTCount)
+		for _, rte := range savedRT {
+			outerRTIs[rte.RTIndex] = true
+		}
+		markOuterRefsInQuery(subQuery, outerRTIs)
+	}
 
 	// Build columns from the subquery's target list.
 	cols := make([]RTEColumn, len(subQuery.TargetList))
@@ -660,9 +676,79 @@ func (a *Analyzer) transformRangeSubselect(rs *parser.RangeSubselect) (JoinTreeN
 		Alias:    alias,
 		Columns:  cols,
 		Subquery: subQuery,
+		Lateral:  rs.Lateral,
 	}
 	a.rangeTable = append(a.rangeTable, rte)
 	return &RangeTblRef{RTIndex: rte.RTIndex}, nil
+}
+
+// markOuterRefsInQuery walks a Query's expressions and sets AttIndex=-1 on
+// any ColumnVar that references an outer range table entry (identified by
+// outerRTIs). This forces name-based resolution via OuterRowContext at
+// execution time.
+func markOuterRefsInQuery(q *Query, outerRTIs map[int]bool) {
+	for _, te := range q.TargetList {
+		markOuterRefsInExpr(te.Expr, outerRTIs)
+	}
+	if q.Qual != nil {
+		markOuterRefsInExpr(q.Qual, outerRTIs)
+	}
+	if q.JoinTree != nil && q.JoinTree.Quals != nil {
+		markOuterRefsInExpr(q.JoinTree.Quals, outerRTIs)
+	}
+	for _, sc := range q.SortClause {
+		markOuterRefsInExpr(sc.Expr, outerRTIs)
+	}
+	for _, gb := range q.GroupClause {
+		markOuterRefsInExpr(gb, outerRTIs)
+	}
+	if q.HavingQual != nil {
+		markOuterRefsInExpr(q.HavingQual, outerRTIs)
+	}
+}
+
+func markOuterRefsInExpr(ae AnalyzedExpr, outerRTIs map[int]bool) {
+	if ae == nil {
+		return
+	}
+	switch e := ae.(type) {
+	case *ColumnVar:
+		if outerRTIs[e.RTIndex] {
+			e.AttIndex = -1
+		}
+	case *OpExpr:
+		markOuterRefsInExpr(e.Left, outerRTIs)
+		markOuterRefsInExpr(e.Right, outerRTIs)
+	case *BoolExprNode:
+		for _, arg := range e.Args {
+			markOuterRefsInExpr(arg, outerRTIs)
+		}
+	case *FuncCallExpr:
+		for _, arg := range e.Args {
+			markOuterRefsInExpr(arg, outerRTIs)
+		}
+	case *AggRef:
+		for _, arg := range e.Args {
+			markOuterRefsInExpr(arg, outerRTIs)
+		}
+	case *TypeCastExpr:
+		markOuterRefsInExpr(e.Arg, outerRTIs)
+	case *NullTestExpr:
+		markOuterRefsInExpr(e.Arg, outerRTIs)
+	case *CaseExprNode:
+		if e.Arg != nil {
+			markOuterRefsInExpr(e.Arg, outerRTIs)
+		}
+		for _, w := range e.Whens {
+			markOuterRefsInExpr(w.Cond, outerRTIs)
+			markOuterRefsInExpr(w.Result, outerRTIs)
+		}
+		if e.ElseExpr != nil {
+			markOuterRefsInExpr(e.ElseExpr, outerRTIs)
+		}
+	case *SubLinkExpr:
+		// Don't descend into sublinks — they have their own scope.
+	}
 }
 
 // transformJoinExpr processes an explicit JOIN, mirroring
@@ -3572,6 +3658,9 @@ func (a *Analyzer) isAggregateFunc(name string) bool {
 		"string_agg", "array_agg",
 		"stddev", "stddev_pop", "stddev_samp",
 		"variance", "var_pop", "var_samp",
+		"corr", "covar_pop", "covar_samp",
+		"regr_slope", "regr_intercept", "regr_count", "regr_r2",
+		"regr_avgx", "regr_avgy", "regr_sxx", "regr_syy", "regr_sxy",
 		"percentile_cont", "percentile_disc", "mode",
 		"rank", "dense_rank", "percent_rank", "cume_dist",
 		"json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg":
@@ -3634,8 +3723,13 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 		case "string_agg":
 			retType = tuple.TypeText
 		case "stddev", "stddev_pop", "stddev_samp",
-			"variance", "var_pop", "var_samp":
+			"variance", "var_pop", "var_samp",
+			"corr", "covar_pop", "covar_samp",
+			"regr_slope", "regr_intercept", "regr_r2",
+			"regr_avgx", "regr_avgy", "regr_sxx", "regr_syy", "regr_sxy":
 			retType = tuple.TypeFloat64
+		case "regr_count":
+			retType = tuple.TypeInt64
 		case "percentile_cont":
 			retType = tuple.TypeFloat64
 		case "percentile_disc":

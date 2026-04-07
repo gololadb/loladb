@@ -93,6 +93,11 @@ func (ex *Executor) execRenameStmt(rs *parser.RenameStmt) (*Result, error) {
 			return nil, err
 		}
 		return &Result{Message: "ALTER TABLE"}, nil
+	case parser.OBJECT_INDEX:
+		if err := ex.Cat.RenameRelation(tableName, rs.Newname); err != nil {
+			return nil, err
+		}
+		return &Result{Message: "ALTER INDEX"}, nil
 	default:
 		return nil, fmt.Errorf("RENAME: unsupported object type")
 	}

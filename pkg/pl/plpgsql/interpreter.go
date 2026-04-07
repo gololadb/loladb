@@ -40,11 +40,16 @@ type FuncResult struct {
 	IsNull  bool
 	// For trigger functions, the modified NEW row (or nil to suppress).
 	TriggerRow map[string]tuple.Datum
+	// For set-returning functions (RETURN NEXT / RETURN QUERY).
+	Rows    [][]tuple.Datum
+	Columns []string
 }
 
 // Interpreter executes a PL/pgSQL function body.
 type Interpreter struct {
-	execSQL SQLExecFunc
+	execSQL    SQLExecFunc
+	returnRows [][]tuple.Datum // accumulated rows for RETURN NEXT / RETURN QUERY
+	returnCols []string        // column names for RETURN QUERY results
 }
 
 // New creates an interpreter that delegates SQL to the given executor.
@@ -125,15 +130,29 @@ func (interp *Interpreter) ExecFunction(body string, params map[string]tuple.Dat
 		sc.set(k, v)
 	}
 
+	// Reset accumulated rows for set-returning functions.
+	interp.returnRows = nil
+	interp.returnCols = nil
+
 	err = interp.execBlock(sc, block)
 	if err != nil {
 		if ret, ok := err.(*errReturn); ok {
-			return &FuncResult{Value: ret.value, IsNull: ret.isNull}, nil
+			result := &FuncResult{Value: ret.value, IsNull: ret.isNull}
+			if len(interp.returnRows) > 0 {
+				result.Rows = interp.returnRows
+				result.Columns = interp.returnCols
+			}
+			return result, nil
 		}
 		if raise, ok := err.(*errRaise); ok {
 			return nil, fmt.Errorf("plpgsql: %s", raise.message)
 		}
 		return nil, err
+	}
+
+	// If RETURN NEXT/QUERY was used without a final RETURN, return accumulated rows.
+	if len(interp.returnRows) > 0 {
+		return &FuncResult{Rows: interp.returnRows, Columns: interp.returnCols, IsNull: true}, nil
 	}
 	return &FuncResult{IsNull: true}, nil
 }
@@ -226,17 +245,79 @@ func (interp *Interpreter) execBlock(sc *scope, block *plparser.StmtBlock) error
 
 	err := interp.execStmts(child, block.Body)
 	if err != nil {
-		// Handle EXCEPTION blocks.
-		if raise, ok := err.(*errRaise); ok && len(block.Exceptions) > 0 {
+		// Handle EXCEPTION blocks: catch any error (not just RAISE).
+		if len(block.Exceptions) > 0 {
+			// Don't catch EXIT/CONTINUE control flow.
+			if _, isExit := err.(*errExit); isExit {
+				return err
+			}
+			if _, isReturn := err.(*errReturn); isReturn {
+				return err
+			}
+
+			errMsg := err.Error()
+			sqlState := "P0001" // default: raise_exception
+			if _, isRaise := err.(*errRaise); !isRaise {
+				// SQL error — use a generic SQLSTATE.
+				sqlState = "XX000"
+			}
+
 			for _, exc := range block.Exceptions {
-				// Simple matching: catch all exceptions.
-				_ = raise
-				return interp.execStmts(child, exc.Body)
+				if matchesException(exc, errMsg, sqlState) {
+					// Set SQLERRM and SQLSTATE in the handler scope.
+					child.set("sqlerrm", tuple.DText(errMsg))
+					child.set("sqlstate", tuple.DText(sqlState))
+					return interp.execStmts(child, exc.Body)
+				}
 			}
 		}
 		return err
 	}
 	return nil
+}
+
+// matchesException checks if an exception handler matches the given error.
+func matchesException(exc *plparser.Exception, errMsg, sqlState string) bool {
+	// No conditions means WHEN OTHERS — catches everything.
+	if len(exc.Conditions) == 0 {
+		return true
+	}
+	for _, cond := range exc.Conditions {
+		name := strings.ToLower(cond.Name)
+		if name == "others" || name == "" {
+			return true
+		}
+		// Match by SQLSTATE code.
+		if cond.SQLState != "" && cond.SQLState == sqlState {
+			return true
+		}
+		// Match by condition name (substring match for common patterns).
+		if strings.Contains(strings.ToLower(errMsg), strings.ReplaceAll(name, "_", " ")) {
+			return true
+		}
+		// Map well-known condition names to SQLSTATE classes.
+		if mappedState, ok := conditionToSQLState[name]; ok && mappedState == sqlState {
+			return true
+		}
+	}
+	return false
+}
+
+// conditionToSQLState maps PL/pgSQL exception condition names to SQLSTATE codes.
+var conditionToSQLState = map[string]string{
+	"division_by_zero":       "22012",
+	"unique_violation":       "23505",
+	"not_null_violation":     "23502",
+	"foreign_key_violation":  "23503",
+	"check_violation":        "23514",
+	"numeric_value_out_of_range": "22003",
+	"string_data_right_truncation": "22001",
+	"undefined_table":        "42P01",
+	"undefined_column":       "42703",
+	"syntax_error":           "42601",
+	"raise_exception":        "P0001",
+	"no_data_found":          "P0002",
+	"too_many_rows":          "P0003",
 }
 
 func (interp *Interpreter) execStmts(sc *scope, stmts []plparser.Stmt) error {
@@ -278,6 +359,12 @@ func (interp *Interpreter) execStmt(sc *scope, stmt plparser.Stmt) error {
 		return interp.execBlock(sc, s)
 	case *plparser.StmtDynExecute:
 		return interp.execDynExecute(sc, s)
+	case *plparser.StmtForEachA:
+		return interp.execForEachArray(sc, s)
+	case *plparser.StmtReturnNext:
+		return interp.execReturnNext(sc, s)
+	case *plparser.StmtReturnQuery:
+		return interp.execReturnQuery(sc, s)
 	case *plparser.StmtNull:
 		return nil
 	default:
@@ -582,6 +669,122 @@ func (interp *Interpreter) execDynExecute(sc *scope, s *plparser.StmtDynExecute)
 			}
 		}
 	}
+	return nil
+}
+
+// execForEachArray implements FOREACH var IN ARRAY expr LOOP ... END LOOP.
+func (interp *Interpreter) execForEachArray(sc *scope, s *plparser.StmtForEachA) error {
+	// Evaluate the array expression.
+	arrVal, err := interp.evalExpr(sc, s.Expr)
+	if err != nil {
+		return fmt.Errorf("plpgsql: FOREACH array expression: %w", err)
+	}
+
+	// Parse the array literal into elements.
+	elements := parseArrayElements(datumToString(arrVal))
+
+	for _, elem := range elements {
+		sc.set(s.Var, elem)
+		err := interp.execStmts(sc, s.Body)
+		if err != nil {
+			if ex, ok := err.(*errExit); ok {
+				if !ex.isContinue && (ex.label == "" || ex.label == s.Label) {
+					return nil
+				}
+				if ex.isContinue && (ex.label == "" || ex.label == s.Label) {
+					continue
+				}
+				return err
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// parseArrayElements splits a PG array literal like {1,2,3} or {a,"b c",d}
+// into individual Datum values.
+func parseArrayElements(arr string) []tuple.Datum {
+	arr = strings.TrimSpace(arr)
+	if arr == "" || arr == "{}" {
+		return nil
+	}
+	// Strip outer braces.
+	if arr[0] == '{' && arr[len(arr)-1] == '}' {
+		arr = arr[1 : len(arr)-1]
+	}
+
+	var elements []tuple.Datum
+	var current strings.Builder
+	inQuote := false
+	for i := 0; i < len(arr); i++ {
+		ch := arr[i]
+		switch {
+		case ch == '"' && !inQuote:
+			inQuote = true
+		case ch == '"' && inQuote:
+			inQuote = false
+		case ch == ',' && !inQuote:
+			elements = append(elements, parseSingleElement(current.String()))
+			current.Reset()
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	if current.Len() > 0 {
+		elements = append(elements, parseSingleElement(current.String()))
+	}
+	return elements
+}
+
+func parseSingleElement(s string) tuple.Datum {
+	s = strings.TrimSpace(s)
+	if strings.EqualFold(s, "null") {
+		return tuple.DNull()
+	}
+	// Try integer.
+	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return tuple.DInt64(v)
+	}
+	// Try float.
+	if v, err := strconv.ParseFloat(s, 64); err == nil {
+		return tuple.DFloat64(v)
+	}
+	return tuple.DText(s)
+}
+
+// execReturnNext implements RETURN NEXT expr — appends a row to the
+// set-returning function's result set.
+func (interp *Interpreter) execReturnNext(sc *scope, s *plparser.StmtReturnNext) error {
+	val, err := interp.evalExpr(sc, s.Expr)
+	if err != nil {
+		return fmt.Errorf("plpgsql: RETURN NEXT: %w", err)
+	}
+	interp.returnRows = append(interp.returnRows, []tuple.Datum{val})
+	return nil
+}
+
+// execReturnQuery implements RETURN QUERY query — executes a query and
+// appends all result rows to the set-returning function's result set.
+func (interp *Interpreter) execReturnQuery(sc *scope, s *plparser.StmtReturnQuery) error {
+	sql := s.Query
+	if s.DynQuery != "" {
+		// RETURN QUERY EXECUTE
+		queryVal, err := interp.evalExpr(sc, s.DynQuery)
+		if err != nil {
+			return fmt.Errorf("plpgsql: RETURN QUERY EXECUTE: %w", err)
+		}
+		sql = datumToString(queryVal)
+	}
+	sql = interp.substituteVars(sc, sql)
+	result, err := interp.execSQL(sql)
+	if err != nil {
+		return fmt.Errorf("plpgsql: RETURN QUERY: %w", err)
+	}
+	if interp.returnCols == nil && len(result.Columns) > 0 {
+		interp.returnCols = result.Columns
+	}
+	interp.returnRows = append(interp.returnRows, result.Rows...)
 	return nil
 }
 

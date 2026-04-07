@@ -1183,6 +1183,7 @@ func (o *Optimizer) optimizeSubqueryScan(n *LogicalSubqueryScan) (PhysicalNode, 
 		Columns:     n.Columns,
 		Child:       child,
 		IsRecursive: n.IsRecursive,
+		Lateral:     n.Lateral,
 	}
 	if n.RecursiveInit != nil {
 		initPhys, err := o.Optimize(n.RecursiveInit)

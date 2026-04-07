@@ -553,7 +553,81 @@ func (e *ExprBinOp) evalConcat(row *Row) (tuple.Datum, error) {
 	if lv.Type == tuple.TypeNull || rv.Type == tuple.TypeNull {
 		return tuple.DNull(), nil
 	}
+	// Array concatenation: array || array, array || element, element || array.
+	if isArrayDatum(lv) || isArrayDatum(rv) {
+		return evalArrayConcat(lv, rv), nil
+	}
 	return tuple.DText(datumToString(lv) + datumToString(rv)), nil
+}
+
+// isArrayDatum returns true if the datum is an array type or looks like an
+// array literal ({...}).
+func isArrayDatum(d tuple.Datum) bool {
+	if d.Type == tuple.TypeArray {
+		return true
+	}
+	if d.Type == tuple.TypeText {
+		s := strings.TrimSpace(d.Text)
+		return len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}'
+	}
+	return false
+}
+
+// evalArrayConcat concatenates arrays or appends/prepends elements.
+func evalArrayConcat(lv, rv tuple.Datum) tuple.Datum {
+	lArr := parseArrayLiteral(datumToString(lv))
+	rArr := parseArrayLiteral(datumToString(rv))
+
+	// If left is not an array, prepend as single element.
+	if !isArrayDatum(lv) {
+		rArr = append([]string{datumToString(lv)}, rArr...)
+		return tuple.DArray("{" + strings.Join(rArr, ",") + "}")
+	}
+	// If right is not an array, append as single element.
+	if !isArrayDatum(rv) {
+		lArr = append(lArr, datumToString(rv))
+		return tuple.DArray("{" + strings.Join(lArr, ",") + "}")
+	}
+	// Both arrays: concatenate.
+	combined := append(lArr, rArr...)
+	return tuple.DArray("{" + strings.Join(combined, ",") + "}")
+}
+
+// parseArrayLiteral splits a PG array literal {a,b,c} into string elements.
+func parseArrayLiteral(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "{}" {
+		return nil
+	}
+	if s[0] == '{' && s[len(s)-1] == '}' {
+		s = s[1 : len(s)-1]
+	}
+	if s == "" {
+		return nil
+	}
+	var elems []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '"' && !inQuote:
+			inQuote = true
+			cur.WriteByte(ch)
+		case ch == '"' && inQuote:
+			inQuote = false
+			cur.WriteByte(ch)
+		case ch == ',' && !inQuote:
+			elems = append(elems, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if cur.Len() > 0 {
+		elems = append(elems, cur.String())
+	}
+	return elems
 }
 
 func (e *ExprBinOp) evalArithmetic(row *Row) (tuple.Datum, error) {

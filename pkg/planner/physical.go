@@ -715,6 +715,8 @@ type PhysSubqueryScan struct {
 	IsRecursive bool
 	// RecursiveInit is the physical plan for the non-recursive term.
 	RecursiveInit PhysicalNode
+	// Lateral is true for LATERAL subqueries that reference outer columns.
+	Lateral bool
 }
 
 func (n *PhysSubqueryScan) String() string {

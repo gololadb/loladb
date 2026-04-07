@@ -173,6 +173,10 @@ type RangeTblEntry struct {
 
 	// IsRecursive is true for recursive CTE entries (WITH RECURSIVE).
 	IsRecursive bool
+
+	// Lateral is true for LATERAL subqueries that can reference columns
+	// from preceding FROM items.
+	Lateral bool
 }
 
 // RTEColumn is a single column within a RangeTblEntry, carrying the

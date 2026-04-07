@@ -696,6 +696,8 @@ type LogicalSubqueryScan struct {
 	IsRecursive bool
 	// RecursiveInit is the non-recursive (initial) part for WITH RECURSIVE.
 	RecursiveInit LogicalNode
+	// Lateral is true for LATERAL subqueries that reference outer columns.
+	Lateral bool
 }
 
 func (n *LogicalSubqueryScan) String() string {

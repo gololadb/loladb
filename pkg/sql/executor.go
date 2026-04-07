@@ -104,6 +104,42 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 		return r.Columns, r.Rows, nil
 	}
 
+	// Wire user-defined function executor for PL/pgSQL functions in SQL expressions.
+	planner.UserFuncExecutor = func(name string, args []planner.AnalyzedExpr, row *planner.Row) (tuple.Datum, error) {
+		fn := ex.Cat.FindFunction(name)
+		if fn == nil {
+			return tuple.DNull(), fmt.Errorf("function %s is not supported", name)
+		}
+		// Evaluate arguments.
+		params := make(map[string]tuple.Datum)
+		for i, arg := range args {
+			val, err := planner.EvalAnalyzedExpr(arg, row)
+			if err != nil {
+				return tuple.DNull(), err
+			}
+			// Use $1, $2, ... as parameter names, and also positional names from function def.
+			params[fmt.Sprintf("$%d", i+1)] = val
+			if i < len(fn.ParamNames) && fn.ParamNames[i] != "" {
+				params[fn.ParamNames[i]] = val
+			}
+		}
+		interp := plpgsql.New(func(sql string) (*plpgsql.SQLResult, error) {
+			r, err := ex.Exec(sql)
+			if err != nil {
+				return nil, err
+			}
+			return &plpgsql.SQLResult{Columns: r.Columns, Rows: r.Rows, Message: r.Message}, nil
+		})
+		result, err := interp.ExecFunction(fn.Body, params)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		if result.IsNull {
+			return tuple.DNull(), nil
+		}
+		return result.Value, nil
+	}
+
 	// Wire enum ordinal resolver for enum-aware comparisons.
 	planner.EnumOrdinalFunc = func(val string) int {
 		// Check all enum types for this value.
