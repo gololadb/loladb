@@ -114,6 +114,92 @@ func (e *ExprLiteral) Eval(row *Row) (tuple.Datum, error) {
 	return e.Value, nil
 }
 
+// ArrayConstructExpr represents ARRAY[e1, e2, ...].
+type ArrayConstructExpr struct {
+	Elements []Expr
+}
+
+func (e *ArrayConstructExpr) String() string            { return "ARRAY[...]" }
+func (e *ArrayConstructExpr) ResultType() tuple.DatumType { return tuple.TypeText }
+func (e *ArrayConstructExpr) Eval(row *Row) (tuple.Datum, error) {
+	var sb strings.Builder
+	sb.WriteByte('{')
+	for i, el := range e.Elements {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		v, err := el.Eval(row)
+		if err != nil {
+			return tuple.DNull(), err
+		}
+		switch v.Type {
+		case tuple.TypeText:
+			sb.WriteString(v.Text)
+		case tuple.TypeInt32:
+			sb.WriteString(fmt.Sprintf("%d", v.I32))
+		case tuple.TypeInt64:
+			sb.WriteString(fmt.Sprintf("%d", v.I64))
+		case tuple.TypeFloat64:
+			sb.WriteString(fmt.Sprintf("%g", v.F64))
+		case tuple.TypeBool:
+			if v.Bool {
+				sb.WriteString("t")
+			} else {
+				sb.WriteString("f")
+			}
+		case tuple.TypeNull:
+			sb.WriteString("NULL")
+		default:
+			sb.WriteString(fmt.Sprintf("%v", v))
+		}
+	}
+	sb.WriteByte('}')
+	return tuple.DText(sb.String()), nil
+}
+
+// ArraySubscriptExpr represents arr[idx].
+type ArraySubscriptExpr struct {
+	Array Expr
+	Index Expr
+}
+
+func (e *ArraySubscriptExpr) String() string            { return "arr[idx]" }
+func (e *ArraySubscriptExpr) ResultType() tuple.DatumType { return tuple.TypeText }
+func (e *ArraySubscriptExpr) Eval(row *Row) (tuple.Datum, error) {
+	arrVal, err := e.Array.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	idxVal, err := e.Index.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	if arrVal.Type != tuple.TypeText {
+		return tuple.DNull(), nil
+	}
+
+	// Parse 1-based index.
+	idx := int(idxVal.I64)
+	if idxVal.Type == tuple.TypeInt32 {
+		idx = int(idxVal.I32)
+	}
+
+	// Parse PostgreSQL array literal: {val1,val2,...}
+	s := arrVal.Text
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return tuple.DNull(), nil
+	}
+	inner := s[1 : len(s)-1]
+	if inner == "" {
+		return tuple.DNull(), nil
+	}
+	elements := strings.Split(inner, ",")
+	if idx < 1 || idx > len(elements) {
+		return tuple.DNull(), nil
+	}
+	return tuple.DText(elements[idx-1]), nil
+}
+
 // OpKind represents comparison and logical operators.
 type OpKind int
 
@@ -150,6 +236,8 @@ const (
 	OpJSONContains           // @>
 	OpJSONContainedBy        // <@
 	OpJSONExists             // ?
+	OpJSONDelete             // - (delete key from JSON object/array)
+	OpJSONDeletePath         // #- (delete by path)
 )
 
 func (op OpKind) String() string {
@@ -204,6 +292,10 @@ func (op OpKind) String() string {
 		return "<@"
 	case OpJSONExists:
 		return "?"
+	case OpJSONDelete:
+		return "-"
+	case OpJSONDeletePath:
+		return "#-"
 	case OpSimilarTo:
 		return "SIMILAR TO"
 	case OpNotSimilarTo:
@@ -247,7 +339,7 @@ func (e *ExprBinOp) Eval(row *Row) (tuple.Datum, error) {
 	if e.Op == OpConcat {
 		return e.evalConcat(row)
 	}
-	if e.Op >= OpJSONArrow && e.Op <= OpJSONExists {
+	if e.Op >= OpJSONArrow && e.Op <= OpJSONDeletePath {
 		return e.evalJSON(row)
 	}
 	if e.Op >= OpSimilarTo && e.Op <= OpRegexNotIMatch {

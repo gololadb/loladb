@@ -898,6 +898,36 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 
 	case *parser.ParamRef:
 		return nil, fmt.Errorf("analyzer: parameter references ($%d) not supported", e.Number)
+
+	case *parser.A_ArrayExpr:
+		// ARRAY[1, 2, 3] → evaluate elements and format as PG array literal.
+		var elems []Expr
+		for _, el := range e.Elements {
+			ae, err := a.transformExpr(el)
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, ae)
+		}
+		return &ArrayConstructExpr{Elements: elems}, nil
+
+	case *parser.A_Indirection:
+		// expr[idx] — array subscript or field access.
+		arg, err := a.transformExpr(e.Arg)
+		if err != nil {
+			return nil, err
+		}
+		for _, ind := range e.Indirection {
+			if idx, ok := ind.(*parser.A_Indices); ok && idx.Uidx != nil {
+				idxExpr, err := a.transformExpr(idx.Uidx)
+				if err != nil {
+					return nil, err
+				}
+				arg = &ArraySubscriptExpr{Array: arg, Index: idxExpr}
+			}
+		}
+		return arg, nil
+
 	default:
 		if expr == nil {
 			return &Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}, nil
@@ -1089,8 +1119,13 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 		op = OpAdd
 		resultTyp = inferArithType(left, right)
 	case "-":
-		op = OpSub
-		resultTyp = inferArithType(left, right)
+		if left.ResultType() == tuple.TypeJSON {
+			op = OpJSONDelete
+			resultTyp = tuple.TypeJSON
+		} else {
+			op = OpSub
+			resultTyp = inferArithType(left, right)
+		}
 	case "*":
 		op = OpMul
 		resultTyp = inferArithType(left, right)
@@ -1124,6 +1159,9 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 	case "?":
 		op = OpJSONExists
 		resultTyp = tuple.TypeBool
+	case "#-":
+		op = OpJSONDeletePath
+		resultTyp = tuple.TypeJSON
 	case "~":
 		op = OpRegexMatch
 		resultTyp = tuple.TypeBool
@@ -3004,7 +3042,7 @@ func (a *Analyzer) transformTruncateStmt(n *parser.TruncateStmt) (*Query, error)
 
 func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 	switch n.RemoveType {
-	case parser.OBJECT_TABLE:
+	case parser.OBJECT_TABLE, parser.OBJECT_MATVIEW:
 		tableName := ""
 		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
 			tableName = n.Objects[0][len(n.Objects[0])-1]
@@ -3364,7 +3402,9 @@ func isAggregateFunc(name string) bool {
 	switch strings.ToLower(name) {
 	case "count", "sum", "avg", "min", "max",
 		"bool_and", "bool_or", "every",
-		"string_agg", "array_agg":
+		"string_agg", "array_agg",
+		"stddev", "stddev_pop", "stddev_samp",
+		"variance", "var_pop", "var_samp":
 		return true
 	}
 	return false
@@ -3417,6 +3457,9 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 			retType = tuple.TypeBool
 		case "string_agg":
 			retType = tuple.TypeText
+		case "stddev", "stddev_pop", "stddev_samp",
+			"variance", "var_pop", "var_samp":
+			retType = tuple.TypeFloat64
 		default:
 			retType = tuple.TypeText
 		}

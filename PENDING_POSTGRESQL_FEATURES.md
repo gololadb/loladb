@@ -76,16 +76,16 @@ Not applicable until native array types are added.
 
 ## 2. Data Types
 
-### 🟡 JSON additional operators (`?|`, `?&`, `-`, `#-`)
+### 🟡 JSON additional operators (`?|`, `?&`)
 
-JSON/JSONB types support `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, and `?` operators.
-Still missing: `?|` (any key exists), `?&` (all keys exist), `-` (delete key),
-and `#-` (delete path).
+JSON/JSONB types support `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `-` (delete
+key/index), and `#-` (delete path) operators. Still missing: `?|` (any key
+exists) and `?&` (all keys exist).
 
-### 🟡 Array operators and indexing
+### 🟡 Array operators
 
-Arrays have a native datum type and `TEXT[]` column syntax works. Missing:
-`ARRAY[...]` constructor, array indexing (`arr[1]`), slicing, containment
+Arrays have a native datum type, `TEXT[]` column syntax, `ARRAY[...]`
+constructor, and `arr[1]` indexing. Still missing: slicing, containment
 operators (`@>`, `<@`, `&&`), and `unnest()`.
 
 ### 🟢 Geometric types (point, line, box, circle, polygon, path)
@@ -367,21 +367,19 @@ text, integer, bigint, float, boolean, date, timestamp, numeric, json,
 uuid, interval, bytea, and arrays. Chained casts (`42::text::integer`)
 and casts in expressions (`WHERE val::integer > 100`) work.
 
-### 🟡 Array constructors and operators
+### ✅ Array constructors and indexing
 
 ```sql
 SELECT ARRAY[1, 2, 3];
 SELECT arr[1] FROM t;
 ```
 
-Arrays have a native datum type but `ARRAY[...]` constructor syntax, indexing,
-and array-specific operators are not yet supported.
+Implemented: `ARRAY[...]` constructor and 1-based array indexing.
 
-### 🟡 JSON additional operators (`?|`, `?&`, `-`, `#-`)
+### ✅ JSON delete operators (`-`, `#-`)
 
-Core JSON operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`) are implemented.
-Still missing: `?|` (any key exists), `?&` (all keys exist), `-` (delete key/index),
-and `#-` (delete path).
+Implemented: `-` (delete key by name or element by index) and `#-` (delete by
+path). Remaining JSON gaps: `?|` (any key exists) and `?&` (all keys exist).
 
 ### ✅ Pattern matching operators (`~`, `~*`, `!~`, `!~*`)
 
@@ -410,10 +408,11 @@ SELECT mode() WITHIN GROUP (ORDER BY status) FROM orders;
 
 `percentile_cont`, `percentile_disc`, `mode`.
 
-### 🟡 Statistical aggregates
+### ✅ Statistical aggregates (basic)
 
-`stddev`, `stddev_pop`, `stddev_samp`, `variance`, `var_pop`, `var_samp`,
-`corr`, `covar_pop`, `covar_samp`, `regr_*`.
+Implemented: `stddev`, `stddev_pop`, `stddev_samp`, `variance`, `var_pop`,
+`var_samp`. Still missing: `corr`, `covar_pop`, `covar_samp`, `regr_*`
+(two-variable statistics).
 
 ### 🟡 Hypothetical-set aggregates
 
@@ -626,14 +625,18 @@ CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY);
 Identity columns auto-create a backing sequence and set the default to
 `nextval()`. SERIAL/BIGSERIAL also auto-create sequences now.
 
-### 🟡 Materialized views
+### ✅ Materialized views
 
 ```sql
 CREATE MATERIALIZED VIEW monthly_sales AS
 SELECT month, sum(amount) FROM sales GROUP BY month;
 
 REFRESH MATERIALIZED VIEW monthly_sales;
+DROP MATERIALIZED VIEW monthly_sales;
 ```
+
+Implemented: CREATE, REFRESH, and DROP MATERIALIZED VIEW. Data is stored in a
+backing table and re-populated on REFRESH.
 
 ### 🟡 Event triggers
 

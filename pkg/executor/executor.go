@@ -971,6 +971,7 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 	type aggState struct {
 		count  int64
 		sum    float64
+		sumSq  float64 // sum of squares for variance/stddev
 		hasVal bool
 		min    tuple.Datum
 		max    tuple.Datum
@@ -1057,6 +1058,10 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 			switch ad.Func {
 			case "sum", "avg":
 				st.sum += datumToFloat64(val)
+			case "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp":
+				v := datumToFloat64(val)
+				st.sum += v
+				st.sumSq += v * v
 			case "min":
 				if !st.hasVal || planner.CompareDatums(val, st.min) < 0 {
 					st.min = val
@@ -1188,6 +1193,40 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 					}
 					sb.WriteByte('}')
 					row = append(row, tuple.DText(sb.String()))
+				}
+			case "stddev", "stddev_samp":
+				// Sample standard deviation: sqrt((sumSq - sum²/n) / (n-1))
+				if st.count < 2 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.count)
+					variance := (st.sumSq - st.sum*st.sum/n) / (n - 1)
+					row = append(row, tuple.DFloat64(math.Sqrt(variance)))
+				}
+			case "stddev_pop":
+				// Population standard deviation: sqrt((sumSq - sum²/n) / n)
+				if st.count == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.count)
+					variance := (st.sumSq - st.sum*st.sum/n) / n
+					row = append(row, tuple.DFloat64(math.Sqrt(variance)))
+				}
+			case "variance", "var_samp":
+				// Sample variance: (sumSq - sum²/n) / (n-1)
+				if st.count < 2 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.count)
+					row = append(row, tuple.DFloat64((st.sumSq-st.sum*st.sum/n)/(n-1)))
+				}
+			case "var_pop":
+				// Population variance: (sumSq - sum²/n) / n
+				if st.count == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					n := float64(st.count)
+					row = append(row, tuple.DFloat64((st.sumSq-st.sum*st.sum/n)/n))
 				}
 			default:
 				row = append(row, tuple.DNull())

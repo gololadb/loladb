@@ -1078,8 +1078,119 @@ func evalJSONOp(op OpKind, lv, rv tuple.Datum) (tuple.Datum, error) {
 		return jsonContains(rv.Text, lv.Text)
 	case OpJSONExists:
 		return jsonKeyExists(lv.Text, rv.Text)
+	case OpJSONDelete:
+		return jsonDelete(lv.Text, rv)
+	case OpJSONDeletePath:
+		return jsonDeletePath(lv.Text, rv.Text)
 	}
 	return tuple.DNull(), nil
+}
+
+// jsonDelete implements jsonb - text (delete key) and jsonb - integer (delete array element).
+func jsonDelete(jsonStr string, key tuple.Datum) (tuple.Datum, error) {
+	// Try as object key deletion.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &obj); err == nil {
+		keyStr := ""
+		switch key.Type {
+		case tuple.TypeText:
+			keyStr = key.Text
+		case tuple.TypeInt32:
+			keyStr = strconv.Itoa(int(key.I32))
+		case tuple.TypeInt64:
+			keyStr = strconv.FormatInt(key.I64, 10)
+		}
+		delete(obj, keyStr)
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return tuple.DNull(), nil
+		}
+		return tuple.DText(string(out)), nil
+	}
+
+	// Try as array element deletion by index.
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &arr); err == nil {
+		idx := -1
+		switch key.Type {
+		case tuple.TypeInt32:
+			idx = int(key.I32)
+		case tuple.TypeInt64:
+			idx = int(key.I64)
+		}
+		if idx >= 0 && idx < len(arr) {
+			arr = append(arr[:idx], arr[idx+1:]...)
+			out, err := json.Marshal(arr)
+			if err != nil {
+				return tuple.DNull(), nil
+			}
+			return tuple.DText(string(out)), nil
+		}
+	}
+
+	return tuple.DText(jsonStr), nil
+}
+
+// jsonDeletePath implements jsonb #- text[] (delete by path).
+func jsonDeletePath(jsonStr, pathStr string) (tuple.Datum, error) {
+	// Parse path from PG array literal: {key1,key2,...}
+	path := pathStr
+	if len(path) >= 2 && path[0] == '{' && path[len(path)-1] == '}' {
+		path = path[1 : len(path)-1]
+	}
+	keys := strings.Split(path, ",")
+	if len(keys) == 0 {
+		return tuple.DText(jsonStr), nil
+	}
+
+	var data interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		return tuple.DNull(), nil
+	}
+
+	data = deleteAtPath(data, keys)
+	out, err := json.Marshal(data)
+	if err != nil {
+		return tuple.DNull(), nil
+	}
+	return tuple.DText(string(out)), nil
+}
+
+// deleteAtPath recursively deletes a key at the given path.
+func deleteAtPath(data interface{}, keys []string) interface{} {
+	if len(keys) == 0 {
+		return data
+	}
+	key := keys[0]
+	if len(keys) == 1 {
+		// Last key — delete it.
+		if obj, ok := data.(map[string]interface{}); ok {
+			delete(obj, key)
+			return obj
+		}
+		if arr, ok := data.([]interface{}); ok {
+			idx, err := strconv.Atoi(key)
+			if err == nil && idx >= 0 && idx < len(arr) {
+				return append(arr[:idx], arr[idx+1:]...)
+			}
+		}
+		return data
+	}
+	// Recurse into nested structure.
+	if obj, ok := data.(map[string]interface{}); ok {
+		if child, exists := obj[key]; exists {
+			obj[key] = deleteAtPath(child, keys[1:])
+		}
+		return obj
+	}
+	if arr, ok := data.([]interface{}); ok {
+		idx, err := strconv.Atoi(key)
+		if err == nil && idx >= 0 && idx < len(arr) {
+			arr[idx] = deleteAtPath(arr[idx], keys[1:])
+		}
+		return arr
+	}
+	return data
 }
 
 // jsonArrow implements -> and ->>. The key can be a string (object lookup)

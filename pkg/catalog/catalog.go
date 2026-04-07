@@ -135,6 +135,9 @@ type Catalog struct {
 
 	// Comments stores COMMENT ON metadata keyed by "objtype:name" or "objtype:name:col".
 	Comments map[string]string
+
+	// MatViews stores materialized view query definitions keyed by name.
+	MatViews map[string]string
 }
 
 // New wraps an engine with catalog operations. If the database is
@@ -162,6 +165,7 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		SearchPath: searchPath,
 		TempTables: make(map[string]bool),
 		Comments:   make(map[string]string),
+		MatViews:   make(map[string]string),
 	}
 
 	if eng.Super.PgClassPage == 0 {
@@ -1122,8 +1126,9 @@ func (c *Catalog) DropTable(name string, missingOk bool) error {
 		return err
 	}
 
-	// Clean up constraints and temp table tracking.
+	// Clean up constraints, temp table tracking, and matview definitions.
 	delete(c.TempTables, name)
+	delete(c.MatViews, name)
 	c.removeConstraintsForTable(name)
 	c.cache.invalidate()
 	return nil

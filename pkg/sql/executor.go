@@ -231,6 +231,16 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execDeallocate(ds)
 	}
 
+	// Handle CREATE MATERIALIZED VIEW.
+	if cmv, ok := stmt.(*parser.CreateMatViewStmt); ok {
+		return ex.execCreateMatView(cmv)
+	}
+
+	// Handle REFRESH MATERIALIZED VIEW.
+	if rmv, ok := stmt.(*parser.RefreshMatViewStmt); ok {
+		return ex.execRefreshMatView(rmv)
+	}
+
 	// Handle COMMENT ON statements.
 	if cs, ok := stmt.(*parser.CommentStmt); ok {
 		return ex.execComment(cs)
@@ -602,6 +612,88 @@ func (ex *Executor) execShow(n *parser.VariableShowStmt) (*Result, error) {
 	default:
 		return &Result{Message: fmt.Sprintf("SHOW %s", n.Name)}, nil
 	}
+}
+
+func (ex *Executor) execCreateMatView(cmv *parser.CreateMatViewStmt) (*Result, error) {
+	name := cmv.Relation.Relname
+	if cmv.IfNotExists {
+		if rel, _ := ex.Cat.FindRelation(name); rel != nil {
+			return &Result{Message: "SELECT 0"}, nil
+		}
+	}
+
+	querySQL := parser.Deparse(cmv.Query)
+
+	// Execute the query to get column definitions and data.
+	r, err := ex.Exec(querySQL)
+	if err != nil {
+		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: %w", err)
+	}
+
+	// Build column definitions from the result set.
+	cols := make([]catalog.ColumnDef, len(r.Columns))
+	for i, colName := range r.Columns {
+		dt := tuple.TypeText
+		if len(r.Rows) > 0 && i < len(r.Rows[0]) {
+			dt = r.Rows[0][i].Type
+			if dt == tuple.TypeNull {
+				dt = tuple.TypeText
+			}
+		}
+		cols[i] = catalog.ColumnDef{Name: colName, Type: dt, Typmod: -1}
+	}
+
+	// Create the backing table.
+	if _, err := ex.Cat.CreateTable(name, cols); err != nil {
+		return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: %w", err)
+	}
+
+	// Store the query definition.
+	ex.Cat.MatViews[name] = querySQL
+
+	// Insert data if WITH DATA (default).
+	count := int64(0)
+	if cmv.WithData {
+		for _, row := range r.Rows {
+			if _, err := ex.Cat.InsertInto(name, row); err != nil {
+				return nil, fmt.Errorf("CREATE MATERIALIZED VIEW: insert: %w", err)
+			}
+			count++
+		}
+	}
+
+	return &Result{Message: fmt.Sprintf("SELECT %d", count)}, nil
+}
+
+func (ex *Executor) execRefreshMatView(rmv *parser.RefreshMatViewStmt) (*Result, error) {
+	name := rmv.Relation.Relname
+	querySQL, ok := ex.Cat.MatViews[name]
+	if !ok {
+		return nil, fmt.Errorf("materialized view %q does not exist", name)
+	}
+
+	// Truncate existing data.
+	if _, err := ex.Exec("TRUNCATE " + name); err != nil {
+		return nil, fmt.Errorf("REFRESH MATERIALIZED VIEW: truncate: %w", err)
+	}
+
+	if rmv.SkipData {
+		return &Result{Message: "REFRESH MATERIALIZED VIEW"}, nil
+	}
+
+	// Re-execute the query and insert results.
+	r, err := ex.Exec(querySQL)
+	if err != nil {
+		return nil, fmt.Errorf("REFRESH MATERIALIZED VIEW: %w", err)
+	}
+
+	for _, row := range r.Rows {
+		if _, err := ex.Cat.InsertInto(name, row); err != nil {
+			return nil, fmt.Errorf("REFRESH MATERIALIZED VIEW: insert: %w", err)
+		}
+	}
+
+	return &Result{Message: "REFRESH MATERIALIZED VIEW"}, nil
 }
 
 func (ex *Executor) execComment(cs *parser.CommentStmt) (*Result, error) {

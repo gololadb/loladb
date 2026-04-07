@@ -586,6 +586,11 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 			args[i] = analyzedToExpr(a, rtes)
 		}
 		return &ExprFunc{Name: e.FuncName, Args: args}
+	case *ArrayConstructExpr:
+		// Elements are already Expr — just return as-is.
+		return e
+	case *ArraySubscriptExpr:
+		return e
 	case *StarExpr:
 		return &ExprStar{}
 	case *CaseExprNode:
