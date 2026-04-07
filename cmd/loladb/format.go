@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gololadb/loladb/pkg/planner"
+	qt "github.com/gololadb/loladb/pkg/querytree"
 	loladbsql "github.com/gololadb/loladb/pkg/sql"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -151,7 +151,7 @@ func datumString(d tuple.Datum) string {
 	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
 		return d.Text
 	case tuple.TypeInterval:
-		return planner.FormatInterval(d.I32, d.I64)
+		return qt.FormatInterval(d.I32, d.I64)
 	case tuple.TypeBytea:
 		return d.Text
 	case tuple.TypeArray:
@@ -189,7 +189,7 @@ func datumToInterface(d tuple.Datum) interface{} {
 	case tuple.TypeNumeric, tuple.TypeJSON, tuple.TypeUUID:
 		return d.Text
 	case tuple.TypeInterval:
-		return planner.FormatInterval(d.I32, d.I64)
+		return qt.FormatInterval(d.I32, d.I64)
 	case tuple.TypeBytea:
 		return d.Text
 	case tuple.TypeArray:

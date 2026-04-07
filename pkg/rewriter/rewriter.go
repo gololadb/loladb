@@ -19,7 +19,8 @@ import (
 	"github.com/gololadb/gopgsql/parser"
 
 	"github.com/gololadb/loladb/pkg/catalog"
-	"github.com/gololadb/loladb/pkg/planner"
+	az "github.com/gololadb/loladb/pkg/analyzer"
+	qt "github.com/gololadb/loladb/pkg/querytree"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 
@@ -35,7 +36,7 @@ type colMapping struct {
 // It mirrors PostgreSQL's QueryRewrite() function.
 type Rewriter struct {
 	Cat      *catalog.Catalog
-	Analyzer *planner.Analyzer
+	Analyzer *az.Analyzer
 
 	// CurrentUser is the session-level role used for RLS policy evaluation.
 	CurrentUser string
@@ -45,7 +46,7 @@ type Rewriter struct {
 }
 
 // New creates a Rewriter.
-func New(cat *catalog.Catalog, analyzer *planner.Analyzer) *Rewriter {
+func New(cat *catalog.Catalog, analyzer *az.Analyzer) *Rewriter {
 	return &Rewriter{
 		Cat:      cat,
 		Analyzer: analyzer,
@@ -58,29 +59,29 @@ func New(cat *catalog.Catalog, analyzer *planner.Analyzer) *Rewriter {
 //
 // This is the main entry point, equivalent to PostgreSQL's
 // QueryRewrite() in rewriteHandler.c.
-func (rw *Rewriter) Rewrite(query *planner.Query) ([]*planner.Query, error) {
+func (rw *Rewriter) Rewrite(query *qt.Query) ([]*qt.Query, error) {
 	return rw.rewriteQuery(query, 0)
 }
 
-func (rw *Rewriter) rewriteQuery(query *planner.Query, depth int) ([]*planner.Query, error) {
+func (rw *Rewriter) rewriteQuery(query *qt.Query, depth int) ([]*qt.Query, error) {
 	if depth > rw.maxDepth {
 		return nil, fmt.Errorf("rewriter: maximum rule recursion depth exceeded")
 	}
 
 	switch query.CommandType {
-	case planner.CmdSelect:
+	case qt.CmdSelect:
 		return rw.rewriteSelect(query, depth)
-	case planner.CmdInsert:
+	case qt.CmdInsert:
 		return rw.rewriteDML(query, catalog.RuleEventInsert, depth)
-	case planner.CmdUpdate:
+	case qt.CmdUpdate:
 		return rw.rewriteDML(query, catalog.RuleEventUpdate, depth)
-	case planner.CmdDelete:
+	case qt.CmdDelete:
 		return rw.rewriteDML(query, catalog.RuleEventDelete, depth)
-	case planner.CmdUtility:
+	case qt.CmdUtility:
 		// Utility statements are not rewritten.
-		return []*planner.Query{query}, nil
+		return []*qt.Query{query}, nil
 	default:
-		return []*planner.Query{query}, nil
+		return []*qt.Query{query}, nil
 	}
 }
 
@@ -90,7 +91,7 @@ func (rw *Rewriter) rewriteQuery(query *planner.Query, depth int) ([]*planner.Qu
 //
 // This mirrors PostgreSQL's fireRIRrules() (RIR = Retrieve-Instead-Retrieve)
 // in rewriteHandler.c.
-func (rw *Rewriter) rewriteSelect(query *planner.Query, depth int) ([]*planner.Query, error) {
+func (rw *Rewriter) rewriteSelect(query *qt.Query, depth int) ([]*qt.Query, error) {
 	// Step 1: Walk the range table looking for views to expand.
 	for i, rte := range query.RangeTable {
 		if !rw.Cat.IsView(rte.RelOID) {
@@ -134,7 +135,7 @@ func (rw *Rewriter) rewriteSelect(query *planner.Query, depth int) ([]*planner.Q
 		return nil, err
 	}
 
-	return []*planner.Query{query}, nil
+	return []*qt.Query{query}, nil
 }
 
 // rewriteDML handles INSERT/UPDATE/DELETE queries by checking for
@@ -142,9 +143,9 @@ func (rw *Rewriter) rewriteSelect(query *planner.Query, depth int) ([]*planner.Q
 //
 // This mirrors PostgreSQL's RewriteQuery() for non-SELECT commands
 // in rewriteHandler.c.
-func (rw *Rewriter) rewriteDML(query *planner.Query, event catalog.RuleEvent, depth int) ([]*planner.Query, error) {
+func (rw *Rewriter) rewriteDML(query *qt.Query, event catalog.RuleEvent, depth int) ([]*qt.Query, error) {
 	if query.ResultRelation == 0 || query.ResultRelation > len(query.RangeTable) {
-		return []*planner.Query{query}, nil
+		return []*qt.Query{query}, nil
 	}
 
 	rte := query.RangeTable[query.ResultRelation-1]
@@ -156,7 +157,7 @@ func (rw *Rewriter) rewriteDML(query *planner.Query, event catalog.RuleEvent, de
 		return rw.rewriteSelectInDML(query, depth)
 	}
 
-	var result []*planner.Query
+	var result []*qt.Query
 	hasInstead := false
 
 	for _, rule := range rules {
@@ -198,7 +199,7 @@ func (rw *Rewriter) rewriteDML(query *planner.Query, event catalog.RuleEvent, de
 
 	// If no INSTEAD rule fired, keep the original query.
 	if !hasInstead {
-		result = append([]*planner.Query{query}, result...)
+		result = append([]*qt.Query{query}, result...)
 	}
 
 	if len(result) == 0 {
@@ -211,7 +212,7 @@ func (rw *Rewriter) rewriteDML(query *planner.Query, event catalog.RuleEvent, de
 
 // rewriteSelectInDML expands views referenced in the FROM clause of
 // DML statements (e.g., DELETE FROM view WHERE ...) and applies RLS.
-func (rw *Rewriter) rewriteSelectInDML(query *planner.Query, depth int) ([]*planner.Query, error) {
+func (rw *Rewriter) rewriteSelectInDML(query *qt.Query, depth int) ([]*qt.Query, error) {
 	// Check if the result relation itself is a view.
 	if query.ResultRelation > 0 && query.ResultRelation <= len(query.RangeTable) {
 		rte := query.RangeTable[query.ResultRelation-1]
@@ -227,7 +228,7 @@ func (rw *Rewriter) rewriteSelectInDML(query *planner.Query, depth int) ([]*plan
 		return nil, err
 	}
 
-	return []*planner.Query{query}, nil
+	return []*qt.Query{query}, nil
 }
 
 // expandViewInQuery replaces a view's range table entry with the
@@ -236,10 +237,10 @@ func (rw *Rewriter) rewriteSelectInDML(query *planner.Query, depth int) ([]*plan
 //
 // This mirrors PostgreSQL's ApplyRetrieveRule() in rewriteHandler.c.
 func (rw *Rewriter) expandViewInQuery(
-	query *planner.Query,
+	query *qt.Query,
 	rteIdx int,
-	viewRTE *planner.RangeTblEntry,
-	viewQuery *planner.Query,
+	viewRTE *qt.RangeTblEntry,
+	viewQuery *qt.Query,
 ) {
 	// The view's range table entries get appended to the outer query's
 	// range table. We need to offset all RTIndex references in the
@@ -263,7 +264,7 @@ func (rw *Rewriter) expandViewInQuery(
 	var mappings []colMapping
 
 	for _, te := range viewQuery.TargetList {
-		if cv, ok := te.Expr.(*planner.ColumnVar); ok {
+		if cv, ok := te.Expr.(*qt.ColumnVar); ok {
 			mappings = append(mappings, colMapping{
 				newRTIndex: baseOffset + cv.RTIndex,
 				newColNum:  cv.ColNum,
@@ -297,7 +298,7 @@ func (rw *Rewriter) expandViewInQuery(
 // ColumnVar references to the view RTE with references to the
 // underlying table columns.
 func (rw *Rewriter) rewriteVarsInQuery(
-	query *planner.Query,
+	query *qt.Query,
 	viewRTIndex int,
 	mappings []colMapping,
 	baseOffset int,
@@ -329,23 +330,23 @@ func (rw *Rewriter) rewriteVarsInQuery(
 // rewriteVarsInExpr replaces ColumnVar nodes that reference the view
 // RTE with the mapped underlying column references.
 func (rw *Rewriter) rewriteVarsInExpr(
-	expr planner.AnalyzedExpr,
+	expr qt.AnalyzedExpr,
 	viewRTIndex int,
 	mappings []colMapping,
-) planner.AnalyzedExpr {
+) qt.AnalyzedExpr {
 	if expr == nil {
 		return nil
 	}
 
 	switch e := expr.(type) {
-	case *planner.ColumnVar:
+	case *qt.ColumnVar:
 		if e.RTIndex != viewRTIndex {
 			return e
 		}
 		// Find the mapping for this column by matching column name.
 		for _, m := range mappings {
 			if strings.EqualFold(m.newColName, e.ColName) {
-				return &planner.ColumnVar{
+				return &qt.ColumnVar{
 					RTIndex:  m.newRTIndex,
 					ColNum:   m.newColNum,
 					ColName:  m.newColName,
@@ -357,23 +358,23 @@ func (rw *Rewriter) rewriteVarsInExpr(
 		}
 		return e
 
-	case *planner.OpExpr:
-		return &planner.OpExpr{
+	case *qt.OpExpr:
+		return &qt.OpExpr{
 			Op:        e.Op,
 			Left:      rw.rewriteVarsInExpr(e.Left, viewRTIndex, mappings),
 			Right:     rw.rewriteVarsInExpr(e.Right, viewRTIndex, mappings),
 			ResultTyp: e.ResultTyp,
 		}
 
-	case *planner.BoolExprNode:
-		newArgs := make([]planner.AnalyzedExpr, len(e.Args))
+	case *qt.BoolExprNode:
+		newArgs := make([]qt.AnalyzedExpr, len(e.Args))
 		for i, arg := range e.Args {
 			newArgs[i] = rw.rewriteVarsInExpr(arg, viewRTIndex, mappings)
 		}
-		return &planner.BoolExprNode{Op: e.Op, Args: newArgs}
+		return &qt.BoolExprNode{Op: e.Op, Args: newArgs}
 
-	case *planner.NullTestExpr:
-		return &planner.NullTestExpr{
+	case *qt.NullTestExpr:
+		return &qt.NullTestExpr{
 			Arg:   rw.rewriteVarsInExpr(e.Arg, viewRTIndex, mappings),
 			IsNot: e.IsNot,
 		}
@@ -387,9 +388,9 @@ func (rw *Rewriter) rewriteVarsInExpr(
 // tree with the view query's join tree (possibly including its own
 // joins and quals).
 func (rw *Rewriter) replaceJoinTreeRef(
-	query *planner.Query,
+	query *qt.Query,
 	viewRTIndex int,
-	viewJoinTree *planner.FromExpr,
+	viewJoinTree *qt.FromExpr,
 	baseOffset int,
 ) {
 	// Offset the view's join tree references.
@@ -401,9 +402,9 @@ func (rw *Rewriter) replaceJoinTreeRef(
 	if viewJoinTree.Quals != nil {
 		viewQual := rw.offsetExprRTIndexes(viewJoinTree.Quals, baseOffset)
 		if query.JoinTree.Quals != nil {
-			query.JoinTree.Quals = &planner.BoolExprNode{
-				Op:   planner.BoolAnd,
-				Args: []planner.AnalyzedExpr{query.JoinTree.Quals, viewQual},
+			query.JoinTree.Quals = &qt.BoolExprNode{
+				Op:   qt.BoolAnd,
+				Args: []qt.AnalyzedExpr{query.JoinTree.Quals, viewQual},
 			}
 		} else {
 			query.JoinTree.Quals = viewQual
@@ -411,9 +412,9 @@ func (rw *Rewriter) replaceJoinTreeRef(
 	}
 
 	// Replace the view's RangeTblRef in the FROM list.
-	newFromList := make([]planner.JoinTreeNode, 0, len(query.JoinTree.FromList)+len(offsetItems)-1)
+	newFromList := make([]qt.JoinTreeNode, 0, len(query.JoinTree.FromList)+len(offsetItems)-1)
 	for _, item := range query.JoinTree.FromList {
-		if ref, ok := item.(*planner.RangeTblRef); ok && ref.RTIndex == viewRTIndex {
+		if ref, ok := item.(*qt.RangeTblRef); ok && ref.RTIndex == viewRTIndex {
 			newFromList = append(newFromList, offsetItems...)
 		} else {
 			newFromList = append(newFromList, item)
@@ -423,17 +424,17 @@ func (rw *Rewriter) replaceJoinTreeRef(
 }
 
 // offsetJoinTreeNodes adjusts RTIndex values in join tree nodes.
-func (rw *Rewriter) offsetJoinTreeNodes(items []planner.JoinTreeNode, offset int) []planner.JoinTreeNode {
-	result := make([]planner.JoinTreeNode, len(items))
+func (rw *Rewriter) offsetJoinTreeNodes(items []qt.JoinTreeNode, offset int) []qt.JoinTreeNode {
+	result := make([]qt.JoinTreeNode, len(items))
 	for i, item := range items {
 		switch n := item.(type) {
-		case *planner.RangeTblRef:
-			result[i] = &planner.RangeTblRef{RTIndex: n.RTIndex + offset}
-		case *planner.JoinNode:
-			result[i] = &planner.JoinNode{
+		case *qt.RangeTblRef:
+			result[i] = &qt.RangeTblRef{RTIndex: n.RTIndex + offset}
+		case *qt.JoinNode:
+			result[i] = &qt.JoinNode{
 				JoinType: n.JoinType,
-				Left:     rw.offsetJoinTreeNodes([]planner.JoinTreeNode{n.Left}, offset)[0],
-				Right:    rw.offsetJoinTreeNodes([]planner.JoinTreeNode{n.Right}, offset)[0],
+				Left:     rw.offsetJoinTreeNodes([]qt.JoinTreeNode{n.Left}, offset)[0],
+				Right:    rw.offsetJoinTreeNodes([]qt.JoinTreeNode{n.Right}, offset)[0],
 				Quals:    rw.offsetExprRTIndexes(n.Quals, offset),
 				LeftRTI:  n.LeftRTI + offset,
 				RightRTI: n.RightRTI + offset,
@@ -446,13 +447,13 @@ func (rw *Rewriter) offsetJoinTreeNodes(items []planner.JoinTreeNode, offset int
 }
 
 // offsetExprRTIndexes adjusts RTIndex values in ColumnVar expressions.
-func (rw *Rewriter) offsetExprRTIndexes(expr planner.AnalyzedExpr, offset int) planner.AnalyzedExpr {
+func (rw *Rewriter) offsetExprRTIndexes(expr qt.AnalyzedExpr, offset int) qt.AnalyzedExpr {
 	if expr == nil {
 		return nil
 	}
 	switch e := expr.(type) {
-	case *planner.ColumnVar:
-		return &planner.ColumnVar{
+	case *qt.ColumnVar:
+		return &qt.ColumnVar{
 			RTIndex:  e.RTIndex + offset,
 			ColNum:   e.ColNum,
 			ColName:  e.ColName,
@@ -460,21 +461,21 @@ func (rw *Rewriter) offsetExprRTIndexes(expr planner.AnalyzedExpr, offset int) p
 			VarType:  e.VarType,
 			AttIndex: e.AttIndex,
 		}
-	case *planner.OpExpr:
-		return &planner.OpExpr{
+	case *qt.OpExpr:
+		return &qt.OpExpr{
 			Op:        e.Op,
 			Left:      rw.offsetExprRTIndexes(e.Left, offset),
 			Right:     rw.offsetExprRTIndexes(e.Right, offset),
 			ResultTyp: e.ResultTyp,
 		}
-	case *planner.BoolExprNode:
-		newArgs := make([]planner.AnalyzedExpr, len(e.Args))
+	case *qt.BoolExprNode:
+		newArgs := make([]qt.AnalyzedExpr, len(e.Args))
 		for i, arg := range e.Args {
 			newArgs[i] = rw.offsetExprRTIndexes(arg, offset)
 		}
-		return &planner.BoolExprNode{Op: e.Op, Args: newArgs}
-	case *planner.NullTestExpr:
-		return &planner.NullTestExpr{
+		return &qt.BoolExprNode{Op: e.Op, Args: newArgs}
+	case *qt.NullTestExpr:
+		return &qt.NullTestExpr{
 			Arg:   rw.offsetExprRTIndexes(e.Arg, offset),
 			IsNot: e.IsNot,
 		}
@@ -484,7 +485,7 @@ func (rw *Rewriter) offsetExprRTIndexes(expr planner.AnalyzedExpr, offset int) p
 }
 
 // parseAndAnalyze parses a SQL string and runs it through the analyzer.
-func (rw *Rewriter) parseAndAnalyze(sql string) (*planner.Query, error) {
+func (rw *Rewriter) parseAndAnalyze(sql string) (*qt.Query, error) {
 	stmts, err := parser.Parse(strings.NewReader(sql), nil)
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
@@ -502,7 +503,7 @@ func (rw *Rewriter) parseAndAnalyze(sql string) (*planner.Query, error) {
 // applyRLSPolicies checks if any range table entries have RLS enabled
 // and injects policy quals into the query. This is called after view
 // expansion so that policies on the underlying tables are applied.
-func (rw *Rewriter) applyRLSPolicies(query *planner.Query) error {
+func (rw *Rewriter) applyRLSPolicies(query *qt.Query) error {
 	if query.JoinTree == nil {
 		return nil
 	}
@@ -525,7 +526,7 @@ func (rw *Rewriter) applyRLSPolicies(query *planner.Query) error {
 
 		// Build the combined USING qual.
 		// Permissive policies are OR'd together.
-		var permQual planner.AnalyzedExpr
+		var permQual qt.AnalyzedExpr
 		for _, p := range permissive {
 			if p.UsingExpr == "" {
 				continue
@@ -537,15 +538,15 @@ func (rw *Rewriter) applyRLSPolicies(query *planner.Query) error {
 			if permQual == nil {
 				permQual = policyQual
 			} else {
-				permQual = &planner.BoolExprNode{
-					Op:   planner.BoolOr,
-					Args: []planner.AnalyzedExpr{permQual, policyQual},
+				permQual = &qt.BoolExprNode{
+					Op:   qt.BoolOr,
+					Args: []qt.AnalyzedExpr{permQual, policyQual},
 				}
 			}
 		}
 
 		// Restrictive policies are AND'd together.
-		var restQual planner.AnalyzedExpr
+		var restQual qt.AnalyzedExpr
 		for _, p := range restrictive {
 			if p.UsingExpr == "" {
 				continue
@@ -557,19 +558,19 @@ func (rw *Rewriter) applyRLSPolicies(query *planner.Query) error {
 			if restQual == nil {
 				restQual = policyQual
 			} else {
-				restQual = &planner.BoolExprNode{
-					Op:   planner.BoolAnd,
-					Args: []planner.AnalyzedExpr{restQual, policyQual},
+				restQual = &qt.BoolExprNode{
+					Op:   qt.BoolAnd,
+					Args: []qt.AnalyzedExpr{restQual, policyQual},
 				}
 			}
 		}
 
 		// Combine: (permissive_combined) AND (restrictive_combined)
-		var combined planner.AnalyzedExpr
+		var combined qt.AnalyzedExpr
 		if permQual != nil && restQual != nil {
-			combined = &planner.BoolExprNode{
-				Op:   planner.BoolAnd,
-				Args: []planner.AnalyzedExpr{permQual, restQual},
+			combined = &qt.BoolExprNode{
+				Op:   qt.BoolAnd,
+				Args: []qt.AnalyzedExpr{permQual, restQual},
 			}
 		} else if permQual != nil {
 			combined = permQual
@@ -583,9 +584,9 @@ func (rw *Rewriter) applyRLSPolicies(query *planner.Query) error {
 
 		// Inject the combined qual into the query's join tree.
 		if query.JoinTree.Quals != nil {
-			query.JoinTree.Quals = &planner.BoolExprNode{
-				Op:   planner.BoolAnd,
-				Args: []planner.AnalyzedExpr{query.JoinTree.Quals, combined},
+			query.JoinTree.Quals = &qt.BoolExprNode{
+				Op:   qt.BoolAnd,
+				Args: []qt.AnalyzedExpr{query.JoinTree.Quals, combined},
 			}
 		} else {
 			query.JoinTree.Quals = combined
@@ -597,15 +598,15 @@ func (rw *Rewriter) applyRLSPolicies(query *planner.Query) error {
 
 // injectDefaultDeny adds a FALSE constant to deny all rows when RLS
 // is enabled but no policies match.
-func (rw *Rewriter) injectDefaultDeny(existing planner.AnalyzedExpr) planner.AnalyzedExpr {
-	deny := &planner.Const{
+func (rw *Rewriter) injectDefaultDeny(existing qt.AnalyzedExpr) qt.AnalyzedExpr {
+	deny := &qt.Const{
 		Value:     tuple.DBool(false),
 		ConstType: tuple.TypeBool,
 	}
 	if existing != nil {
-		return &planner.BoolExprNode{
-			Op:   planner.BoolAnd,
-			Args: []planner.AnalyzedExpr{existing, deny},
+		return &qt.BoolExprNode{
+			Op:   qt.BoolAnd,
+			Args: []qt.AnalyzedExpr{existing, deny},
 		}
 	}
 	return deny
@@ -614,7 +615,7 @@ func (rw *Rewriter) injectDefaultDeny(existing planner.AnalyzedExpr) planner.Ana
 // parsePolicyExpr parses a policy expression SQL string and resolves
 // it against the given range table entry. The expression can reference
 // columns of the table and the special value current_user.
-func (rw *Rewriter) parsePolicyExpr(exprSQL string, rte *planner.RangeTblEntry) (planner.AnalyzedExpr, error) {
+func (rw *Rewriter) parsePolicyExpr(exprSQL string, rte *qt.RangeTblEntry) (qt.AnalyzedExpr, error) {
 	// Wrap the expression in a SELECT WHERE to make it parseable.
 	wrappedSQL := fmt.Sprintf("SELECT 1 FROM %s WHERE %s", rte.RelName, exprSQL)
 
@@ -650,16 +651,16 @@ func (rw *Rewriter) parsePolicyExpr(exprSQL string, rte *planner.RangeTblEntry) 
 
 // remapPolicyVars rewrites ColumnVar nodes in a policy expression to
 // reference the outer query's range table entry.
-func (rw *Rewriter) remapPolicyVars(expr planner.AnalyzedExpr, rte *planner.RangeTblEntry) planner.AnalyzedExpr {
+func (rw *Rewriter) remapPolicyVars(expr qt.AnalyzedExpr, rte *qt.RangeTblEntry) qt.AnalyzedExpr {
 	if expr == nil {
 		return nil
 	}
 	switch e := expr.(type) {
-	case *planner.ColumnVar:
+	case *qt.ColumnVar:
 		// Find the matching column in the outer RTE.
 		for i, col := range rte.Columns {
 			if strings.EqualFold(col.Name, e.ColName) {
-				return &planner.ColumnVar{
+				return &qt.ColumnVar{
 					RTIndex:  rte.RTIndex,
 					ColNum:   col.ColNum,
 					ColName:  col.Name,
@@ -670,21 +671,21 @@ func (rw *Rewriter) remapPolicyVars(expr planner.AnalyzedExpr, rte *planner.Rang
 			}
 		}
 		return e
-	case *planner.OpExpr:
-		return &planner.OpExpr{
+	case *qt.OpExpr:
+		return &qt.OpExpr{
 			Op:        e.Op,
 			Left:      rw.remapPolicyVars(e.Left, rte),
 			Right:     rw.remapPolicyVars(e.Right, rte),
 			ResultTyp: e.ResultTyp,
 		}
-	case *planner.BoolExprNode:
-		newArgs := make([]planner.AnalyzedExpr, len(e.Args))
+	case *qt.BoolExprNode:
+		newArgs := make([]qt.AnalyzedExpr, len(e.Args))
 		for i, arg := range e.Args {
 			newArgs[i] = rw.remapPolicyVars(arg, rte)
 		}
-		return &planner.BoolExprNode{Op: e.Op, Args: newArgs}
-	case *planner.NullTestExpr:
-		return &planner.NullTestExpr{
+		return &qt.BoolExprNode{Op: e.Op, Args: newArgs}
+	case *qt.NullTestExpr:
+		return &qt.NullTestExpr{
 			Arg:   rw.remapPolicyVars(e.Arg, rte),
 			IsNot: e.IsNot,
 		}
@@ -695,34 +696,34 @@ func (rw *Rewriter) remapPolicyVars(expr planner.AnalyzedExpr, rte *planner.Rang
 
 // resolveCurrentUser replaces ColumnVar nodes named "current_user"
 // with a string constant of the actual current user.
-func (rw *Rewriter) resolveCurrentUser(expr planner.AnalyzedExpr) planner.AnalyzedExpr {
+func (rw *Rewriter) resolveCurrentUser(expr qt.AnalyzedExpr) qt.AnalyzedExpr {
 	if expr == nil {
 		return nil
 	}
 	switch e := expr.(type) {
-	case *planner.ColumnVar:
+	case *qt.ColumnVar:
 		if strings.EqualFold(e.ColName, "current_user") {
-			return &planner.Const{
+			return &qt.Const{
 				Value:     tuple.DText(rw.CurrentUser),
 				ConstType: tuple.TypeText,
 			}
 		}
 		return e
-	case *planner.OpExpr:
-		return &planner.OpExpr{
+	case *qt.OpExpr:
+		return &qt.OpExpr{
 			Op:        e.Op,
 			Left:      rw.resolveCurrentUser(e.Left),
 			Right:     rw.resolveCurrentUser(e.Right),
 			ResultTyp: e.ResultTyp,
 		}
-	case *planner.BoolExprNode:
-		newArgs := make([]planner.AnalyzedExpr, len(e.Args))
+	case *qt.BoolExprNode:
+		newArgs := make([]qt.AnalyzedExpr, len(e.Args))
 		for i, arg := range e.Args {
 			newArgs[i] = rw.resolveCurrentUser(arg)
 		}
-		return &planner.BoolExprNode{Op: e.Op, Args: newArgs}
-	case *planner.NullTestExpr:
-		return &planner.NullTestExpr{
+		return &qt.BoolExprNode{Op: e.Op, Args: newArgs}
+	case *qt.NullTestExpr:
+		return &qt.NullTestExpr{
 			Arg:   rw.resolveCurrentUser(e.Arg),
 			IsNot: e.IsNot,
 		}
@@ -731,15 +732,15 @@ func (rw *Rewriter) resolveCurrentUser(expr planner.AnalyzedExpr) planner.Analyz
 	}
 }
 
-func cmdToPolicy(cmd planner.CmdType) catalog.PolicyCmd {
+func cmdToPolicy(cmd qt.CmdType) catalog.PolicyCmd {
 	switch cmd {
-	case planner.CmdSelect:
+	case qt.CmdSelect:
 		return catalog.PolicyCmdSelect
-	case planner.CmdInsert:
+	case qt.CmdInsert:
 		return catalog.PolicyCmdInsert
-	case planner.CmdUpdate:
+	case qt.CmdUpdate:
 		return catalog.PolicyCmdUpdate
-	case planner.CmdDelete:
+	case qt.CmdDelete:
 		return catalog.PolicyCmdDelete
 	default:
 		return catalog.PolicyCmdAll

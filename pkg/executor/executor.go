@@ -15,7 +15,9 @@ import (
 	"github.com/gololadb/gopgsql/parser"
 	"github.com/gololadb/loladb/pkg/catalog"
 	"github.com/gololadb/loladb/pkg/storage/index"
+	az "github.com/gololadb/loladb/pkg/analyzer"
 	"github.com/gololadb/loladb/pkg/planner"
+	qt "github.com/gololadb/loladb/pkg/querytree"
 	"github.com/gololadb/loladb/pkg/storage/slottedpage"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -483,7 +485,7 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 		var rows [][]tuple.Datum
 		if n.Filter != nil {
 			for _, r := range cte.Rows {
-				row := &planner.Row{Columns: r, Names: cols}
+				row := &qt.Row{Columns: r, Names: cols}
 				val, err := n.Filter.Eval(row)
 				if err != nil {
 					continue
@@ -536,8 +538,8 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 	if children, ok := ex.Cat.Inheritance[n.Table]; ok && len(children) > 0 {
 		// Scan the parent table itself first.
 		ex.Cat.SeqScan(n.Table, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-			row := &planner.Row{Columns: tup.Columns, Names: colNames}
-			if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
+			row := &qt.Row{Columns: tup.Columns, Names: colNames}
+			if n.Filter != nil && !qt.EvalBool(n.Filter, row) {
 				return true
 			}
 			rowCopy := make([]tuple.Datum, len(tup.Columns))
@@ -554,8 +556,8 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 				if len(cols) > parentWidth {
 					cols = cols[:parentWidth]
 				}
-				row := &planner.Row{Columns: cols, Names: colNames}
-				if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
+				row := &qt.Row{Columns: cols, Names: colNames}
+				if n.Filter != nil && !qt.EvalBool(n.Filter, row) {
 					return true
 				}
 				rowCopy := make([]tuple.Datum, len(cols))
@@ -571,8 +573,8 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 	if pinfo, ok := ex.Cat.Partitions[n.Table]; ok && len(pinfo.Children) > 0 {
 		for _, child := range pinfo.Children {
 			ex.Cat.SeqScan(child.TableName, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
-				row := &planner.Row{Columns: tup.Columns, Names: colNames}
-				if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
+				row := &qt.Row{Columns: tup.Columns, Names: colNames}
+				if n.Filter != nil && !qt.EvalBool(n.Filter, row) {
 					return true
 				}
 				rowCopy := make([]tuple.Datum, len(tup.Columns))
@@ -597,8 +599,8 @@ func (ex *Executor) execSeqScan(n *planner.PhysSeqScan) (*Result, error) {
 		if doSample && rand.Float64() >= sampleFrac {
 			return true // skip this row
 		}
-		row := &planner.Row{Columns: tup.Columns, Names: colNames}
-		if n.Filter != nil && !planner.EvalBool(n.Filter, row) {
+		row := &qt.Row{Columns: tup.Columns, Names: colNames}
+		if n.Filter != nil && !qt.EvalBool(n.Filter, row) {
 			return true
 		}
 		rowCopy := make([]tuple.Datum, len(tup.Columns))
@@ -616,7 +618,7 @@ func (ex *Executor) execIndexScan(n *planner.PhysIndexScan) (*Result, error) {
 	if n.Key == nil {
 		return nil, fmt.Errorf("executor: IndexScan requires a key")
 	}
-	keyVal, err := n.Key.Eval(&planner.Row{})
+	keyVal, err := n.Key.Eval(&qt.Row{})
 	if err != nil {
 		return nil, err
 	}
@@ -662,7 +664,7 @@ func (ex *Executor) execBitmapHeapScan(n *planner.PhysBitmapHeapScan) (*Result, 
 	if bitmapIdx.Key == nil {
 		return nil, fmt.Errorf("executor: BitmapIndexScan requires a key")
 	}
-	keyVal, err := bitmapIdx.Key.Eval(&planner.Row{})
+	keyVal, err := bitmapIdx.Key.Eval(&qt.Row{})
 	if err != nil {
 		return nil, err
 	}
@@ -695,8 +697,8 @@ func (ex *Executor) execBitmapHeapScan(n *planner.PhysBitmapHeapScan) (*Result, 
 		}
 		// Recheck condition (lossy bitmap may include false positives).
 		if n.Recheck != nil {
-			row := &planner.Row{Columns: tup.Columns, Names: colNames}
-			if !planner.EvalBool(n.Recheck, row) {
+			row := &qt.Row{Columns: tup.Columns, Names: colNames}
+			if !qt.EvalBool(n.Recheck, row) {
 				continue
 			}
 		}
@@ -717,8 +719,8 @@ func (ex *Executor) execFilter(n *planner.PhysFilter) (*Result, error) {
 
 	result := &Result{Columns: child.Columns}
 	for _, row := range child.Rows {
-		r := &planner.Row{Columns: row, Names: child.Columns}
-		if planner.EvalBool(n.Predicate, r) {
+		r := &qt.Row{Columns: row, Names: child.Columns}
+		if qt.EvalBool(n.Predicate, r) {
 			result.Rows = append(result.Rows, row)
 		}
 	}
@@ -744,7 +746,7 @@ func (ex *Executor) execProject(n *planner.PhysProject) (*Result, error) {
 	// Check if any projected expression is a set-returning function (unnest).
 	srfIdx := -1
 	for i, expr := range n.Exprs {
-		if fn, ok := expr.(*planner.ExprFunc); ok && strings.ToLower(fn.Name) == "unnest" {
+		if fn, ok := expr.(*qt.ExprFunc); ok && strings.ToLower(fn.Name) == "unnest" {
 			srfIdx = i
 			break
 		}
@@ -752,11 +754,11 @@ func (ex *Executor) execProject(n *planner.PhysProject) (*Result, error) {
 
 	result := &Result{Columns: n.Names}
 	for _, row := range child.Rows {
-		r := &planner.Row{Columns: row, Names: child.Columns}
+		r := &qt.Row{Columns: row, Names: child.Columns}
 
 		if srfIdx >= 0 {
 			// Evaluate the SRF argument to get the array, then expand.
-			fn := n.Exprs[srfIdx].(*planner.ExprFunc)
+			fn := n.Exprs[srfIdx].(*qt.ExprFunc)
 			arrVal, err := fn.Args[0].Eval(r)
 			if err != nil {
 				return nil, err
@@ -858,8 +860,8 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 		for j, innerRow := range inner.Rows {
 			combined := append(append([]tuple.Datum{}, outerRow...), innerRow...)
 			if n.Condition != nil {
-				r := &planner.Row{Columns: combined, Names: colNames}
-				if !planner.EvalBool(n.Condition, r) {
+				r := &qt.Row{Columns: combined, Names: colNames}
+				if !qt.EvalBool(n.Condition, r) {
 					continue
 				}
 			}
@@ -868,7 +870,7 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 			result.Rows = append(result.Rows, combined)
 		}
 		// LEFT/FULL JOIN: emit outer row with NULLs if no match.
-		if !matched && (n.Type == planner.JoinLeft || n.Type == planner.JoinFull) {
+		if !matched && (n.Type == qt.JoinLeft || n.Type == qt.JoinFull) {
 			nulls := make([]tuple.Datum, len(inner.Columns))
 			for i := range nulls {
 				nulls[i] = tuple.DNull()
@@ -879,7 +881,7 @@ func (ex *Executor) execNestedLoopJoin(n *planner.PhysNestedLoopJoin) (*Result, 
 	}
 
 	// RIGHT/FULL JOIN: emit unmatched inner rows with NULL outer columns.
-	if n.Type == planner.JoinRight || n.Type == planner.JoinFull {
+	if n.Type == qt.JoinRight || n.Type == qt.JoinFull {
 		for j, innerRow := range inner.Rows {
 			if innerMatched[j] {
 				continue
@@ -913,13 +915,13 @@ func (ex *Executor) execLateralNestedLoop(n *planner.PhysNestedLoopJoin, sub *pl
 	colNames := append(outer.Columns, innerColNames...)
 	result := &Result{Columns: colNames}
 
-	savedOuter := planner.OuterRowContext
-	defer func() { planner.OuterRowContext = savedOuter }()
+	savedOuter := qt.OuterRowContext
+	defer func() { qt.OuterRowContext = savedOuter }()
 
 	for _, outerRow := range outer.Rows {
 		// Set the outer row context so ExprColumn.Eval can resolve
 		// references to outer table columns.
-		planner.OuterRowContext = &planner.Row{
+		qt.OuterRowContext = &qt.Row{
 			Columns: outerRow,
 			Names:   outer.Columns,
 		}
@@ -933,8 +935,8 @@ func (ex *Executor) execLateralNestedLoop(n *planner.PhysNestedLoopJoin, sub *pl
 		for _, innerRow := range inner.Rows {
 			combined := append(append([]tuple.Datum{}, outerRow...), innerRow...)
 			if n.Condition != nil {
-				r := &planner.Row{Columns: combined, Names: colNames}
-				if !planner.EvalBool(n.Condition, r) {
+				r := &qt.Row{Columns: combined, Names: colNames}
+				if !qt.EvalBool(n.Condition, r) {
 					continue
 				}
 			}
@@ -943,7 +945,7 @@ func (ex *Executor) execLateralNestedLoop(n *planner.PhysNestedLoopJoin, sub *pl
 		}
 
 		// LEFT JOIN: emit outer row with NULLs if no match.
-		if !matched && (n.Type == planner.JoinLeft || n.Type == planner.JoinFull) {
+		if !matched && (n.Type == qt.JoinLeft || n.Type == qt.JoinFull) {
 			nulls := make([]tuple.Datum, len(innerColNames))
 			for i := range nulls {
 				nulls[i] = tuple.DNull()
@@ -1036,7 +1038,7 @@ func (ex *Executor) execParamNestedLoop(n *planner.PhysNestedLoopJoin) (*Result,
 			result.Rows = append(result.Rows, combined)
 		}
 
-		if !matched && n.Type == planner.JoinLeft {
+		if !matched && n.Type == qt.JoinLeft {
 			nulls := make([]tuple.Datum, len(innerColNames))
 			for i := range nulls {
 				nulls[i] = tuple.DNull()
@@ -1062,7 +1064,7 @@ func (ex *Executor) execHashJoin(n *planner.PhysHashJoin) (*Result, error) {
 	colNames := append(outer.Columns, inner.Columns...)
 
 	// Extract the join columns from the condition.
-	binOp, ok := n.Condition.(*planner.ExprBinOp)
+	binOp, ok := n.Condition.(*qt.ExprBinOp)
 	if !ok {
 		// Fall back to nested loop.
 		return ex.execNestedLoopJoin(&planner.PhysNestedLoopJoin{
@@ -1071,8 +1073,8 @@ func (ex *Executor) execHashJoin(n *planner.PhysHashJoin) (*Result, error) {
 		})
 	}
 
-	leftCol, _ := binOp.Left.(*planner.ExprColumn)
-	rightCol, _ := binOp.Right.(*planner.ExprColumn)
+	leftCol, _ := binOp.Left.(*qt.ExprColumn)
+	rightCol, _ := binOp.Right.(*qt.ExprColumn)
 	if leftCol == nil || rightCol == nil {
 		return ex.execNestedLoopJoin(&planner.PhysNestedLoopJoin{
 			Type: n.Type, Condition: n.Condition,
@@ -1115,7 +1117,7 @@ func (ex *Executor) execHashJoin(n *planner.PhysHashJoin) (*Result, error) {
 			innerMatched[idx] = true
 			result.Rows = append(result.Rows, combined)
 		}
-		if !matched && (n.Type == planner.JoinLeft || n.Type == planner.JoinFull) {
+		if !matched && (n.Type == qt.JoinLeft || n.Type == qt.JoinFull) {
 			nulls := make([]tuple.Datum, len(inner.Columns))
 			for i := range nulls {
 				nulls[i] = tuple.DNull()
@@ -1126,7 +1128,7 @@ func (ex *Executor) execHashJoin(n *planner.PhysHashJoin) (*Result, error) {
 	}
 
 	// RIGHT/FULL JOIN: emit unmatched inner rows.
-	if n.Type == planner.JoinRight || n.Type == planner.JoinFull {
+	if n.Type == qt.JoinRight || n.Type == qt.JoinFull {
 		for j, innerRow := range inner.Rows {
 			if innerMatched[j] {
 				continue
@@ -1207,7 +1209,7 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 	groupIndex := map[string]*groupEntry{} // hash key → entry
 
 	for _, row := range child.Rows {
-		r := &planner.Row{Columns: row, Names: child.Columns}
+		r := &qt.Row{Columns: row, Names: child.Columns}
 
 		// Compute group key.
 		groupKey := make([]tuple.Datum, len(n.GroupExprs))
@@ -1274,7 +1276,7 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 			if ad.Distinct {
 				dup := false
 				for _, prev := range st.vals {
-					if planner.CompareDatums(prev, val) == 0 {
+					if qt.CompareDatums(prev, val) == 0 {
 						dup = true
 						break
 					}
@@ -1312,11 +1314,11 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				st.sumXY += x * y
 				st.countN++
 			case "min":
-				if !st.hasVal || planner.CompareDatums(val, st.min) < 0 {
+				if !st.hasVal || qt.CompareDatums(val, st.min) < 0 {
 					st.min = val
 				}
 			case "max":
-				if !st.hasVal || planner.CompareDatums(val, st.max) > 0 {
+				if !st.hasVal || qt.CompareDatums(val, st.max) > 0 {
 					st.max = val
 				}
 			case "string_agg":
@@ -1372,7 +1374,7 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 	for _, expr := range n.GroupExprs {
 		name := expr.String()
 		// Try to match against child column names for better resolution.
-		if ec, ok := expr.(*planner.ExprColumn); ok {
+		if ec, ok := expr.(*qt.ExprColumn); ok {
 			for _, cn := range child.Columns {
 				bare := cn
 				if idx := strings.LastIndex(cn, "."); idx >= 0 {
@@ -1638,14 +1640,14 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 					// Get the fraction argument.
 					frac := 0.5
 					if len(ad.ArgExprs) > 0 {
-						fv, err := ad.ArgExprs[0].Eval(&planner.Row{})
+						fv, err := ad.ArgExprs[0].Eval(&qt.Row{})
 						if err == nil {
 							frac = datumToFloat64(fv)
 						}
 					}
 					// Sort collected values.
 					sort.Slice(st.arrBuf, func(a, b int) bool {
-						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+						return qt.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
 					})
 					// Continuous interpolation.
 					n := float64(len(st.arrBuf))
@@ -1666,13 +1668,13 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				} else {
 					frac := 0.5
 					if len(ad.ArgExprs) > 0 {
-						fv, err := ad.ArgExprs[0].Eval(&planner.Row{})
+						fv, err := ad.ArgExprs[0].Eval(&qt.Row{})
 						if err == nil {
 							frac = datumToFloat64(fv)
 						}
 					}
 					sort.Slice(st.arrBuf, func(a, b int) bool {
-						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+						return qt.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
 					})
 					// Discrete: return the first value whose cumulative fraction >= frac.
 					idx := int(math.Ceil(frac*float64(len(st.arrBuf)))) - 1
@@ -1713,14 +1715,14 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				} else {
 					hyp := tuple.DNull()
 					if len(ad.ArgExprs) > 0 {
-						hyp, _ = ad.ArgExprs[0].Eval(&planner.Row{})
+						hyp, _ = ad.ArgExprs[0].Eval(&qt.Row{})
 					}
 					sort.Slice(st.arrBuf, func(a, b int) bool {
-						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+						return qt.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
 					})
 					rank := int64(1)
 					for _, v := range st.arrBuf {
-						if planner.CompareDatums(v, hyp) < 0 {
+						if qt.CompareDatums(v, hyp) < 0 {
 							rank++
 						} else {
 							break
@@ -1734,16 +1736,16 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				} else {
 					hyp := tuple.DNull()
 					if len(ad.ArgExprs) > 0 {
-						hyp, _ = ad.ArgExprs[0].Eval(&planner.Row{})
+						hyp, _ = ad.ArgExprs[0].Eval(&qt.Row{})
 					}
 					sort.Slice(st.arrBuf, func(a, b int) bool {
-						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+						return qt.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
 					})
 					// Count distinct values less than hyp.
 					seen := map[string]bool{}
 					denseRank := int64(1)
 					for _, v := range st.arrBuf {
-						if planner.CompareDatums(v, hyp) < 0 {
+						if qt.CompareDatums(v, hyp) < 0 {
 							key := datumToStringVal(v)
 							if !seen[key] {
 								seen[key] = true
@@ -1759,14 +1761,14 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				} else {
 					hyp := tuple.DNull()
 					if len(ad.ArgExprs) > 0 {
-						hyp, _ = ad.ArgExprs[0].Eval(&planner.Row{})
+						hyp, _ = ad.ArgExprs[0].Eval(&qt.Row{})
 					}
 					sort.Slice(st.arrBuf, func(a, b int) bool {
-						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+						return qt.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
 					})
 					rank := int64(0)
 					for _, v := range st.arrBuf {
-						if planner.CompareDatums(v, hyp) < 0 {
+						if qt.CompareDatums(v, hyp) < 0 {
 							rank++
 						}
 					}
@@ -1780,15 +1782,15 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				} else {
 					hyp := tuple.DNull()
 					if len(ad.ArgExprs) > 0 {
-						hyp, _ = ad.ArgExprs[0].Eval(&planner.Row{})
+						hyp, _ = ad.ArgExprs[0].Eval(&qt.Row{})
 					}
 					sort.Slice(st.arrBuf, func(a, b int) bool {
-						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+						return qt.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
 					})
 					// Count values <= hyp.
 					count := int64(0)
 					for _, v := range st.arrBuf {
-						if planner.CompareDatums(v, hyp) <= 0 {
+						if qt.CompareDatums(v, hyp) <= 0 {
 							count++
 						}
 					}
@@ -1807,8 +1809,8 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 		}
 		// Apply HAVING filter.
 		if n.HavingQual != nil {
-			r := &planner.Row{Columns: row, Names: outCols}
-			if !planner.EvalBool(n.HavingQual, r) {
+			r := &qt.Row{Columns: row, Names: outCols}
+			if !qt.EvalBool(n.HavingQual, r) {
 				continue
 			}
 		}
@@ -1889,11 +1891,11 @@ func (ex *Executor) execCustomAggregate(funcName string, values []tuple.Datum) (
 	// Apply sfunc(state, value) for each collected value.
 	sfunc := strings.ToLower(aggDef.SFunc)
 	for _, val := range values {
-		args := []planner.AnalyzedExpr{
-			&planner.Const{Value: state, ConstType: state.Type},
-			&planner.Const{Value: val, ConstType: val.Type},
+		args := []qt.AnalyzedExpr{
+			&qt.Const{Value: state, ConstType: state.Type},
+			&qt.Const{Value: val, ConstType: val.Type},
 		}
-		result, err := planner.EvalBuiltinFunc(sfunc, args, &planner.Row{})
+		result, err := qt.EvalBuiltinFunc(sfunc, args, &qt.Row{})
 		if err != nil {
 			return tuple.DNull(), fmt.Errorf("custom aggregate %q sfunc %q: %w", funcName, sfunc, err)
 		}
@@ -1903,10 +1905,10 @@ func (ex *Executor) execCustomAggregate(funcName string, values []tuple.Datum) (
 	// Apply finalfunc if specified.
 	if aggDef.FinalFunc != "" {
 		ffunc := strings.ToLower(aggDef.FinalFunc)
-		args := []planner.AnalyzedExpr{
-			&planner.Const{Value: state, ConstType: state.Type},
+		args := []qt.AnalyzedExpr{
+			&qt.Const{Value: state, ConstType: state.Type},
 		}
-		result, err := planner.EvalBuiltinFunc(ffunc, args, &planner.Row{})
+		result, err := qt.EvalBuiltinFunc(ffunc, args, &qt.Row{})
 		if err != nil {
 			return tuple.DNull(), fmt.Errorf("custom aggregate %q finalfunc %q: %w", funcName, ffunc, err)
 		}
@@ -1923,7 +1925,7 @@ func (ex *Executor) execGroupingSets(n *planner.PhysAggregate, child *Result) (*
 	var outCols []string
 	for _, expr := range n.GroupExprs {
 		name := expr.String()
-		if ec, ok := expr.(*planner.ExprColumn); ok {
+		if ec, ok := expr.(*qt.ExprColumn); ok {
 			for _, cn := range child.Columns {
 				bare := cn
 				if idx := strings.LastIndex(cn, "."); idx >= 0 {
@@ -1974,7 +1976,7 @@ func (ex *Executor) execGroupingSets(n *planner.PhysAggregate, child *Result) (*
 		groupIndex := map[string]*groupEntry{}
 
 		for _, row := range child.Rows {
-			r := &planner.Row{Columns: row, Names: child.Columns}
+			r := &qt.Row{Columns: row, Names: child.Columns}
 
 			// Compute group key using only active expressions.
 			groupKey := make([]tuple.Datum, len(n.GroupExprs))
@@ -2036,7 +2038,7 @@ func (ex *Executor) execGroupingSets(n *planner.PhysAggregate, child *Result) (*
 				if ad.Distinct {
 					dup := false
 					for _, prev := range st.vals {
-						if planner.CompareDatums(prev, val) == 0 {
+						if qt.CompareDatums(prev, val) == 0 {
 							dup = true
 							break
 						}
@@ -2055,11 +2057,11 @@ func (ex *Executor) execGroupingSets(n *planner.PhysAggregate, child *Result) (*
 					st.sum += v
 					st.sumSq += v * v
 				case "min":
-					if !st.hasVal || planner.CompareDatums(val, st.min) < 0 {
+					if !st.hasVal || qt.CompareDatums(val, st.min) < 0 {
 						st.min = val
 					}
 				case "max":
-					if !st.hasVal || planner.CompareDatums(val, st.max) > 0 {
+					if !st.hasVal || qt.CompareDatums(val, st.max) > 0 {
 						st.max = val
 					}
 				case "string_agg":
@@ -2194,11 +2196,11 @@ func (ex *Executor) execSort(n *planner.PhysSort) (*Result, error) {
 
 	sort.SliceStable(result.Rows, func(i, j int) bool {
 		for _, key := range n.Keys {
-			ri := &planner.Row{Columns: result.Rows[i], Names: child.Columns}
-			rj := &planner.Row{Columns: result.Rows[j], Names: child.Columns}
+			ri := &qt.Row{Columns: result.Rows[i], Names: child.Columns}
+			rj := &qt.Row{Columns: result.Rows[j], Names: child.Columns}
 			vi, _ := key.Expr.Eval(ri)
 			vj, _ := key.Expr.Eval(rj)
-			cmp := planner.CompareDatums(vi, vj)
+			cmp := qt.CompareDatums(vi, vj)
 			if cmp == 0 {
 				continue
 			}
@@ -2224,13 +2226,13 @@ func (ex *Executor) execSetOp(n *planner.PhysSetOp) (*Result, error) {
 	result := &Result{Columns: left.Columns}
 
 	switch n.Op {
-	case planner.SetOpUnion:
+	case qt.SetOpUnion:
 		result.Rows = append(result.Rows, left.Rows...)
 		result.Rows = append(result.Rows, right.Rows...)
 		if !n.All {
 			result.Rows = deduplicateRows(result.Rows)
 		}
-	case planner.SetOpIntersect:
+	case qt.SetOpIntersect:
 		rightSet := make(map[string]int)
 		for _, row := range right.Rows {
 			rightSet[rowKey(row)]++
@@ -2246,7 +2248,7 @@ func (ex *Executor) execSetOp(n *planner.PhysSetOp) (*Result, error) {
 				}
 			}
 		}
-	case planner.SetOpExcept:
+	case qt.SetOpExcept:
 		rightSet := make(map[string]int)
 		for _, row := range right.Rows {
 			rightSet[rowKey(row)]++
@@ -2337,11 +2339,11 @@ func (ex *Executor) execInsertSelect(n *planner.PhysInsertSelect) (*Result, erro
 		return nil, err
 	}
 	// Convert to VALUES-style PhysInsert and delegate.
-	var values [][]planner.Expr
+	var values [][]qt.Expr
 	for _, row := range selectResult.Rows {
-		var rowExprs []planner.Expr
+		var rowExprs []qt.Expr
 		for _, d := range row {
-			rowExprs = append(rowExprs, &planner.ExprLiteral{Value: d})
+			rowExprs = append(rowExprs, &qt.ExprLiteral{Value: d})
 		}
 		values = append(values, rowExprs)
 	}
@@ -2401,7 +2403,7 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		// Evaluate provided expressions.
 		provided := make([]tuple.Datum, len(rowExprs))
 		for i, expr := range rowExprs {
-			val, err := expr.Eval(&planner.Row{})
+			val, err := expr.Eval(&qt.Row{})
 			if err != nil {
 				return nil, err
 			}
@@ -2481,11 +2483,11 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 		insertedID, err := ex.Cat.InsertInto(n.Table, values)
 		if err != nil {
 			if n.OnConflict != nil && strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
-				if n.OnConflict.Action == planner.OnConflictNothing {
+				if n.OnConflict.Action == qt.OnConflictNothing {
 					// DO NOTHING: skip this row.
 					continue
 				}
-				if n.OnConflict.Action == planner.OnConflictUpdate {
+				if n.OnConflict.Action == qt.OnConflictUpdate {
 					// DO UPDATE: find the conflicting row and update it.
 					resultRow, err := ex.execOnConflictUpdate(n, values, colNames, tableCols)
 					if err != nil {
@@ -2493,7 +2495,7 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 					}
 					count++
 					if len(n.ReturningExprs) > 0 && resultRow != nil {
-						row := &planner.Row{Columns: resultRow, Names: colNames}
+						row := &qt.Row{Columns: resultRow, Names: colNames}
 						retRow := make([]tuple.Datum, len(n.ReturningExprs))
 						for i, expr := range n.ReturningExprs {
 							val, err := expr.Eval(row)
@@ -2514,7 +2516,7 @@ func (ex *Executor) execInsert(n *planner.PhysInsert) (*Result, error) {
 
 		// Evaluate RETURNING expressions against the inserted row.
 		if len(n.ReturningExprs) > 0 {
-			row := &planner.Row{Columns: values, Names: colNames}
+			row := &qt.Row{Columns: values, Names: colNames}
 			retRow := make([]tuple.Datum, len(n.ReturningExprs))
 			for i, expr := range n.ReturningExprs {
 				val, err := expr.Eval(row)
@@ -2583,7 +2585,7 @@ func (ex *Executor) execOnConflictUpdate(
 			if ci >= len(tup.Columns) || ci >= len(proposed) {
 				return true
 			}
-			if planner.CompareDatums(tup.Columns[ci], proposed[ci]) != 0 {
+			if qt.CompareDatums(tup.Columns[ci], proposed[ci]) != 0 {
 				return true
 			}
 		}
@@ -2607,7 +2609,7 @@ func (ex *Executor) execOnConflictUpdate(
 		combinedVals[len(colNames)+i] = proposed[i]
 	}
 
-	combinedRow := &planner.Row{Columns: combinedVals, Names: combinedNames}
+	combinedRow := &qt.Row{Columns: combinedVals, Names: combinedNames}
 
 	// Evaluate optional WHERE clause — if false, skip the update.
 	if oc.WhereExpr != nil {
@@ -2707,7 +2709,7 @@ func (ex *Executor) execDelete(n *planner.PhysDelete) (*Result, error) {
 
 		// Evaluate RETURNING before delete (row still visible).
 		if len(n.ReturningExprs) > 0 {
-			row := &planner.Row{Columns: dt.row, Names: colNames}
+			row := &qt.Row{Columns: dt.row, Names: colNames}
 			retRow := make([]tuple.Datum, len(n.ReturningExprs))
 			for i, expr := range n.ReturningExprs {
 				val, err := expr.Eval(row)
@@ -2819,7 +2821,7 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 			for ci, cname := range n.Columns {
 				if cname == a.Column {
 					// Use the full child row so FROM columns are accessible.
-					r := &planner.Row{Columns: t.childRow, Names: childCols}
+					r := &qt.Row{Columns: t.childRow, Names: childCols}
 					val, err := a.Value.Eval(r)
 					if err != nil {
 						return nil, err
@@ -2878,7 +2880,7 @@ func (ex *Executor) execUpdate(n *planner.PhysUpdate) (*Result, error) {
 
 		// Evaluate RETURNING against the new row values.
 		if len(n.ReturningExprs) > 0 {
-			row := &planner.Row{Columns: newVals, Names: colNames}
+			row := &qt.Row{Columns: newVals, Names: colNames}
 			retRow := make([]tuple.Datum, len(n.ReturningExprs))
 			for i, expr := range n.ReturningExprs {
 				val, err := expr.Eval(row)
@@ -3041,7 +3043,7 @@ func (ex *Executor) execInsertPartitioned(n *planner.PhysInsert, pinfo *catalog.
 	for _, rowExprs := range n.Values {
 		provided := make([]tuple.Datum, len(rowExprs))
 		for i, expr := range rowExprs {
-			val, err := expr.Eval(&planner.Row{})
+			val, err := expr.Eval(&qt.Row{})
 			if err != nil {
 				return nil, err
 			}
@@ -3081,7 +3083,7 @@ func (ex *Executor) execInsertPartitioned(n *planner.PhysInsert, pinfo *catalog.
 		childInsert := &planner.PhysInsert{
 			Table:   childTable,
 			Columns: n.Columns,
-			Values:  [][]planner.Expr{rowExprs},
+			Values:  [][]qt.Expr{rowExprs},
 		}
 		r, err := ex.execInsert(childInsert)
 		if err != nil {
@@ -3176,7 +3178,7 @@ func datumHashKey(d tuple.Datum) string {
 	}
 }
 
-func resolveColIdx(col *planner.ExprColumn, colNames []string) int {
+func resolveColIdx(col *qt.ExprColumn, colNames []string) int {
 	for i, name := range colNames {
 		if len(name) > 0 {
 			parts := splitDot(name)
@@ -3262,7 +3264,7 @@ func rowsMatch(a, b []tuple.Datum) bool {
 }
 
 func (ex *Executor) execCreateView(n *planner.PhysCreateView) (*Result, error) {
-	// Convert planner.ColDef to catalog.ColumnDef.
+	// Convert qt.ColDef to catalog.ColumnDef.
 	cols := make([]catalog.ColumnDef, len(n.Columns))
 	for i, c := range n.Columns {
 		cols[i] = catalog.ColumnDef{Name: c.Name, Type: c.Type, TypeName: c.TypeName}
@@ -3600,13 +3602,13 @@ func (ex *Executor) evalDefault(col catalog.Column) tuple.Datum {
 	}
 	// Use the analyzer to transform the expression, then convert to
 	// an executable Expr and evaluate it.
-	a := &planner.Analyzer{Cat: ex.Cat}
+	a := &az.Analyzer{Cat: ex.Cat}
 	analyzed, err := a.TransformExpr(sel.TargetList[0].Val)
 	if err != nil {
 		return tuple.DNull()
 	}
 	expr := planner.AnalyzedToExpr(analyzed, nil)
-	val, err := expr.Eval(&planner.Row{})
+	val, err := expr.Eval(&qt.Row{})
 	if err != nil {
 		return tuple.DNull()
 	}
@@ -3632,21 +3634,21 @@ func (ex *Executor) evalGeneratedColumns(cols []catalog.Column, colNames []strin
 		}
 		// Build RTE columns from the table's catalog columns so the
 		// analyzer can resolve column references in the expression.
-		rteCols := make([]planner.RTEColumn, len(cols))
+		rteCols := make([]qt.RTEColumn, len(cols))
 		for j, c := range cols {
-			rteCols[j] = planner.RTEColumn{
+			rteCols[j] = qt.RTEColumn{
 				Name:   c.Name,
 				Type:   tuple.DatumType(c.Type),
 				ColNum: int32(j + 1),
 			}
 		}
-		a := planner.NewAnalyzerWithRTE(ex.Cat, rteCols)
+		a := az.NewAnalyzerWithRTE(ex.Cat, rteCols)
 		analyzed, err := a.TransformExpr(sel.TargetList[0].Val)
 		if err != nil {
 			continue
 		}
 		expr := planner.AnalyzedToExpr(analyzed, nil)
-		row := &planner.Row{Columns: values, Names: colNames}
+		row := &qt.Row{Columns: values, Names: colNames}
 		val, err := expr.Eval(row)
 		if err != nil {
 			continue
@@ -3904,7 +3906,7 @@ func (ex *Executor) validateCheckConstraints(table string, colNames []string, va
 		}
 
 		// Build a minimal analyzer with the table's columns in scope.
-		a := &planner.Analyzer{Cat: ex.Cat}
+		a := &az.Analyzer{Cat: ex.Cat}
 		a.AddRangeTableEntry(table, "")
 
 		analyzed, err := a.TransformExpr(sel.TargetList[0].Val)
@@ -3919,7 +3921,7 @@ func (ex *Executor) validateCheckConstraints(table string, colNames []string, va
 		for i, cn := range colNames {
 			names[i] = table + "." + cn
 		}
-		row := &planner.Row{Columns: values, Names: names}
+		row := &qt.Row{Columns: values, Names: names}
 
 		val, err := expr.Eval(row)
 		if err != nil {
@@ -3968,7 +3970,7 @@ func (ex *Executor) validateForeignKeys(table string, colNames []string, values 
 			for i, refCol := range fk.RefColumns {
 				for j, cn := range refColNames {
 					if strings.EqualFold(refCol, cn) && j < len(tup.Columns) {
-						if planner.CompareDatums(fkVals[i], tup.Columns[j]) != 0 {
+						if qt.CompareDatums(fkVals[i], tup.Columns[j]) != 0 {
 							match = false
 						}
 						break
@@ -4021,7 +4023,7 @@ func (ex *Executor) enforceForeignKeyOnDelete(table string, colNames []string, d
 			for i, fkCol := range fk.Columns {
 				for j, cn := range childColNames {
 					if strings.EqualFold(fkCol, cn) && j < len(tup.Columns) {
-						if planner.CompareDatums(parentVals[i], tup.Columns[j]) != 0 {
+						if qt.CompareDatums(parentVals[i], tup.Columns[j]) != 0 {
 							match = false
 						}
 						break
@@ -4108,7 +4110,7 @@ func (ex *Executor) enforceForeignKeyOnUpdate(table string, colNames []string, o
 				if strings.EqualFold(refCol, cn) && j < len(oldRow) {
 					parentOldVals[i] = oldRow[j]
 					parentNewVals[i] = newRow[j]
-					if planner.CompareDatums(oldRow[j], newRow[j]) != 0 {
+					if qt.CompareDatums(oldRow[j], newRow[j]) != 0 {
 						changed = true
 					}
 					break
@@ -4131,7 +4133,7 @@ func (ex *Executor) enforceForeignKeyOnUpdate(table string, colNames []string, o
 			for i, fkCol := range fk.Columns {
 				for j, cn := range childColNames {
 					if strings.EqualFold(fkCol, cn) && j < len(tup.Columns) {
-						if planner.CompareDatums(parentOldVals[i], tup.Columns[j]) != 0 {
+						if qt.CompareDatums(parentOldVals[i], tup.Columns[j]) != 0 {
 							match = false
 						}
 						break
@@ -4332,7 +4334,7 @@ func (ex *Executor) execAlterFunction(n *planner.PhysAlterFunction) (*Result, er
 }
 
 func (ex *Executor) execCreateDomain(n *planner.PhysCreateDomain) (*Result, error) {
-	baseType := planner.MapSQLType(n.BaseType)
+	baseType := az.MapSQLType(n.BaseType)
 	if err := ex.Cat.CreateDomain(n.Name, baseType, n.NotNull, n.CheckExpr); err != nil {
 		return nil, err
 	}
@@ -4466,13 +4468,13 @@ func (ex *Executor) execWindowAgg(n *planner.PhysWindowAgg) (*Result, error) {
 
 		// Sort by partition keys, then order keys.
 		sort.SliceStable(indices, func(a, b int) bool {
-			ra := &planner.Row{Columns: child.Rows[indices[a]], Names: child.Columns}
-			rb := &planner.Row{Columns: child.Rows[indices[b]], Names: child.Columns}
+			ra := &qt.Row{Columns: child.Rows[indices[a]], Names: child.Columns}
+			rb := &qt.Row{Columns: child.Rows[indices[b]], Names: child.Columns}
 			// Compare partition keys.
 			for _, pk := range wf.PartitionBy {
 				va, _ := pk.Eval(ra)
 				vb, _ := pk.Eval(rb)
-				cmp := planner.CompareDatums(va, vb)
+				cmp := qt.CompareDatums(va, vb)
 				if cmp != 0 {
 					return cmp < 0
 				}
@@ -4481,7 +4483,7 @@ func (ex *Executor) execWindowAgg(n *planner.PhysWindowAgg) (*Result, error) {
 			for _, ok := range wf.OrderBy {
 				va, _ := ok.Expr.Eval(ra)
 				vb, _ := ok.Expr.Eval(rb)
-				cmp := planner.CompareDatums(va, vb)
+				cmp := qt.CompareDatums(va, vb)
 				if cmp != 0 {
 					if ok.Desc {
 						return cmp > 0
@@ -4495,13 +4497,13 @@ func (ex *Executor) execWindowAgg(n *planner.PhysWindowAgg) (*Result, error) {
 		// Identify partition boundaries.
 		partStarts := []int{0}
 		for i := 1; i < nRows; i++ {
-			ra := &planner.Row{Columns: child.Rows[indices[i-1]], Names: child.Columns}
-			rb := &planner.Row{Columns: child.Rows[indices[i]], Names: child.Columns}
+			ra := &qt.Row{Columns: child.Rows[indices[i-1]], Names: child.Columns}
+			rb := &qt.Row{Columns: child.Rows[indices[i]], Names: child.Columns}
 			samePartition := true
 			for _, pk := range wf.PartitionBy {
 				va, _ := pk.Eval(ra)
 				vb, _ := pk.Eval(rb)
-				if planner.CompareDatums(va, vb) != 0 {
+				if qt.CompareDatums(va, vb) != 0 {
 					samePartition = false
 					break
 				}
@@ -4532,12 +4534,12 @@ func (ex *Executor) execWindowAgg(n *planner.PhysWindowAgg) (*Result, error) {
 			sortedIndices[i] = i
 		}
 		sort.SliceStable(sortedIndices, func(a, b int) bool {
-			ra := &planner.Row{Columns: extRows[sortedIndices[a]][:len(child.Columns)], Names: child.Columns}
-			rb := &planner.Row{Columns: extRows[sortedIndices[b]][:len(child.Columns)], Names: child.Columns}
+			ra := &qt.Row{Columns: extRows[sortedIndices[a]][:len(child.Columns)], Names: child.Columns}
+			rb := &qt.Row{Columns: extRows[sortedIndices[b]][:len(child.Columns)], Names: child.Columns}
 			for _, pk := range lastWf.PartitionBy {
 				va, _ := pk.Eval(ra)
 				vb, _ := pk.Eval(rb)
-				cmp := planner.CompareDatums(va, vb)
+				cmp := qt.CompareDatums(va, vb)
 				if cmp != 0 {
 					return cmp < 0
 				}
@@ -4545,7 +4547,7 @@ func (ex *Executor) execWindowAgg(n *planner.PhysWindowAgg) (*Result, error) {
 			for _, ok := range lastWf.OrderBy {
 				va, _ := ok.Expr.Eval(ra)
 				vb, _ := ok.Expr.Eval(rb)
-				cmp := planner.CompareDatums(va, vb)
+				cmp := qt.CompareDatums(va, vb)
 				if cmp != 0 {
 					if ok.Desc {
 						return cmp > 0
@@ -4637,7 +4639,7 @@ func (ex *Executor) evalWindowFunc(
 	case "ntile":
 		n := int64(1)
 		if len(wf.ArgExprs) > 0 {
-			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			row := &qt.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
 			v, err := wf.ArgExprs[0].Eval(row)
 			if err == nil && v.I64 > 0 {
 				n = v.I64
@@ -4652,14 +4654,14 @@ func (ex *Executor) evalWindowFunc(
 		offset := 1
 		var defaultVal tuple.Datum
 		if len(wf.ArgExprs) >= 2 {
-			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			row := &qt.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
 			v, err := wf.ArgExprs[1].Eval(row)
 			if err == nil {
 				offset = int(v.I64)
 			}
 		}
 		if len(wf.ArgExprs) >= 3 {
-			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			row := &qt.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
 			v, err := wf.ArgExprs[2].Eval(row)
 			if err == nil {
 				defaultVal = v
@@ -4668,7 +4670,7 @@ func (ex *Executor) evalWindowFunc(
 		for i, idx := range partIndices {
 			if i-offset >= 0 {
 				prevIdx := partIndices[i-offset]
-				row := &planner.Row{Columns: child.Rows[prevIdx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[prevIdx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
 				extRows[idx][colOffset] = v
 			} else if defaultVal.Type != tuple.TypeNull {
@@ -4682,14 +4684,14 @@ func (ex *Executor) evalWindowFunc(
 		offset := 1
 		var defaultVal tuple.Datum
 		if len(wf.ArgExprs) >= 2 {
-			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			row := &qt.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
 			v, err := wf.ArgExprs[1].Eval(row)
 			if err == nil {
 				offset = int(v.I64)
 			}
 		}
 		if len(wf.ArgExprs) >= 3 {
-			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			row := &qt.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
 			v, err := wf.ArgExprs[2].Eval(row)
 			if err == nil {
 				defaultVal = v
@@ -4698,7 +4700,7 @@ func (ex *Executor) evalWindowFunc(
 		for i, idx := range partIndices {
 			if i+offset < partSize {
 				nextIdx := partIndices[i+offset]
-				row := &planner.Row{Columns: child.Rows[nextIdx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[nextIdx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
 				extRows[idx][colOffset] = v
 			} else if defaultVal.Type != tuple.TypeNull {
@@ -4710,7 +4712,7 @@ func (ex *Executor) evalWindowFunc(
 
 	case "first_value":
 		if len(wf.ArgExprs) > 0 && partSize > 0 {
-			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			row := &qt.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
 			v, _ := wf.ArgExprs[0].Eval(row)
 			for _, idx := range partIndices {
 				extRows[idx][colOffset] = v
@@ -4722,7 +4724,7 @@ func (ex *Executor) evalWindowFunc(
 			// Default frame is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW,
 			// so last_value returns the current row's value.
 			for _, idx := range partIndices {
-				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[idx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
 				extRows[idx][colOffset] = v
 			}
@@ -4731,7 +4733,7 @@ func (ex *Executor) evalWindowFunc(
 	case "nth_value":
 		nth := 1
 		if len(wf.ArgExprs) >= 2 {
-			row := &planner.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
+			row := &qt.Row{Columns: child.Rows[partIndices[0]], Names: child.Columns}
 			v, err := wf.ArgExprs[1].Eval(row)
 			if err == nil {
 				nth = int(v.I64)
@@ -4740,7 +4742,7 @@ func (ex *Executor) evalWindowFunc(
 		for i, idx := range partIndices {
 			if nth >= 1 && nth <= i+1 && len(wf.ArgExprs) > 0 {
 				nthIdx := partIndices[nth-1]
-				row := &planner.Row{Columns: child.Rows[nthIdx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[nthIdx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
 				extRows[idx][colOffset] = v
 			} else {
@@ -4758,7 +4760,7 @@ func (ex *Executor) evalWindowFunc(
 		} else if len(wf.ArgExprs) > 0 {
 			count := int64(0)
 			for _, idx := range partIndices {
-				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[idx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
 				if v.Type != tuple.TypeNull {
 					count++
@@ -4773,7 +4775,7 @@ func (ex *Executor) evalWindowFunc(
 			var sumI int64
 			isFloat := false
 			for i, idx := range partIndices {
-				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[idx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
 				if i == 0 && v.Type == tuple.TypeFloat64 {
 					isFloat = true
@@ -4792,7 +4794,7 @@ func (ex *Executor) evalWindowFunc(
 		if len(wf.ArgExprs) > 0 {
 			var sum float64
 			for i, idx := range partIndices {
-				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[idx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
 				sum += datumToFloat64(v)
 				extRows[idx][colOffset] = tuple.DFloat64(sum / float64(i+1))
@@ -4803,9 +4805,9 @@ func (ex *Executor) evalWindowFunc(
 		if len(wf.ArgExprs) > 0 {
 			var minVal tuple.Datum
 			for i, idx := range partIndices {
-				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[idx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
-				if i == 0 || planner.CompareDatums(v, minVal) < 0 {
+				if i == 0 || qt.CompareDatums(v, minVal) < 0 {
 					minVal = v
 				}
 				extRows[idx][colOffset] = minVal
@@ -4816,9 +4818,9 @@ func (ex *Executor) evalWindowFunc(
 		if len(wf.ArgExprs) > 0 {
 			var maxVal tuple.Datum
 			for i, idx := range partIndices {
-				row := &planner.Row{Columns: child.Rows[idx], Names: child.Columns}
+				row := &qt.Row{Columns: child.Rows[idx], Names: child.Columns}
 				v, _ := wf.ArgExprs[0].Eval(row)
-				if i == 0 || planner.CompareDatums(v, maxVal) > 0 {
+				if i == 0 || qt.CompareDatums(v, maxVal) > 0 {
 					maxVal = v
 				}
 				extRows[idx][colOffset] = maxVal
@@ -4835,12 +4837,12 @@ func (ex *Executor) evalWindowFunc(
 
 // windowOrderEqual checks if two rows have equal ORDER BY key values.
 func windowOrderEqual(wf planner.WindowFuncDesc, child *Result, idxA, idxB int) bool {
-	ra := &planner.Row{Columns: child.Rows[idxA], Names: child.Columns}
-	rb := &planner.Row{Columns: child.Rows[idxB], Names: child.Columns}
+	ra := &qt.Row{Columns: child.Rows[idxA], Names: child.Columns}
+	rb := &qt.Row{Columns: child.Rows[idxB], Names: child.Columns}
 	for _, ok := range wf.OrderBy {
 		va, _ := ok.Expr.Eval(ra)
 		vb, _ := ok.Expr.Eval(rb)
-		if planner.CompareDatums(va, vb) != 0 {
+		if qt.CompareDatums(va, vb) != 0 {
 			return false
 		}
 	}
@@ -4924,7 +4926,7 @@ func (ex *Executor) execRecursiveSubqueryScan(n *planner.PhysSubqueryScan) (*Res
 }
 
 func (ex *Executor) execValues(n *planner.PhysValues) (*Result, error) {
-	emptyRow := &planner.Row{}
+	emptyRow := &qt.Row{}
 	var rows [][]tuple.Datum
 	for _, valRow := range n.Values {
 		row := make([]tuple.Datum, len(valRow))
@@ -4945,11 +4947,11 @@ func (ex *Executor) execValues(n *planner.PhysValues) (*Result, error) {
 }
 
 func (ex *Executor) execResult(n *planner.PhysResult) (*Result, error) {
-	emptyRow := &planner.Row{}
+	emptyRow := &qt.Row{}
 
 	// Check for set-returning function (unnest).
 	for i, expr := range n.Exprs {
-		if fn, ok := expr.(*planner.ExprFunc); ok && strings.ToLower(fn.Name) == "unnest" {
+		if fn, ok := expr.(*qt.ExprFunc); ok && strings.ToLower(fn.Name) == "unnest" {
 			arrVal, err := fn.Args[0].Eval(emptyRow)
 			if err != nil {
 				return nil, fmt.Errorf("executor: Result eval: %w", err)

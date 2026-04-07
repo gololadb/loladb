@@ -12,7 +12,9 @@ import (
 	"github.com/gololadb/loladb/pkg/pl/pljs"
 	"github.com/gololadb/loladb/pkg/pl/plpgsql"
 	"github.com/gololadb/loladb/pkg/pl/plstarlark"
+	az "github.com/gololadb/loladb/pkg/analyzer"
 	"github.com/gololadb/loladb/pkg/planner"
+	qt "github.com/gololadb/loladb/pkg/querytree"
 	"github.com/gololadb/loladb/pkg/rewriter"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
@@ -51,7 +53,7 @@ type Savepoint struct {
 type Executor struct {
 	Cat         *catalog.Catalog
 	CurrentUser string // session-level current user for RLS policies
-	analyzer    *planner.Analyzer
+	analyzer    *az.Analyzer
 	rewriter    *rewriter.Rewriter
 	optimizer   *planner.Optimizer
 	exec        *executor.Executor
@@ -79,7 +81,7 @@ type CursorState struct {
 
 // NewExecutor creates a SQL executor backed by the given catalog.
 func NewExecutor(cat *catalog.Catalog) *Executor {
-	a := &planner.Analyzer{Cat: cat}
+	a := &az.Analyzer{Cat: cat}
 	ex := &Executor{
 		Cat:             cat,
 		analyzer:        a,
@@ -90,7 +92,7 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 	}
 
 	// Wire subquery executor so ExprSubLink can execute sub-SELECTs.
-	planner.SubqueryExecutor = func(subQuery *planner.Query, outerRow *planner.Row) ([]string, [][]tuple.Datum, error) {
+	qt.SubqueryExecutor = func(subQuery *qt.Query, outerRow *qt.Row) ([]string, [][]tuple.Datum, error) {
 		logical, err := planner.QueryToLogicalPlan(subQuery)
 		if err != nil {
 			return nil, nil, err
@@ -107,7 +109,7 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 	}
 
 	// Wire user-defined function executor for PL/pgSQL functions in SQL expressions.
-	planner.UserFuncExecutor = func(name string, args []planner.AnalyzedExpr, row *planner.Row) (tuple.Datum, error) {
+	qt.UserFuncExecutor = func(name string, args []qt.AnalyzedExpr, row *qt.Row) (tuple.Datum, error) {
 		fn := ex.Cat.FindFunction(name)
 		if fn == nil {
 			return tuple.DNull(), fmt.Errorf("function %s is not supported", name)
@@ -115,7 +117,7 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 		// Evaluate arguments.
 		params := make(map[string]tuple.Datum)
 		for i, arg := range args {
-			val, err := planner.EvalAnalyzedExpr(arg, row)
+			val, err := qt.EvalAnalyzedExpr(arg, row)
 			if err != nil {
 				return tuple.DNull(), err
 			}
@@ -194,7 +196,7 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 	}
 
 	// Wire enum ordinal resolver for enum-aware comparisons.
-	planner.EnumOrdinalFunc = func(val string) int {
+	qt.EnumOrdinalFunc = func(val string) int {
 		// Check all enum types for this value.
 		// This is O(enums * values) but fine for typical catalog sizes.
 		cat.Types.RLock()
@@ -263,10 +265,10 @@ func NewExecutor(cat *catalog.Catalog) *Executor {
 	}
 
 	// Wire session settings callbacks for set_config() / current_setting().
-	planner.SetConfigFunc = func(name, value string) {
+	qt.SetConfigFunc = func(name, value string) {
 		ex.SetSessionSetting(name, value)
 	}
-	planner.CurrentSettingFunc = func(name string) string {
+	qt.CurrentSettingFunc = func(name string) string {
 		return ex.GetSessionSetting(name)
 	}
 
@@ -607,8 +609,8 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	}
 
 	// Attach the original SELECT SQL to CREATE VIEW utility statements.
-	if query.CommandType == planner.CmdUtility && query.Utility != nil &&
-		query.Utility.Type == planner.UtilCreateView && viewDefSQL != "" {
+	if query.CommandType == qt.CmdUtility && query.Utility != nil &&
+		query.Utility.Type == qt.UtilCreateView && viewDefSQL != "" {
 		query.Utility.ViewDef = viewDefSQL
 	}
 

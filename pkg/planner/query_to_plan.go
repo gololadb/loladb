@@ -5,42 +5,43 @@ import (
 	"strings"
 
 	"github.com/gololadb/loladb/pkg/tuple"
+	qt "github.com/gololadb/loladb/pkg/querytree"
 )
 
-// QueryToLogicalPlan converts a Query tree (output of the analyzer)
+// QueryToLogicalPlan converts a qt.Query tree (output of the analyzer)
 // into a LogicalNode tree (input to the optimizer). This bridges the
 // PostgreSQL-style semantic analysis output to the existing planner.
 //
 // In PostgreSQL this role is played by the planner's
 // query_planner() / grouping_planner() / subquery_planner() functions
 // in src/backend/optimizer/plan/planner.c.
-func QueryToLogicalPlan(q *Query) (LogicalNode, error) {
+func QueryToLogicalPlan(q *qt.Query) (LogicalNode, error) {
 	switch q.CommandType {
-	case CmdSelect:
+	case qt.CmdSelect:
 		return queryToSelectPlan(q)
-	case CmdInsert:
+	case qt.CmdInsert:
 		return queryToInsertPlan(q)
-	case CmdDelete:
+	case qt.CmdDelete:
 		return queryToDeletePlan(q)
-	case CmdUpdate:
+	case qt.CmdUpdate:
 		return queryToUpdatePlan(q)
-	case CmdUtility:
+	case qt.CmdUtility:
 		return queryToUtilityPlan(q)
 	default:
 		return nil, fmt.Errorf("planner: unsupported command type %s", q.CommandType)
 	}
 }
 
-func queryToSelectPlan(q *Query) (LogicalNode, error) {
+func queryToSelectPlan(q *qt.Query) (LogicalNode, error) {
 	// Handle bare VALUES clause.
 	if q.IsValues && len(q.Values) > 0 {
 		var names []string
 		for _, te := range q.TargetList {
 			names = append(names, te.Name)
 		}
-		var rows [][]Expr
+		var rows [][]qt.Expr
 		for _, row := range q.Values {
-			var exprs []Expr
+			var exprs []qt.Expr
 			for _, e := range row {
 				exprs = append(exprs, analyzedToExpr(e, q.RangeTable))
 			}
@@ -50,14 +51,14 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 	}
 
 	// Handle set operations.
-	if q.SetOp != SetOpNone {
+	if q.SetOp != qt.SetOpNone {
 		return queryToSetOpPlan(q)
 	}
 	if q.JoinTree == nil || len(q.JoinTree.FromList) == 0 {
 		// SELECT without FROM → Result node (single virtual row).
 		if len(q.TargetList) > 0 {
 			// Evaluate expressions and project.
-			var exprs []Expr
+			var exprs []qt.Expr
 			var names []string
 			for _, te := range q.TargetList {
 				exprs = append(exprs, analyzedToExpr(te.Expr, q.RangeTable))
@@ -87,17 +88,17 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 
 	// Aggregate node (GROUP BY / aggregate functions).
 	if q.HasAggs || len(q.GroupClause) > 0 {
-		var groupExprs []Expr
+		var groupExprs []qt.Expr
 		for _, g := range q.GroupClause {
 			groupExprs = append(groupExprs, analyzedToExpr(g, q.RangeTable))
 		}
 		var aggDescs []AggDesc
 		for _, ref := range q.AggRefs {
-			var argExprs []Expr
+			var argExprs []qt.Expr
 			for _, a := range ref.Args {
 				argExprs = append(argExprs, analyzedToExpr(a, q.RangeTable))
 			}
-			var withinExpr Expr
+			var withinExpr qt.Expr
 			if ref.WithinGroupExpr != nil {
 				withinExpr = analyzedToExpr(ref.WithinGroupExpr, q.RangeTable)
 			}
@@ -109,7 +110,7 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 				WithinGroupExpr: withinExpr,
 			})
 		}
-		var havingExpr Expr
+		var havingExpr qt.Expr
 		if q.HavingQual != nil {
 			havingExpr = analyzedToExpr(q.HavingQual, q.RangeTable)
 			// Patch agg refs in HAVING too.
@@ -131,15 +132,15 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 
 	// Target list → Project (unless it's SELECT *).
 	if !isSelectStar(q.TargetList, q.RangeTable) {
-		var exprs []Expr
+		var exprs []qt.Expr
 		var names []string
 		for _, te := range q.TargetList {
 			exprs = append(exprs, analyzedToExpr(te.Expr, q.RangeTable))
 			names = append(names, te.Name)
 		}
 		// When there's an aggregate below, patch expressions:
-		// - ExprAggRef: set NumGroupExprs so they read from the right offset
-		// - ExprColumn: reset Index to -1 to force name-based lookup
+		// - qt.ExprAggRef: set NumGroupExprs so they read from the right offset
+		// - qt.ExprColumn: reset Index to -1 to force name-based lookup
 		//   (the aggregate output has a different column layout)
 		if q.HasAggs || len(q.GroupClause) > 0 {
 			numGroups := len(q.GroupClause)
@@ -177,12 +178,12 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 	if q.LimitCount != nil || q.LimitOffset != nil {
 		limit := &LogicalLimit{Count: -1, Child: plan}
 		if q.LimitCount != nil {
-			if c, ok := q.LimitCount.(*Const); ok {
+			if c, ok := q.LimitCount.(*qt.Const); ok {
 				limit.Count = constToInt64(c)
 			}
 		}
 		if q.LimitOffset != nil {
-			if c, ok := q.LimitOffset.(*Const); ok {
+			if c, ok := q.LimitOffset.(*qt.Const); ok {
 				limit.Offset = constToInt64(c)
 			}
 		}
@@ -192,7 +193,7 @@ func queryToSelectPlan(q *Query) (LogicalNode, error) {
 	return plan, nil
 }
 
-func queryToSetOpPlan(q *Query) (LogicalNode, error) {
+func queryToSetOpPlan(q *qt.Query) (LogicalNode, error) {
 	left, err := queryToSelectPlan(q.SetLeft)
 	if err != nil {
 		return nil, err
@@ -222,12 +223,12 @@ func queryToSetOpPlan(q *Query) (LogicalNode, error) {
 	if q.LimitCount != nil || q.LimitOffset != nil {
 		limit := &LogicalLimit{Count: -1, Child: plan}
 		if q.LimitCount != nil {
-			if c, ok := q.LimitCount.(*Const); ok {
+			if c, ok := q.LimitCount.(*qt.Const); ok {
 				limit.Count = constToInt64(c)
 			}
 		}
 		if q.LimitOffset != nil {
-			if c, ok := q.LimitOffset.(*Const); ok {
+			if c, ok := q.LimitOffset.(*qt.Const); ok {
 				limit.Offset = constToInt64(c)
 			}
 		}
@@ -237,7 +238,7 @@ func queryToSetOpPlan(q *Query) (LogicalNode, error) {
 	return plan, nil
 }
 
-func queryToInsertPlan(q *Query) (LogicalNode, error) {
+func queryToInsertPlan(q *qt.Query) (LogicalNode, error) {
 	rte := q.RangeTable[q.ResultRelation-1]
 
 	// INSERT ... SELECT
@@ -254,9 +255,9 @@ func queryToInsertPlan(q *Query) (LogicalNode, error) {
 	}
 
 	// INSERT ... VALUES
-	var values [][]Expr
+	var values [][]qt.Expr
 	for _, row := range q.Values {
-		var rowExprs []Expr
+		var rowExprs []qt.Expr
 		for _, e := range row {
 			rowExprs = append(rowExprs, analyzedToExpr(e, q.RangeTable))
 		}
@@ -286,7 +287,7 @@ func queryToInsertPlan(q *Query) (LogicalNode, error) {
 	return node, nil
 }
 
-func queryToDeletePlan(q *Query) (LogicalNode, error) {
+func queryToDeletePlan(q *qt.Query) (LogicalNode, error) {
 	rte := q.RangeTable[q.ResultRelation-1]
 
 	colNames := make([]string, len(rte.Columns))
@@ -308,7 +309,7 @@ func queryToDeletePlan(q *Query) (LogicalNode, error) {
 	return &LogicalDelete{Table: rte.RelName, Child: child, ReturningExprs: retExprs, ReturningNames: retNames}, nil
 }
 
-func queryToUpdatePlan(q *Query) (LogicalNode, error) {
+func queryToUpdatePlan(q *qt.Query) (LogicalNode, error) {
 	rte := q.RangeTable[q.ResultRelation-1]
 
 	colNames := make([]string, len(rte.Columns))
@@ -358,12 +359,12 @@ func queryToUpdatePlan(q *Query) (LogicalNode, error) {
 	}, nil
 }
 
-// convertReturning converts analyzed RETURNING target entries to Expr slices.
-func convertReturning(list []*TargetEntry, rtes []*RangeTblEntry) ([]Expr, []string) {
+// convertReturning converts analyzed RETURNING target entries to qt.Expr slices.
+func convertReturning(list []*qt.TargetEntry, rtes []*qt.RangeTblEntry) ([]qt.Expr, []string) {
 	if len(list) == 0 {
 		return nil, nil
 	}
-	exprs := make([]Expr, len(list))
+	exprs := make([]qt.Expr, len(list))
 	names := make([]string, len(list))
 	for i, te := range list {
 		exprs[i] = analyzedToExpr(te.Expr, rtes)
@@ -372,94 +373,94 @@ func convertReturning(list []*TargetEntry, rtes []*RangeTblEntry) ([]Expr, []str
 	return exprs, names
 }
 
-func queryToUtilityPlan(q *Query) (LogicalNode, error) {
+func queryToUtilityPlan(q *qt.Query) (LogicalNode, error) {
 	u := q.Utility
 	if u == nil {
 		return &LogicalNoOp{Message: "UTILITY"}, nil
 	}
 	switch u.Type {
-	case UtilCreateTable:
+	case qt.UtilCreateTable:
 		return &LogicalCreateTable{
 			Table: u.TableName, Schema: u.TableSchema, Columns: u.Columns,
 			ForeignKeys: u.ForeignKeys, IsTemp: u.IsTemp,
 			PartitionStrategy: u.PartitionStrategy, PartitionKeyCols: u.PartitionKeyCols,
 			InheritParents: u.InheritParents,
 		}, nil
-	case UtilCreateIndex:
+	case qt.UtilCreateIndex:
 		return &LogicalCreateIndex{Index: u.IndexName, Table: u.IndexTable, Column: u.IndexColumn, Method: u.IndexMethod}, nil
-	case UtilCreateSequence:
+	case qt.UtilCreateSequence:
 		return &LogicalCreateSequence{Name: u.SeqName}, nil
-	case UtilCreateView:
+	case qt.UtilCreateView:
 		return &LogicalCreateView{Name: u.ViewName, Definition: u.ViewDef, Columns: u.ViewColumns}, nil
-	case UtilAlterTable:
+	case qt.UtilAlterTable:
 		return &LogicalAlterTable{Table: u.TableName, Commands: u.AlterCmds}, nil
-	case UtilCreatePolicy:
+	case qt.UtilCreatePolicy:
 		return &LogicalCreatePolicy{
 			Name: u.PolicyName, Table: u.PolicyTable, Cmd: u.PolicyCmd,
 			Permissive: u.PolicyPermissive, Roles: u.PolicyRoles,
 			Using: u.PolicyUsing, Check: u.PolicyCheck,
 		}, nil
-	case UtilEnableRLS:
+	case qt.UtilEnableRLS:
 		return &LogicalEnableRLS{Table: u.TableName}, nil
-	case UtilDisableRLS:
+	case qt.UtilDisableRLS:
 		return &LogicalDisableRLS{Table: u.TableName}, nil
-	case UtilCreateRole:
+	case qt.UtilCreateRole:
 		return &LogicalCreateRole{RoleName: u.RoleName, Options: u.RoleOptions, StmtType: u.RoleStmtType}, nil
-	case UtilAlterRole:
+	case qt.UtilAlterRole:
 		return &LogicalAlterRole{RoleName: u.RoleName, Options: u.RoleOptions}, nil
-	case UtilDropRole:
+	case qt.UtilDropRole:
 		return &LogicalDropRole{Roles: u.DropRoles, MissingOk: u.DropMissingOk}, nil
-	case UtilGrantRole:
+	case qt.UtilGrantRole:
 		return &LogicalGrantRole{GrantedRoles: u.GrantedRoles, Grantees: u.Grantees, AdminOption: u.AdminOption}, nil
-	case UtilRevokeRole:
+	case qt.UtilRevokeRole:
 		return &LogicalRevokeRole{RevokedRoles: u.GrantedRoles, Grantees: u.Grantees}, nil
-	case UtilGrantPrivilege:
+	case qt.UtilGrantPrivilege:
 		return &LogicalGrantPrivilege{Privileges: u.Privileges, PrivCols: u.PrivCols, TargetType: u.TargetType, Objects: u.Objects, Grantees: u.Grantees, GrantOption: u.GrantOption}, nil
-	case UtilRevokePrivilege:
+	case qt.UtilRevokePrivilege:
 		return &LogicalRevokePrivilege{Privileges: u.Privileges, PrivCols: u.PrivCols, TargetType: u.TargetType, Objects: u.Objects, Grantees: u.Grantees}, nil
-	case UtilCreateFunction:
+	case qt.UtilCreateFunction:
 		return &LogicalCreateFunction{
 			Name: u.FuncName, Language: u.FuncLanguage, Body: u.FuncBody,
 			ReturnType: u.FuncReturnType, ParamNames: u.FuncParamNames,
 			ParamTypes: u.FuncParamTypes, Replace: u.FuncReplace,
 		}, nil
-	case UtilCreateTrigger:
+	case qt.UtilCreateTrigger:
 		return &LogicalCreateTrigger{
 			TrigName: u.TrigName, Table: u.TrigTable, FuncName: u.TrigFuncName,
 			Timing: u.TrigTiming, Events: u.TrigEvents, ForEach: u.TrigForEach,
 			Replace: u.TrigReplace, Args: u.TrigArgs,
 		}, nil
-	case UtilDropFunction:
+	case qt.UtilDropFunction:
 		return &LogicalDropFunction{Name: u.FuncName, MissingOk: u.DropMissingOk}, nil
-	case UtilDropTrigger:
+	case qt.UtilDropTrigger:
 		return &LogicalDropTrigger{TrigName: u.TrigName, Table: u.TrigTable, MissingOk: u.DropMissingOk}, nil
-	case UtilAlterFunction:
+	case qt.UtilAlterFunction:
 		return &LogicalAlterFunction{Name: u.FuncName, NewName: u.FuncNewName, NewOwner: u.FuncNewOwner}, nil
-	case UtilCreateDomain:
+	case qt.UtilCreateDomain:
 		return &LogicalCreateDomain{Name: u.DomainName, BaseType: u.DomainBaseType, NotNull: u.DomainNotNull, CheckExpr: u.DomainCheck}, nil
-	case UtilCreateEnum:
+	case qt.UtilCreateEnum:
 		return &LogicalCreateEnum{Name: u.EnumName, Vals: u.EnumVals}, nil
-	case UtilDropType:
+	case qt.UtilDropType:
 		return &LogicalDropType{Name: u.DropTypeName, MissingOk: u.DropMissingOk}, nil
-	case UtilAlterEnum:
+	case qt.UtilAlterEnum:
 		return &LogicalAlterEnum{Name: u.AlterEnumName, NewVal: u.AlterEnumVal}, nil
-	case UtilCreateSchema:
+	case qt.UtilCreateSchema:
 		return &LogicalCreateSchema{Name: u.SchemaName, IfNotExists: u.SchemaIfNotExists, AuthRole: u.SchemaAuthRole}, nil
-	case UtilDropTable:
+	case qt.UtilDropTable:
 		return &LogicalDropTable{Name: u.TableName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
-	case UtilDropSchema:
+	case qt.UtilDropSchema:
 		return &LogicalDropSchema{Name: u.SchemaName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
-	case UtilTruncate:
+	case qt.UtilTruncate:
 		return &LogicalTruncate{Table: u.TableName}, nil
-	case UtilDropIndex:
+	case qt.UtilDropIndex:
 		return &LogicalDropIndex{Name: u.IndexName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
-	case UtilDropView:
+	case qt.UtilDropView:
 		return &LogicalDropView{Name: u.ViewName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
-	case UtilAddColumn:
+	case qt.UtilAddColumn:
 		return &LogicalAddColumn{Table: u.TableName, Col: *u.AlterColDef, IfNotExists: u.AlterIfNotExists}, nil
-	case UtilDropColumn:
+	case qt.UtilDropColumn:
 		return &LogicalDropColumn{Table: u.TableName, ColName: u.AlterColName, IfExists: u.AlterIfExists}, nil
-	case UtilNoOp:
+	case qt.UtilNoOp:
 		return &LogicalNoOp{Message: u.Message}, nil
 	default:
 		return &LogicalNoOp{Message: "UTILITY"}, nil
@@ -468,7 +469,7 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 
 // --- Join tree to plan conversion ---
 
-func joinTreeToPlan(items []JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, error) {
+func joinTreeToPlan(items []qt.JoinTreeNode, rtes []*qt.RangeTblEntry) (LogicalNode, error) {
 	if len(items) == 0 {
 		return nil, fmt.Errorf("planner: empty FROM clause")
 	}
@@ -484,15 +485,15 @@ func joinTreeToPlan(items []JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, e
 		if err != nil {
 			return nil, err
 		}
-		plan = &LogicalJoin{Type: JoinCross, Left: plan, Right: right}
+		plan = &LogicalJoin{Type: qt.JoinCross, Left: plan, Right: right}
 	}
 
 	return plan, nil
 }
 
-func joinTreeNodeToPlan(node JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, error) {
+func joinTreeNodeToPlan(node qt.JoinTreeNode, rtes []*qt.RangeTblEntry) (LogicalNode, error) {
 	switch n := node.(type) {
-	case *RangeTblRef:
+	case *qt.RangeTblRef:
 		rte := rtes[n.RTIndex-1]
 		colNames := make([]string, len(rte.Columns))
 		for i, c := range rte.Columns {
@@ -535,7 +536,7 @@ func joinTreeNodeToPlan(node JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, 
 		return &LogicalScan{Table: rte.RelName, Alias: rte.Alias, Columns: colNames,
 			SampleMethod: rte.SampleMethod, SamplePercent: rte.SamplePercent}, nil
 
-	case *JoinNode:
+	case *qt.JoinNode:
 		left, err := joinTreeNodeToPlan(n.Left, rtes)
 		if err != nil {
 			return nil, err
@@ -555,70 +556,70 @@ func joinTreeNodeToPlan(node JoinTreeNode, rtes []*RangeTblEntry) (LogicalNode, 
 	}
 }
 
-// --- AnalyzedExpr to Expr conversion ---
-// Converts the typed analyzed expressions back to the Expr interface
+// --- qt.AnalyzedExpr to qt.Expr conversion ---
+// Converts the typed analyzed expressions back to the qt.Expr interface
 // used by the optimizer and executor.
 
-// AnalyzedToExpr converts an AnalyzedExpr to an executable Expr.
+// AnalyzedToExpr converts an qt.AnalyzedExpr to an executable qt.Expr.
 // Exported for use by the executor (e.g., evaluating DEFAULT expressions).
-func AnalyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
+func AnalyzedToExpr(ae qt.AnalyzedExpr, rtes []*qt.RangeTblEntry) qt.Expr {
 	return analyzedToExpr(ae, rtes)
 }
 
-func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
+func analyzedToExpr(ae qt.AnalyzedExpr, rtes []*qt.RangeTblEntry) qt.Expr {
 	switch e := ae.(type) {
-	case *ColumnVar:
-		return &ExprColumn{
+	case *qt.ColumnVar:
+		return &qt.ExprColumn{
 			Table:  e.Table,
 			Column: e.ColName,
 			Index:  e.AttIndex,
 		}
-	case *Const:
-		return &ExprLiteral{Value: e.Value}
-	case *OpExpr:
-		return &ExprBinOp{
+	case *qt.Const:
+		return &qt.ExprLiteral{Value: e.Value}
+	case *qt.OpExpr:
+		return &qt.ExprBinOp{
 			Op:    e.Op,
 			Left:  analyzedToExpr(e.Left, rtes),
 			Right: analyzedToExpr(e.Right, rtes),
 		}
-	case *BoolExprNode:
+	case *qt.BoolExprNode:
 		return boolExprToExpr(e, rtes)
-	case *NullTestExpr:
-		return &ExprIsNull{
+	case *qt.NullTestExpr:
+		return &qt.ExprIsNull{
 			Child: analyzedToExpr(e.Arg, rtes),
 			Not:   e.IsNot,
 		}
-	case *AggRef:
-		return &ExprAggRef{AggIndex: e.AggIndex, NumGroupExprs: 0} // patched by queryToSelectPlan
-	case *TypeCastExpr:
-		return &ExprCast{
+	case *qt.AggRef:
+		return &qt.ExprAggRef{AggIndex: e.AggIndex, NumGroupExprs: 0} // patched by queryToSelectPlan
+	case *qt.TypeCastExpr:
+		return &qt.ExprCast{
 			Inner:      analyzedToExpr(e.Arg, rtes),
 			TargetType: e.CastType,
 			TypeName:   e.TargetType,
 		}
-	case *FuncCallExpr:
-		args := make([]Expr, len(e.Args))
+	case *qt.FuncCallExpr:
+		args := make([]qt.Expr, len(e.Args))
 		for i, a := range e.Args {
 			args[i] = analyzedToExpr(a, rtes)
 		}
-		return &ExprFunc{Name: e.FuncName, Args: args}
-	case *ArrayConstructExpr:
-		// Elements are already Expr — just return as-is.
+		return &qt.ExprFunc{Name: e.FuncName, Args: args}
+	case *qt.ArrayConstructExpr:
+		// Elements are already qt.Expr — just return as-is.
 		return e
-	case *ArraySubscriptExpr:
+	case *qt.ArraySubscriptExpr:
 		return e
-	case *ArraySliceExpr:
+	case *qt.ArraySliceExpr:
 		return e
-	case *StarExpr:
-		return &ExprStar{}
-	case *CaseExprNode:
-		node := &ExprCase{}
+	case *qt.StarExpr:
+		return &qt.ExprStar{}
+	case *qt.CaseExprNode:
+		node := &qt.ExprCase{}
 		if e.Arg != nil {
 			node.Arg = analyzedToExpr(e.Arg, rtes)
 		}
-		node.Whens = make([]ExprCaseWhen, len(e.Whens))
+		node.Whens = make([]qt.ExprCaseWhen, len(e.Whens))
 		for i, w := range e.Whens {
-			node.Whens[i] = ExprCaseWhen{
+			node.Whens[i] = qt.ExprCaseWhen{
 				Cond:   analyzedToExpr(w.Cond, rtes),
 				Result: analyzedToExpr(w.Result, rtes),
 			}
@@ -627,21 +628,21 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 			node.ElseExpr = analyzedToExpr(e.ElseExpr, rtes)
 		}
 		return node
-	case *BooleanTestExpr:
-		return &ExprBoolTest{
+	case *qt.BooleanTestExpr:
+		return &qt.ExprBoolTest{
 			Arg:  analyzedToExpr(e.Arg, rtes),
 			Test: e.Test,
 		}
-	case *WindowFuncRef:
+	case *qt.WindowFuncRef:
 		// The WindowAgg node appends computed values to each row.
 		// WinIndex points to the column position in the extended row.
-		return &ExprColumn{
+		return &qt.ExprColumn{
 			Table:  "",
 			Column: fmt.Sprintf("win_%d", e.WinIndex),
 			Index:  e.WinIndex,
 		}
-	case *SubLinkExpr:
-		sl := &ExprSubLink{
+	case *qt.SubLinkExpr:
+		sl := &qt.ExprSubLink{
 			LinkType: e.LinkType,
 			OpName:   e.OpName,
 			Subquery: e.Subquery,
@@ -651,15 +652,15 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 		}
 		return sl
 	default:
-		// Fallback: AnalyzedExpr already implements Expr.
+		// Fallback: qt.AnalyzedExpr already implements qt.Expr.
 		return ae
 	}
 }
 
-func analyzedToExprWithCols(ae AnalyzedExpr, rtes []*RangeTblEntry, outCols []string) Expr {
+func analyzedToExprWithCols(ae qt.AnalyzedExpr, rtes []*qt.RangeTblEntry, outCols []string) qt.Expr {
 	// For ORDER BY, we need to resolve against the output columns.
 	switch e := ae.(type) {
-	case *ColumnVar:
+	case *qt.ColumnVar:
 		// Try to find the column in the output columns list.
 		target := e.ColName
 		if e.Table != "" {
@@ -669,13 +670,13 @@ func analyzedToExprWithCols(ae AnalyzedExpr, rtes []*RangeTblEntry, outCols []st
 			parts := splitQualified(name)
 			if len(parts) == 2 {
 				if (e.Table == "" || equalFold(parts[0], e.Table)) && equalFold(parts[1], e.ColName) {
-					return &ExprColumn{Table: parts[0], Column: parts[1], Index: i}
+					return &qt.ExprColumn{Table: parts[0], Column: parts[1], Index: i}
 				}
 			} else if equalFold(name, target) || equalFold(name, e.ColName) {
-				return &ExprColumn{Table: e.Table, Column: e.ColName, Index: i}
+				return &qt.ExprColumn{Table: e.Table, Column: e.ColName, Index: i}
 			}
 		}
-	case *AggRef:
+	case *qt.AggRef:
 		// Match the aggregate expression against the output column names
 		// so the sort key reads from the Project's output by index.
 		// Try both qualified (table.col) and unqualified (col) forms
@@ -683,7 +684,7 @@ func analyzedToExprWithCols(ae AnalyzedExpr, rtes []*RangeTblEntry, outCols []st
 		aggStr := e.String()
 		for i, name := range outCols {
 			if equalFold(name, aggStr) {
-				return &ExprColumn{Column: name, Index: i}
+				return &qt.ExprColumn{Column: name, Index: i}
 			}
 		}
 		// Try with unqualified argument names.
@@ -691,7 +692,7 @@ func analyzedToExprWithCols(ae AnalyzedExpr, rtes []*RangeTblEntry, outCols []st
 		if unqualStr != aggStr {
 			for i, name := range outCols {
 				if equalFold(name, unqualStr) {
-					return &ExprColumn{Column: name, Index: i}
+					return &qt.ExprColumn{Column: name, Index: i}
 				}
 			}
 		}
@@ -699,22 +700,22 @@ func analyzedToExprWithCols(ae AnalyzedExpr, rtes []*RangeTblEntry, outCols []st
 	return analyzedToExpr(ae, rtes)
 }
 
-func boolExprToExpr(b *BoolExprNode, rtes []*RangeTblEntry) Expr {
+func boolExprToExpr(b *qt.BoolExprNode, rtes []*qt.RangeTblEntry) qt.Expr {
 	switch b.Op {
-	case BoolNot:
-		return &ExprNot{Child: analyzedToExpr(b.Args[0], rtes)}
-	case BoolAnd:
+	case qt.BoolNot:
+		return &qt.ExprNot{Child: analyzedToExpr(b.Args[0], rtes)}
+	case qt.BoolAnd:
 		left := analyzedToExpr(b.Args[0], rtes)
 		for i := 1; i < len(b.Args); i++ {
 			right := analyzedToExpr(b.Args[i], rtes)
-			left = &ExprBinOp{Op: OpAnd, Left: left, Right: right}
+			left = &qt.ExprBinOp{Op: qt.OpAnd, Left: left, Right: right}
 		}
 		return left
-	case BoolOr:
+	case qt.BoolOr:
 		left := analyzedToExpr(b.Args[0], rtes)
 		for i := 1; i < len(b.Args); i++ {
 			right := analyzedToExpr(b.Args[i], rtes)
-			left = &ExprBinOp{Op: OpOr, Left: left, Right: right}
+			left = &qt.ExprBinOp{Op: qt.OpOr, Left: left, Right: right}
 		}
 		return left
 	}
@@ -723,7 +724,7 @@ func boolExprToExpr(b *BoolExprNode, rtes []*RangeTblEntry) Expr {
 
 // --- Helpers ---
 
-func isSelectStar(targets []*TargetEntry, rtes []*RangeTblEntry) bool {
+func isSelectStar(targets []*qt.TargetEntry, rtes []*qt.RangeTblEntry) bool {
 	// Check if the target list is exactly all columns from all RTEs
 	// (i.e., the result of expanding SELECT *).
 	totalCols := 0
@@ -739,7 +740,7 @@ func isSelectStar(targets []*TargetEntry, rtes []*RangeTblEntry) bool {
 			if idx >= len(targets) {
 				return false
 			}
-			cv, ok := targets[idx].Expr.(*ColumnVar)
+			cv, ok := targets[idx].Expr.(*qt.ColumnVar)
 			if !ok || cv.RTIndex != rte.RTIndex || cv.ColName != col.Name {
 				return false
 			}
@@ -749,7 +750,7 @@ func isSelectStar(targets []*TargetEntry, rtes []*RangeTblEntry) bool {
 	return true
 }
 
-func constToInt64(c *Const) int64 {
+func constToInt64(c *qt.Const) int64 {
 	switch c.ConstType {
 	case tuple.TypeInt64:
 		return c.Value.I64
@@ -769,16 +770,16 @@ func splitQualified(name string) []string {
 	return []string{name}
 }
 
-// aggUnqualifiedString returns the AggRef's string representation with
+// aggUnqualifiedString returns the qt.AggRef's string representation with
 // unqualified column names (no table prefix), matching how exprString
 // formats function calls in the target list.
-func aggUnqualifiedString(a *AggRef) string {
+func aggUnqualifiedString(a *qt.AggRef) string {
 	if a.Star {
 		return a.AggFunc + "(*)"
 	}
 	args := make([]string, len(a.Args))
 	for i, arg := range a.Args {
-		if cv, ok := arg.(*ColumnVar); ok {
+		if cv, ok := arg.(*qt.ColumnVar); ok {
 			args[i] = cv.ColName // unqualified
 		} else {
 			args[i] = arg.String()
@@ -793,46 +794,46 @@ func equalFold(a, b string) bool {
 
 // patchAggExprs patches expressions in a Project that sits above an
 // Aggregate node:
-// - ExprAggRef: sets NumGroupExprs so they read from the right offset
-// - ExprColumn: resets Index to -1 to force name-based lookup (the
+// - qt.ExprAggRef: sets NumGroupExprs so they read from the right offset
+// - qt.ExprColumn: resets Index to -1 to force name-based lookup (the
 //   aggregate output has a different column layout than the scan)
-func patchAggExprs(expr Expr, numGroupExprs int) {
+func patchAggExprs(expr qt.Expr, numGroupExprs int) {
 	switch e := expr.(type) {
-	case *ExprAggRef:
+	case *qt.ExprAggRef:
 		e.NumGroupExprs = numGroupExprs
-	case *ExprColumn:
+	case *qt.ExprColumn:
 		e.Index = -1
-	case *ExprBinOp:
+	case *qt.ExprBinOp:
 		patchAggExprs(e.Left, numGroupExprs)
 		patchAggExprs(e.Right, numGroupExprs)
-	case *ExprNot:
+	case *qt.ExprNot:
 		patchAggExprs(e.Child, numGroupExprs)
-	case *ExprIsNull:
+	case *qt.ExprIsNull:
 		patchAggExprs(e.Child, numGroupExprs)
-	case *ExprFunc:
+	case *qt.ExprFunc:
 		for _, a := range e.Args {
 			patchAggExprs(a, numGroupExprs)
 		}
-	case *ExprCast:
+	case *qt.ExprCast:
 		patchAggExprs(e.Inner, numGroupExprs)
 	}
 }
 
 // buildWindowAggPlan creates a LogicalWindowAgg node from the query's
 // window function references. It also assigns WinIndex values to each
-// WindowFuncRef so the project layer can reference the computed values.
-func buildWindowAggPlan(q *Query, child LogicalNode) LogicalNode {
+// qt.WindowFuncRef so the project layer can reference the computed values.
+func buildWindowAggPlan(q *qt.Query, child LogicalNode) LogicalNode {
 	var descs []WindowFuncDesc
 	childCols := child.OutputColumns()
 	baseIndex := len(childCols)
 
 	for i, wf := range q.WindowFuncs {
-		var argExprs []Expr
+		var argExprs []qt.Expr
 		for _, a := range wf.Args {
 			argExprs = append(argExprs, analyzedToExpr(a, q.RangeTable))
 		}
 
-		var partExprs []Expr
+		var partExprs []qt.Expr
 		var orderExprs []SortExpr
 		if wf.WinDef != nil {
 			for _, p := range wf.WinDef.PartitionBy {
@@ -861,7 +862,7 @@ func buildWindowAggPlan(q *Query, child LogicalNode) LogicalNode {
 		}
 		descs = append(descs, desc)
 
-		// Assign the output column index so WindowFuncRef.Eval can find it.
+		// Assign the output column index so qt.WindowFuncRef.Eval can find it.
 		wf.WinIndex = baseIndex + i
 	}
 
@@ -890,7 +891,7 @@ func foldEqual(a, b string) bool {
 }
 
 // AnalyzedToExprPublic is an exported wrapper around analyzedToExpr.
-func AnalyzedToExprPublic(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
+func AnalyzedToExprPublic(ae qt.AnalyzedExpr, rtes []*qt.RangeTblEntry) qt.Expr {
 	return analyzedToExpr(ae, rtes)
 }
 

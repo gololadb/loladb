@@ -1,4 +1,4 @@
-package planner
+package analyzer
 
 import (
 	"fmt"
@@ -8,11 +8,12 @@ import (
 	"github.com/gololadb/gopgsql/parser"
 
 	"github.com/gololadb/loladb/pkg/catalog"
+	qt "github.com/gololadb/loladb/pkg/querytree"
 	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // Analyzer performs semantic analysis on a raw parse tree, resolving
-// names and types against the catalog to produce a Query tree.
+// names and types against the catalog to produce a qt.Query tree.
 //
 // This mirrors PostgreSQL's parse_analyze() / transformStmt() pipeline
 // (src/backend/parser/analyze.c). The key responsibilities are:
@@ -26,30 +27,30 @@ type Analyzer struct {
 	Cat *catalog.Catalog
 
 	// Per-query state, reset for each Analyze call.
-	rangeTable []*RangeTblEntry
+	rangeTable []*qt.RangeTblEntry
 
 	// cteMap holds CTE definitions visible in the current query scope.
-	cteMap map[string]*CTEDef
+	cteMap map[string]*qt.CTEDef
 }
 
 // NewAnalyzerWithRTE creates an Analyzer pre-loaded with a single range
 // table entry. Used by the executor to evaluate generated column expressions
 // where column references must resolve against the table's columns.
-func NewAnalyzerWithRTE(cat *catalog.Catalog, cols []RTEColumn) *Analyzer {
+func NewAnalyzerWithRTE(cat *catalog.Catalog, cols []qt.RTEColumn) *Analyzer {
 	a := &Analyzer{Cat: cat}
-	rte := &RangeTblEntry{
+	rte := &qt.RangeTblEntry{
 		RTIndex: 1,
 		Alias:   "",
 		Columns: cols,
 	}
-	a.rangeTable = []*RangeTblEntry{rte}
+	a.rangeTable = []*qt.RangeTblEntry{rte}
 	return a
 }
 
-// Analyze transforms a raw parse tree statement into a Query.
+// Analyze transforms a raw parse tree statement into a qt.Query.
 // This is the main entry point, equivalent to PostgreSQL's
 // parse_analyze().
-func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
+func (a *Analyzer) Analyze(stmt parser.Stmt) (*qt.Query, error) {
 	// Reset per-query state.
 	a.rangeTable = nil
 	a.cteMap = nil
@@ -70,23 +71,23 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 	case *parser.ExplainStmt:
 		return a.transformExplainStmt(n)
 	case *parser.VariableSetStmt:
-		return a.makeUtilityQuery(UtilNoOp, &UtilityStmt{
-			Type: UtilNoOp, Message: fmt.Sprintf("SET %s", n.Name),
+		return a.makeUtilityQuery(qt.UtilNoOp, &qt.UtilityStmt{
+			Type: qt.UtilNoOp, Message: fmt.Sprintf("SET %s", n.Name),
 		}), nil
 	case *parser.AlterTableStmt:
 		return a.transformAlterTableStmt(n)
 	case *parser.CreateSeqStmt:
 		seqName := lastNamePart(n.Name)
-		return a.makeUtilityQuery(UtilCreateSequence, &UtilityStmt{
-			Type: UtilCreateSequence, SeqName: seqName,
+		return a.makeUtilityQuery(qt.UtilCreateSequence, &qt.UtilityStmt{
+			Type: qt.UtilCreateSequence, SeqName: seqName,
 		}), nil
 	case *parser.ViewStmt:
 		return a.transformViewStmt(n)
 	case *parser.CreatePolicyStmt:
 		return a.transformCreatePolicyStmt(n)
 	case *parser.ExecuteStmt:
-		return a.makeUtilityQuery(UtilNoOp, &UtilityStmt{
-			Type: UtilNoOp, Message: "EXECUTE",
+		return a.makeUtilityQuery(qt.UtilNoOp, &qt.UtilityStmt{
+			Type: qt.UtilNoOp, Message: "EXECUTE",
 		}), nil
 	case *parser.CreateRoleStmt:
 		return a.transformCreateRoleStmt(n)
@@ -128,12 +129,12 @@ func (a *Analyzer) Analyze(stmt parser.Stmt) (*Query, error) {
 
 // addRangeTableEntry resolves a table name against the catalog and
 // adds it to the range table. Returns the 1-based index.
-func (a *Analyzer) addRangeTableEntry(tableName, alias string) (*RangeTblEntry, error) {
+func (a *Analyzer) addRangeTableEntry(tableName, alias string) (*qt.RangeTblEntry, error) {
 	return a.addRangeTableEntryQualified("", tableName, alias)
 }
 
 // addRangeTableEntryQualified resolves a schema-qualified table name.
-func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) (*RangeTblEntry, error) {
+func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) (*qt.RangeTblEntry, error) {
 	// Check for virtual catalog tables first.
 	qualName := tableName
 	if schema != "" {
@@ -143,7 +144,7 @@ func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) 
 		if alias == "" {
 			alias = tableName
 		}
-		rte := &RangeTblEntry{
+		rte := &qt.RangeTblEntry{
 			RTIndex: len(a.rangeTable) + 1,
 			RelName: qualName,
 			Alias:   alias,
@@ -164,7 +165,7 @@ func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) 
 				if alias == "" {
 					alias = tableName
 				}
-				rte := &RangeTblEntry{
+				rte := &qt.RangeTblEntry{
 					RTIndex: len(a.rangeTable) + 1,
 					RelName: "pg_catalog." + tableName,
 					Alias:   alias,
@@ -184,9 +185,9 @@ func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) 
 		return nil, fmt.Errorf("analyzer: cannot get columns for %q: %w", tableName, err)
 	}
 
-	rteCols := make([]RTEColumn, len(cols))
+	rteCols := make([]qt.RTEColumn, len(cols))
 	for i, c := range cols {
-		rteCols[i] = RTEColumn{
+		rteCols[i] = qt.RTEColumn{
 			Name:   c.Name,
 			Type:   tuple.DatumType(c.Type),
 			ColNum: c.Num,
@@ -204,7 +205,7 @@ func (a *Analyzer) addRangeTableEntryQualified(schema, tableName, alias string) 
 		alias = tableName
 	}
 
-	rte := &RangeTblEntry{
+	rte := &qt.RangeTblEntry{
 		RTIndex:  len(a.rangeTable) + 1, // 1-based
 		RelOID:   rel.OID,
 		RelName:  qualName,
@@ -231,7 +232,7 @@ func (a *Analyzer) flattenedColumns() []string {
 // --- SELECT transformation ---
 // Mirrors PostgreSQL's transformSelectStmt() in analyze.c.
 
-func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
+func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*qt.Query, error) {
 	// Handle set operations (UNION / INTERSECT / EXCEPT).
 	if n.Op != parser.SETOP_NONE && n.Larg != nil && n.Rarg != nil {
 		return a.transformSetOp(n)
@@ -241,7 +242,7 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		return a.transformValuesClause(n)
 	}
 
-	q := &Query{CommandType: CmdSelect}
+	q := &qt.Query{CommandType: qt.CmdSelect}
 
 	// Process WITH clause (CTEs) before anything else so CTE names
 	// are available when resolving FROM references.
@@ -264,9 +265,9 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 	}
 	if len(fromList) == 0 {
 		// SELECT without FROM (e.g., SELECT 1, SELECT 1+1).
-		// Build target list and use an empty FromExpr — the planner
+		// Build target list and use an empty qt.FromExpr — the planner
 		// will produce a Result node that emits a single row.
-		var targets []*TargetEntry
+		var targets []*qt.TargetEntry
 		for i, item := range n.TargetList {
 			expr, err := a.transformExpr(item.Val)
 			if err != nil {
@@ -276,17 +277,17 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 			if name == "" {
 				name = fmt.Sprintf("?column%d?", i)
 			}
-			targets = append(targets, &TargetEntry{Expr: expr, Name: name})
+			targets = append(targets, &qt.TargetEntry{Expr: expr, Name: name})
 		}
 		q.TargetList = targets
-		q.JoinTree = &FromExpr{} // empty FROM → Result node
+		q.JoinTree = &qt.FromExpr{} // empty FROM → Result node
 		q.RangeTable = a.rangeTable
 		return q, nil
 	}
 
 	// Step 2: Transform WHERE clause.
 	// Mirrors transformWhereClause().
-	var qual AnalyzedExpr
+	var qual qt.AnalyzedExpr
 	if n.WhereClause != nil {
 		qual, err = a.transformExpr(n.WhereClause)
 		if err != nil {
@@ -294,7 +295,7 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 		}
 	}
 
-	q.JoinTree = &FromExpr{FromList: fromList, Quals: qual}
+	q.JoinTree = &qt.FromExpr{FromList: fromList, Quals: qual}
 
 	// Step 3: Transform target list (SELECT expressions).
 	// Mirrors transformTargetList().
@@ -384,7 +385,7 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 			if err != nil {
 				return nil, err
 			}
-			q.SortClause = append(q.SortClause, &SortClause{
+			q.SortClause = append(q.SortClause, &qt.SortClause{
 				Expr: expr,
 				Desc: sb.SortbyDir == parser.SORTBY_DESC,
 			})
@@ -429,9 +430,9 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*Query, error) {
 
 // transformWithClause processes a WITH clause, analyzing each CTE and
 // registering it in the analyzer's CTE map so FROM references can find it.
-func (a *Analyzer) transformWithClause(wc *parser.WithClause, q *Query) error {
+func (a *Analyzer) transformWithClause(wc *parser.WithClause, q *qt.Query) error {
 	if a.cteMap == nil {
-		a.cteMap = make(map[string]*CTEDef)
+		a.cteMap = make(map[string]*qt.CTEDef)
 	}
 
 	for _, cte := range wc.CTEs {
@@ -469,7 +470,7 @@ func (a *Analyzer) transformWithClause(wc *parser.WithClause, q *Query) error {
 			cols := cteColumnsFromQuery(cteName, cte.Aliascolnames, initQuery)
 
 			// Register the CTE so the recursive term can self-reference.
-			def := &CTEDef{
+			def := &qt.CTEDef{
 				Name:      cteName,
 				Columns:   cols,
 				Recursive: true,
@@ -488,9 +489,9 @@ func (a *Analyzer) transformWithClause(wc *parser.WithClause, q *Query) error {
 
 			// Build a combined query that represents the full recursive CTE.
 			// We store both parts in a SetOp query.
-			combined := &Query{
-				CommandType: CmdSelect,
-				SetOp:       SetOpUnion,
+			combined := &qt.Query{
+				CommandType: qt.CmdSelect,
+				SetOp:       qt.SetOpUnion,
 				SetAll:       selectStmt.All,
 				SetLeft:     initQuery,
 				SetRight:    recQuery,
@@ -516,7 +517,7 @@ func (a *Analyzer) transformWithClause(wc *parser.WithClause, q *Query) error {
 
 			cols := cteColumnsFromQuery(cteName, cte.Aliascolnames, subQuery)
 
-			def := &CTEDef{
+			def := &qt.CTEDef{
 				Name:    cteName,
 				Query:   subQuery,
 				Columns: cols,
@@ -528,15 +529,15 @@ func (a *Analyzer) transformWithClause(wc *parser.WithClause, q *Query) error {
 	return nil
 }
 
-// cteColumnsFromQuery derives RTEColumn metadata from a CTE's analyzed query.
-func cteColumnsFromQuery(cteName string, aliasColNames []string, q *Query) []RTEColumn {
-	cols := make([]RTEColumn, len(q.TargetList))
+// cteColumnsFromQuery derives qt.RTEColumn metadata from a CTE's analyzed query.
+func cteColumnsFromQuery(cteName string, aliasColNames []string, q *qt.Query) []qt.RTEColumn {
+	cols := make([]qt.RTEColumn, len(q.TargetList))
 	for i, te := range q.TargetList {
 		name := te.Name
 		if i < len(aliasColNames) {
 			name = aliasColNames[i]
 		}
-		cols[i] = RTEColumn{
+		cols[i] = qt.RTEColumn{
 			Name:   name,
 			Type:   te.Expr.ResultType(),
 			ColNum: int32(i + 1),
@@ -548,8 +549,8 @@ func cteColumnsFromQuery(cteName string, aliasColNames []string, q *Query) []RTE
 // transformFromClause processes the FROM clause items, adding range
 // table entries and building join tree nodes.
 // Mirrors PostgreSQL's transformFromClauseItem().
-func (a *Analyzer) transformFromClause(items []parser.Node) ([]JoinTreeNode, error) {
-	var result []JoinTreeNode
+func (a *Analyzer) transformFromClause(items []parser.Node) ([]qt.JoinTreeNode, error) {
+	var result []qt.JoinTreeNode
 	for _, item := range items {
 		node, err := a.transformFromItem(item)
 		if err != nil {
@@ -560,7 +561,7 @@ func (a *Analyzer) transformFromClause(items []parser.Node) ([]JoinTreeNode, err
 	return result, nil
 }
 
-func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
+func (a *Analyzer) transformFromItem(item parser.Node) (qt.JoinTreeNode, error) {
 	switch t := item.(type) {
 	case *parser.RangeVar:
 		tableName := t.Relname
@@ -588,7 +589,7 @@ func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 				}
 			}
 		}
-		return &RangeTblRef{RTIndex: rte.RTIndex}, nil
+		return &qt.RangeTblRef{RTIndex: rte.RTIndex}, nil
 
 	case *parser.JoinExpr:
 		return a.transformJoinExpr(t)
@@ -603,7 +604,7 @@ func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 			return nil, err
 		}
 		// Attach sampling metadata to the RTE.
-		if ref, ok := node.(*RangeTblRef); ok && ref.RTIndex > 0 && ref.RTIndex <= len(a.rangeTable) {
+		if ref, ok := node.(*qt.RangeTblRef); ok && ref.RTIndex > 0 && ref.RTIndex <= len(a.rangeTable) {
 			rte := a.rangeTable[ref.RTIndex-1]
 			rte.SampleMethod = strings.ToLower(t.Method)
 			if len(t.Args) > 0 {
@@ -618,8 +619,8 @@ func (a *Analyzer) transformFromItem(item parser.Node) (JoinTreeNode, error) {
 }
 
 // addCTERangeTableEntry creates a range table entry for a CTE reference.
-func (a *Analyzer) addCTERangeTableEntry(cteDef *CTEDef, alias string) (JoinTreeNode, error) {
-	rte := &RangeTblEntry{
+func (a *Analyzer) addCTERangeTableEntry(cteDef *qt.CTEDef, alias string) (qt.JoinTreeNode, error) {
+	rte := &qt.RangeTblEntry{
 		RTIndex:     len(a.rangeTable) + 1,
 		RelName:     cteDef.Name,
 		Alias:       alias,
@@ -628,11 +629,11 @@ func (a *Analyzer) addCTERangeTableEntry(cteDef *CTEDef, alias string) (JoinTree
 		IsRecursive: cteDef.Recursive,
 	}
 	a.rangeTable = append(a.rangeTable, rte)
-	return &RangeTblRef{RTIndex: rte.RTIndex}, nil
+	return &qt.RangeTblRef{RTIndex: rte.RTIndex}, nil
 }
 
 // transformRangeSubselect handles subqueries in FROM: (SELECT ...) AS alias.
-func (a *Analyzer) transformRangeSubselect(rs *parser.RangeSubselect) (JoinTreeNode, error) {
+func (a *Analyzer) transformRangeSubselect(rs *parser.RangeSubselect) (qt.JoinTreeNode, error) {
 	selectStmt, ok := rs.Subquery.(*parser.SelectStmt)
 	if !ok {
 		return nil, fmt.Errorf("analyzer: subquery in FROM must be a SELECT")
@@ -673,20 +674,20 @@ func (a *Analyzer) transformRangeSubselect(rs *parser.RangeSubselect) (JoinTreeN
 	}
 
 	// Build columns from the subquery's target list.
-	cols := make([]RTEColumn, len(subQuery.TargetList))
+	cols := make([]qt.RTEColumn, len(subQuery.TargetList))
 	for i, te := range subQuery.TargetList {
 		name := te.Name
 		if rs.Alias != nil && i < len(rs.Alias.Colnames) {
 			name = rs.Alias.Colnames[i]
 		}
-		cols[i] = RTEColumn{
+		cols[i] = qt.RTEColumn{
 			Name:   name,
 			Type:   te.Expr.ResultType(),
 			ColNum: int32(i + 1),
 		}
 	}
 
-	rte := &RangeTblEntry{
+	rte := &qt.RangeTblEntry{
 		RTIndex:  len(a.rangeTable) + 1,
 		RelName:  alias,
 		Alias:    alias,
@@ -695,14 +696,14 @@ func (a *Analyzer) transformRangeSubselect(rs *parser.RangeSubselect) (JoinTreeN
 		Lateral:  rs.Lateral,
 	}
 	a.rangeTable = append(a.rangeTable, rte)
-	return &RangeTblRef{RTIndex: rte.RTIndex}, nil
+	return &qt.RangeTblRef{RTIndex: rte.RTIndex}, nil
 }
 
-// markOuterRefsInQuery walks a Query's expressions and sets AttIndex=-1 on
-// any ColumnVar that references an outer range table entry (identified by
+// markOuterRefsInQuery walks a qt.Query's expressions and sets AttIndex=-1 on
+// any qt.ColumnVar that references an outer range table entry (identified by
 // outerRTIs). This forces name-based resolution via OuterRowContext at
 // execution time.
-func markOuterRefsInQuery(q *Query, outerRTIs map[int]bool) {
+func markOuterRefsInQuery(q *qt.Query, outerRTIs map[int]bool) {
 	for _, te := range q.TargetList {
 		markOuterRefsInExpr(te.Expr, outerRTIs)
 	}
@@ -723,35 +724,35 @@ func markOuterRefsInQuery(q *Query, outerRTIs map[int]bool) {
 	}
 }
 
-func markOuterRefsInExpr(ae AnalyzedExpr, outerRTIs map[int]bool) {
+func markOuterRefsInExpr(ae qt.AnalyzedExpr, outerRTIs map[int]bool) {
 	if ae == nil {
 		return
 	}
 	switch e := ae.(type) {
-	case *ColumnVar:
+	case *qt.ColumnVar:
 		if outerRTIs[e.RTIndex] {
 			e.AttIndex = -1
 		}
-	case *OpExpr:
+	case *qt.OpExpr:
 		markOuterRefsInExpr(e.Left, outerRTIs)
 		markOuterRefsInExpr(e.Right, outerRTIs)
-	case *BoolExprNode:
+	case *qt.BoolExprNode:
 		for _, arg := range e.Args {
 			markOuterRefsInExpr(arg, outerRTIs)
 		}
-	case *FuncCallExpr:
+	case *qt.FuncCallExpr:
 		for _, arg := range e.Args {
 			markOuterRefsInExpr(arg, outerRTIs)
 		}
-	case *AggRef:
+	case *qt.AggRef:
 		for _, arg := range e.Args {
 			markOuterRefsInExpr(arg, outerRTIs)
 		}
-	case *TypeCastExpr:
+	case *qt.TypeCastExpr:
 		markOuterRefsInExpr(e.Arg, outerRTIs)
-	case *NullTestExpr:
+	case *qt.NullTestExpr:
 		markOuterRefsInExpr(e.Arg, outerRTIs)
-	case *CaseExprNode:
+	case *qt.CaseExprNode:
 		if e.Arg != nil {
 			markOuterRefsInExpr(e.Arg, outerRTIs)
 		}
@@ -762,14 +763,14 @@ func markOuterRefsInExpr(ae AnalyzedExpr, outerRTIs map[int]bool) {
 		if e.ElseExpr != nil {
 			markOuterRefsInExpr(e.ElseExpr, outerRTIs)
 		}
-	case *SubLinkExpr:
+	case *qt.SubLinkExpr:
 		// Don't descend into sublinks — they have their own scope.
 	}
 }
 
 // transformJoinExpr processes an explicit JOIN, mirroring
 // PostgreSQL's transformJoinOnClause().
-func (a *Analyzer) transformJoinExpr(j *parser.JoinExpr) (JoinTreeNode, error) {
+func (a *Analyzer) transformJoinExpr(j *parser.JoinExpr) (qt.JoinTreeNode, error) {
 	left, err := a.transformFromItem(j.Larg)
 	if err != nil {
 		return nil, err
@@ -779,21 +780,21 @@ func (a *Analyzer) transformJoinExpr(j *parser.JoinExpr) (JoinTreeNode, error) {
 		return nil, err
 	}
 
-	jtype := JoinInner
+	jtype := qt.JoinInner
 	switch j.Jointype {
 	case parser.JOIN_INNER:
-		jtype = JoinInner
+		jtype = qt.JoinInner
 	case parser.JOIN_LEFT:
-		jtype = JoinLeft
+		jtype = qt.JoinLeft
 	case parser.JOIN_RIGHT:
-		jtype = JoinRight
+		jtype = qt.JoinRight
 	case parser.JOIN_CROSS:
-		jtype = JoinCross
+		jtype = qt.JoinCross
 	case parser.JOIN_FULL:
-		jtype = JoinFull
+		jtype = qt.JoinFull
 	}
 
-	node := &JoinNode{
+	node := &qt.JoinNode{
 		JoinType: jtype,
 		Left:     left,
 		Right:    right,
@@ -811,8 +812,8 @@ func (a *Analyzer) transformJoinExpr(j *parser.JoinExpr) (JoinTreeNode, error) {
 	return node, nil
 }
 
-func extractRTI(n JoinTreeNode) int {
-	if ref, ok := n.(*RangeTblRef); ok {
+func extractRTI(n qt.JoinTreeNode) int {
+	if ref, ok := n.(*qt.RangeTblRef); ok {
 		return ref.RTIndex
 	}
 	return 0
@@ -820,8 +821,8 @@ func extractRTI(n JoinTreeNode) int {
 
 // transformTargetList resolves the SELECT target list.
 // Mirrors PostgreSQL's transformTargetList().
-func (a *Analyzer) transformTargetList(targets []*parser.ResTarget) ([]*TargetEntry, error) {
-	var result []*TargetEntry
+func (a *Analyzer) transformTargetList(targets []*parser.ResTarget) ([]*qt.TargetEntry, error) {
+	var result []*qt.TargetEntry
 	resNo := 1
 
 	for _, rt := range targets {
@@ -830,8 +831,8 @@ func (a *Analyzer) transformTargetList(targets []*parser.ResTarget) ([]*TargetEn
 			// Expand * into individual columns from all RTEs.
 			for _, rte := range a.rangeTable {
 				for i, col := range rte.Columns {
-					te := &TargetEntry{
-						Expr: &ColumnVar{
+					te := &qt.TargetEntry{
+						Expr: &qt.ColumnVar{
 							RTIndex:  rte.RTIndex,
 							ColNum:   col.ColNum,
 							ColName:  col.Name,
@@ -857,11 +858,11 @@ func (a *Analyzer) transformTargetList(targets []*parser.ResTarget) ([]*TargetEn
 		name := exprString(rt.Val)
 		if rt.Name != "" {
 			name = rt.Name
-		} else if cv, ok := expr.(*ColumnVar); ok {
+		} else if cv, ok := expr.(*qt.ColumnVar); ok {
 			name = cv.ColName
 		}
 
-		result = append(result, &TargetEntry{
+		result = append(result, &qt.TargetEntry{
 			Expr:  expr,
 			Name:  name,
 			ResNo: resNo,
@@ -888,7 +889,7 @@ func (a *Analyzer) computeAttIndex(rtIndex int, colNum int32) int {
 // --- Expression transformation ---
 // Mirrors PostgreSQL's transformExpr() in parse_expr.c.
 
-func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
+func (a *Analyzer) transformExpr(expr parser.Expr) (qt.AnalyzedExpr, error) {
 	switch e := expr.(type) {
 	case *parser.A_Const:
 		return a.transformConst(e), nil
@@ -905,15 +906,15 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 		}
 		typeName := typeNameToString(e.TypeName)
 		castType := a.resolveColumnType(strings.ToLower(typeName))
-		return &TypeCastExpr{Arg: inner, TargetType: strings.ToLower(typeName), CastType: castType}, nil
+		return &qt.TypeCastExpr{Arg: inner, TargetType: strings.ToLower(typeName), CastType: castType}, nil
 	case *parser.NullTest:
 		return a.transformNullTest(e)
 	case *parser.SQLValueFunction:
-		// Represent current_user / session_user etc. as a ColumnVar with
+		// Represent current_user / session_user etc. as a qt.ColumnVar with
 		// a sentinel name so the rewriter can substitute the actual value.
 		switch e.Op {
 		case parser.SVFOP_CURRENT_USER, parser.SVFOP_CURRENT_ROLE, parser.SVFOP_USER, parser.SVFOP_SESSION_USER:
-			return &ColumnVar{
+			return &qt.ColumnVar{
 				RTIndex: 0,
 				ColNum:  0,
 				ColName: "current_user",
@@ -923,20 +924,20 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 		case parser.SVFOP_CURRENT_SCHEMA:
 			// Return the current schema as a constant.
 			schema := a.Cat.CurrentSchema()
-			return &Const{Value: tuple.DText(schema), ConstType: tuple.TypeText}, nil
+			return &qt.Const{Value: tuple.DText(schema), ConstType: tuple.TypeText}, nil
 		case parser.SVFOP_CURRENT_CATALOG:
-			return &Const{Value: tuple.DText("loladb"), ConstType: tuple.TypeText}, nil
+			return &qt.Const{Value: tuple.DText("loladb"), ConstType: tuple.TypeText}, nil
 		case parser.SVFOP_CURRENT_DATE:
-			return &FuncCallExpr{FuncName: "current_date", Args: nil, ReturnType: tuple.TypeDate}, nil
+			return &qt.FuncCallExpr{FuncName: "current_date", Args: nil, ReturnType: tuple.TypeDate}, nil
 		case parser.SVFOP_CURRENT_TIMESTAMP:
-			return &FuncCallExpr{FuncName: "current_timestamp", Args: nil, ReturnType: tuple.TypeTimestamp}, nil
+			return &qt.FuncCallExpr{FuncName: "current_timestamp", Args: nil, ReturnType: tuple.TypeTimestamp}, nil
 		default:
 			return nil, fmt.Errorf("analyzer: unsupported SQL value function (op %d)", e.Op)
 		}
 	case *parser.FuncCall:
 		return a.transformFuncCall(e)
 	case *parser.CoalesceExpr:
-		var args []AnalyzedExpr
+		var args []qt.AnalyzedExpr
 		for _, arg := range e.Args {
 			resolved, err := a.transformExpr(arg)
 			if err != nil {
@@ -948,9 +949,9 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 		if len(args) > 0 {
 			retType = args[0].ResultType()
 		}
-		return &FuncCallExpr{FuncName: "coalesce", Args: args, ReturnType: retType}, nil
+		return &qt.FuncCallExpr{FuncName: "coalesce", Args: args, ReturnType: retType}, nil
 	case *parser.CaseExpr:
-		var arg AnalyzedExpr
+		var arg qt.AnalyzedExpr
 		if e.Arg != nil {
 			var err error
 			arg, err = a.transformExpr(e.Arg)
@@ -958,7 +959,7 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 				return nil, err
 			}
 		}
-		whens := make([]CaseWhenClause, len(e.Args))
+		whens := make([]qt.CaseWhenClause, len(e.Args))
 		retType := tuple.TypeNull
 		for i, w := range e.Args {
 			cond, err := a.transformExpr(w.Expr)
@@ -972,9 +973,9 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 			if i == 0 && result.ResultType() != tuple.TypeNull {
 				retType = result.ResultType()
 			}
-			whens[i] = CaseWhenClause{Cond: cond, Result: result}
+			whens[i] = qt.CaseWhenClause{Cond: cond, Result: result}
 		}
-		var elseExpr AnalyzedExpr
+		var elseExpr qt.AnalyzedExpr
 		if e.Defresult != nil {
 			var err error
 			elseExpr, err = a.transformExpr(e.Defresult)
@@ -985,35 +986,35 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 				retType = elseExpr.ResultType()
 			}
 		}
-		return &CaseExprNode{Arg: arg, Whens: whens, ElseExpr: elseExpr, ReturnTyp: retType}, nil
+		return &qt.CaseExprNode{Arg: arg, Whens: whens, ElseExpr: elseExpr, ReturnTyp: retType}, nil
 
 	case *parser.BooleanTest:
 		arg, err := a.transformExpr(e.Arg)
 		if err != nil {
 			return nil, err
 		}
-		var kind BoolTestKind
+		var kind qt.BoolTestKind
 		switch e.BooltestType {
 		case parser.IS_TRUE:
-			kind = BoolTestIsTrue
+			kind = qt.BoolTestIsTrue
 		case parser.IS_NOT_TRUE:
-			kind = BoolTestIsNotTrue
+			kind = qt.BoolTestIsNotTrue
 		case parser.IS_FALSE:
-			kind = BoolTestIsFalse
+			kind = qt.BoolTestIsFalse
 		case parser.IS_NOT_FALSE:
-			kind = BoolTestIsNotFalse
+			kind = qt.BoolTestIsNotFalse
 		case parser.IS_UNKNOWN:
-			kind = BoolTestIsUnknown
+			kind = qt.BoolTestIsUnknown
 		case parser.IS_NOT_UNKNOWN:
-			kind = BoolTestIsNotUnknown
+			kind = qt.BoolTestIsNotUnknown
 		}
-		return &BooleanTestExpr{Arg: arg, Test: kind}, nil
+		return &qt.BooleanTestExpr{Arg: arg, Test: kind}, nil
 
 	case *parser.NullIfExpr:
 		if len(e.Args) != 2 {
 			return nil, fmt.Errorf("analyzer: NULLIF requires exactly 2 arguments")
 		}
-		var args []AnalyzedExpr
+		var args []qt.AnalyzedExpr
 		for _, arg := range e.Args {
 			resolved, err := a.transformExpr(arg)
 			if err != nil {
@@ -1022,10 +1023,10 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 			args = append(args, resolved)
 		}
 		retType := args[0].ResultType()
-		return &FuncCallExpr{FuncName: "nullif", Args: args, ReturnType: retType}, nil
+		return &qt.FuncCallExpr{FuncName: "nullif", Args: args, ReturnType: retType}, nil
 
 	case *parser.MinMaxExpr:
-		var args []AnalyzedExpr
+		var args []qt.AnalyzedExpr
 		for _, arg := range e.Args {
 			resolved, err := a.transformExpr(arg)
 			if err != nil {
@@ -1041,7 +1042,7 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 		if e.Op == parser.IS_LEAST {
 			funcName = "least"
 		}
-		return &FuncCallExpr{FuncName: funcName, Args: args, ReturnType: retType}, nil
+		return &qt.FuncCallExpr{FuncName: funcName, Args: args, ReturnType: retType}, nil
 
 	case *parser.XmlExpr:
 		return a.transformXmlExpr(e)
@@ -1054,7 +1055,7 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 
 	case *parser.A_ArrayExpr:
 		// ARRAY[1, 2, 3] → evaluate elements and format as PG array literal.
-		var elems []Expr
+		var elems []qt.Expr
 		for _, el := range e.Elements {
 			ae, err := a.transformExpr(el)
 			if err != nil {
@@ -1062,7 +1063,7 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 			}
 			elems = append(elems, ae)
 		}
-		return &ArrayConstructExpr{Elements: elems}, nil
+		return &qt.ArrayConstructExpr{Elements: elems}, nil
 
 	case *parser.A_Indirection:
 		// expr[idx] — array subscript or field access.
@@ -1074,7 +1075,7 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 			if idx, ok := ind.(*parser.A_Indices); ok {
 				if idx.IsSlice {
 					// Array slice: arr[lo:hi]
-					var lower, upper AnalyzedExpr
+					var lower, upper qt.AnalyzedExpr
 					if idx.Lidx != nil {
 						lower, err = a.transformExpr(idx.Lidx)
 						if err != nil {
@@ -1087,14 +1088,14 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 							return nil, err
 						}
 					}
-					arg = &ArraySliceExpr{Array: arg, Lower: lower, Upper: upper}
+					arg = &qt.ArraySliceExpr{Array: arg, Lower: lower, Upper: upper}
 				} else if idx.Uidx != nil {
 					// Array subscript: arr[idx]
 					idxExpr, err := a.transformExpr(idx.Uidx)
 					if err != nil {
 						return nil, err
 					}
-					arg = &ArraySubscriptExpr{Array: arg, Index: idxExpr}
+					arg = &qt.ArraySubscriptExpr{Array: arg, Index: idxExpr}
 				}
 			}
 		}
@@ -1102,7 +1103,7 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 
 	default:
 		if expr == nil {
-			return &Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}, nil
+			return &qt.Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}, nil
 		}
 		// Fallback: try to interpret as a column name.
 		name := fmt.Sprintf("%v", expr)
@@ -1111,36 +1112,36 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 	}
 }
 
-// transformConst converts a parser constant to a typed Const node.
+// transformConst converts a parser constant to a typed qt.Const node.
 // Mirrors PostgreSQL's make_const() in parse_node.c.
-func (a *Analyzer) transformConst(c *parser.A_Const) AnalyzedExpr {
+func (a *Analyzer) transformConst(c *parser.A_Const) qt.AnalyzedExpr {
 	switch c.Val.Type {
 	case parser.ValInt:
-		return &Const{Value: tuple.DInt64(c.Val.Ival), ConstType: tuple.TypeInt64}
+		return &qt.Const{Value: tuple.DInt64(c.Val.Ival), ConstType: tuple.TypeInt64}
 	case parser.ValFloat:
 		f, err := strconv.ParseFloat(c.Val.Str, 64)
 		if err != nil {
-			return &Const{Value: tuple.DText(c.Val.Str), ConstType: tuple.TypeText}
+			return &qt.Const{Value: tuple.DText(c.Val.Str), ConstType: tuple.TypeText}
 		}
-		return &Const{Value: tuple.DFloat64(f), ConstType: tuple.TypeFloat64}
+		return &qt.Const{Value: tuple.DFloat64(f), ConstType: tuple.TypeFloat64}
 	case parser.ValBool:
-		return &Const{Value: tuple.DBool(c.Val.Bool), ConstType: tuple.TypeBool}
+		return &qt.Const{Value: tuple.DBool(c.Val.Bool), ConstType: tuple.TypeBool}
 	case parser.ValStr:
-		return &Const{Value: tuple.DText(c.Val.Str), ConstType: tuple.TypeText}
+		return &qt.Const{Value: tuple.DText(c.Val.Str), ConstType: tuple.TypeText}
 	case parser.ValNull:
-		return &Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}
+		return &qt.Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}
 	default:
-		return &Const{Value: tuple.DText(c.Val.Str), ConstType: tuple.TypeText}
+		return &qt.Const{Value: tuple.DText(c.Val.Str), ConstType: tuple.TypeText}
 	}
 }
 
 // transformColumnRef resolves a column reference against the range table.
 // Mirrors PostgreSQL's transformColumnRef() in parse_expr.c, which
 // calls colNameToVar() in parse_relation.c.
-func (a *Analyzer) transformColumnRef(ref *parser.ColumnRef) (AnalyzedExpr, error) {
+func (a *Analyzer) transformColumnRef(ref *parser.ColumnRef) (qt.AnalyzedExpr, error) {
 	if len(ref.Fields) == 1 {
 		if _, ok := ref.Fields[0].(*parser.A_Star); ok {
-			return &StarExpr{}, nil
+			return &qt.StarExpr{}, nil
 		}
 		if s, ok := ref.Fields[0].(*parser.String); ok {
 			return a.resolveColumnByName(s.Str, "")
@@ -1155,7 +1156,7 @@ func (a *Analyzer) transformColumnRef(ref *parser.ColumnRef) (AnalyzedExpr, erro
 		if s, ok := ref.Fields[1].(*parser.String); ok {
 			colName = s.Str
 		} else if _, ok := ref.Fields[1].(*parser.A_Star); ok {
-			return &StarExpr{}, nil
+			return &qt.StarExpr{}, nil
 		}
 		return a.resolveColumnByName(colName, tableName)
 	}
@@ -1169,7 +1170,7 @@ func (a *Analyzer) transformColumnRef(ref *parser.ColumnRef) (AnalyzedExpr, erro
 		if s, ok := ref.Fields[2].(*parser.String); ok {
 			colName = s.Str
 		} else if _, ok := ref.Fields[2].(*parser.A_Star); ok {
-			return &StarExpr{}, nil
+			return &qt.StarExpr{}, nil
 		}
 		return a.resolveColumnByName(colName, tableName)
 	}
@@ -1178,7 +1179,7 @@ func (a *Analyzer) transformColumnRef(ref *parser.ColumnRef) (AnalyzedExpr, erro
 
 // resolveColumnByName searches the range table for a matching column,
 // mirroring PostgreSQL's colNameToVar() / scanRTEForColumn().
-func (a *Analyzer) resolveColumnByName(colName, tableName string) (AnalyzedExpr, error) {
+func (a *Analyzer) resolveColumnByName(colName, tableName string) (qt.AnalyzedExpr, error) {
 	colName = strings.Trim(colName, "\"")
 	tableName = strings.Trim(tableName, "\"")
 
@@ -1188,7 +1189,7 @@ func (a *Analyzer) resolveColumnByName(colName, tableName string) (AnalyzedExpr,
 		}
 		for i, col := range rte.Columns {
 			if strings.EqualFold(col.Name, colName) {
-				return &ColumnVar{
+				return &qt.ColumnVar{
 					RTIndex:  rte.RTIndex,
 					ColNum:   col.ColNum,
 					ColName:  col.Name,
@@ -1205,7 +1206,7 @@ func (a *Analyzer) resolveColumnByName(colName, tableName string) (AnalyzedExpr,
 
 // transformAExpr resolves an operator expression.
 // Mirrors PostgreSQL's transformAExprOp() in parse_expr.c.
-func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
+func (a *Analyzer) transformAExpr(e *parser.A_Expr) (qt.AnalyzedExpr, error) {
 	// Unary prefix operator.
 	if e.Lexpr == nil {
 		right, err := a.transformExpr(e.Rexpr)
@@ -1213,14 +1214,14 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 			return nil, err
 		}
 		if len(e.Name) > 0 && e.Name[len(e.Name)-1] == "-" {
-			if c, ok := right.(*Const); ok {
+			if c, ok := right.(*qt.Const); ok {
 				switch c.ConstType {
 				case tuple.TypeInt64:
-					return &Const{Value: tuple.DInt64(-c.Value.I64), ConstType: tuple.TypeInt64}, nil
+					return &qt.Const{Value: tuple.DInt64(-c.Value.I64), ConstType: tuple.TypeInt64}, nil
 				case tuple.TypeInt32:
-					return &Const{Value: tuple.DInt32(-c.Value.I32), ConstType: tuple.TypeInt32}, nil
+					return &qt.Const{Value: tuple.DInt32(-c.Value.I32), ConstType: tuple.TypeInt32}, nil
 				case tuple.TypeFloat64:
-					return &Const{Value: tuple.DFloat64(-c.Value.F64), ConstType: tuple.TypeFloat64}, nil
+					return &qt.Const{Value: tuple.DFloat64(-c.Value.F64), ConstType: tuple.TypeFloat64}, nil
 				}
 			}
 			return right, nil
@@ -1266,124 +1267,124 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 		opName = e.Name[len(e.Name)-1]
 	}
 
-	var op OpKind
+	var op qt.OpKind
 	var resultTyp tuple.DatumType
 	switch opName {
 	case "=":
-		op = OpEq
+		op = qt.OpEq
 		resultTyp = tuple.TypeBool
 	case "<>", "!=":
-		op = OpNeq
+		op = qt.OpNeq
 		resultTyp = tuple.TypeBool
 	case "<":
-		op = OpLt
+		op = qt.OpLt
 		resultTyp = tuple.TypeBool
 	case "<=":
-		op = OpLte
+		op = qt.OpLte
 		resultTyp = tuple.TypeBool
 	case ">":
-		op = OpGt
+		op = qt.OpGt
 		resultTyp = tuple.TypeBool
 	case ">=":
-		op = OpGte
+		op = qt.OpGte
 		resultTyp = tuple.TypeBool
 	case "+":
-		op = OpAdd
+		op = qt.OpAdd
 		resultTyp = inferArithType(left, right)
 	case "-":
 		if left.ResultType() == tuple.TypeJSON {
-			op = OpJSONDelete
+			op = qt.OpJSONDelete
 			resultTyp = tuple.TypeJSON
 		} else {
-			op = OpSub
+			op = qt.OpSub
 			resultTyp = inferArithType(left, right)
 		}
 	case "*":
-		op = OpMul
+		op = qt.OpMul
 		resultTyp = inferArithType(left, right)
 	case "/":
-		op = OpDiv
+		op = qt.OpDiv
 		resultTyp = inferArithType(left, right)
 	case "%":
-		op = OpMod
+		op = qt.OpMod
 		resultTyp = inferArithType(left, right)
 	case "||":
-		op = OpConcat
+		op = qt.OpConcat
 		resultTyp = tuple.TypeText
 	case "->":
-		op = OpJSONArrow
+		op = qt.OpJSONArrow
 		resultTyp = tuple.TypeJSON
 	case "->>":
-		op = OpJSONArrowText
+		op = qt.OpJSONArrowText
 		resultTyp = tuple.TypeText
 	case "#>":
-		op = OpJSONHashArrow
+		op = qt.OpJSONHashArrow
 		resultTyp = tuple.TypeJSON
 	case "#>>":
-		op = OpJSONHashArrowText
+		op = qt.OpJSONHashArrowText
 		resultTyp = tuple.TypeText
 	case "@>":
 		if left != nil && left.ResultType() == tuple.TypeJSON {
-			op = OpJSONContains
+			op = qt.OpJSONContains
 		} else {
-			op = OpArrayContains
+			op = qt.OpArrayContains
 		}
 		resultTyp = tuple.TypeBool
 	case "<@":
 		if left != nil && left.ResultType() == tuple.TypeJSON {
-			op = OpJSONContainedBy
+			op = qt.OpJSONContainedBy
 		} else {
-			op = OpArrayContainedBy
+			op = qt.OpArrayContainedBy
 		}
 		resultTyp = tuple.TypeBool
 	case "&&":
-		op = OpArrayOverlap
+		op = qt.OpArrayOverlap
 		resultTyp = tuple.TypeBool
 	case "?":
-		op = OpJSONExists
+		op = qt.OpJSONExists
 		resultTyp = tuple.TypeBool
 	case "?|":
-		op = OpJSONExistsAny
+		op = qt.OpJSONExistsAny
 		resultTyp = tuple.TypeBool
 	case "?&":
-		op = OpJSONExistsAll
+		op = qt.OpJSONExistsAll
 		resultTyp = tuple.TypeBool
 	case "#-":
-		op = OpJSONDeletePath
+		op = qt.OpJSONDeletePath
 		resultTyp = tuple.TypeJSON
 	case "~":
-		op = OpRegexMatch
+		op = qt.OpRegexMatch
 		resultTyp = tuple.TypeBool
 	case "~*":
-		op = OpRegexIMatch
+		op = qt.OpRegexIMatch
 		resultTyp = tuple.TypeBool
 	case "!~":
-		op = OpRegexNotMatch
+		op = qt.OpRegexNotMatch
 		resultTyp = tuple.TypeBool
 	case "!~*":
-		op = OpRegexNotIMatch
+		op = qt.OpRegexNotIMatch
 		resultTyp = tuple.TypeBool
 	case "^@":
-		op = OpStartsWith
+		op = qt.OpStartsWith
 		resultTyp = tuple.TypeBool
 	case "@@":
-		op = OpTSMatch
+		op = qt.OpTSMatch
 		resultTyp = tuple.TypeBool
 	case "<->":
-		op = OpGeomDistance
+		op = qt.OpGeomDistance
 		resultTyp = tuple.TypeFloat64
 	case "~=":
-		op = OpGeomSame
+		op = qt.OpGeomSame
 		resultTyp = tuple.TypeBool
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported operator %q", opName)
 	}
 
-	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: resultTyp}, nil
+	return &qt.OpExpr{Op: op, Left: left, Right: right, ResultTyp: resultTyp}, nil
 }
 
 // transformLike handles LIKE / ILIKE / NOT LIKE / NOT ILIKE.
-func (a *Analyzer) transformLike(e *parser.A_Expr) (AnalyzedExpr, error) {
+func (a *Analyzer) transformLike(e *parser.A_Expr) (qt.AnalyzedExpr, error) {
 	left, err := a.transformExpr(e.Lexpr)
 	if err != nil {
 		return nil, err
@@ -1404,28 +1405,28 @@ func (a *Analyzer) transformLike(e *parser.A_Expr) (AnalyzedExpr, error) {
 	if len(e.Name) > 0 {
 		opName = e.Name[len(e.Name)-1]
 	}
-	var op OpKind
+	var op qt.OpKind
 	switch opName {
 	case "~~":
-		op = OpLike
+		op = qt.OpLike
 	case "~~*":
-		op = OpILike
+		op = qt.OpILike
 	case "!~~":
-		op = OpNotLike
+		op = qt.OpNotLike
 	case "!~~*":
-		op = OpNotILike
+		op = qt.OpNotILike
 	default:
 		if e.Kind == parser.AEXPR_ILIKE {
-			op = OpILike
+			op = qt.OpILike
 		} else {
-			op = OpLike
+			op = qt.OpLike
 		}
 	}
-	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: tuple.TypeBool}, nil
+	return &qt.OpExpr{Op: op, Left: left, Right: right, ResultTyp: tuple.TypeBool}, nil
 }
 
 // transformSimilarTo handles [NOT] SIMILAR TO expressions.
-func (a *Analyzer) transformSimilarTo(e *parser.A_Expr) (AnalyzedExpr, error) {
+func (a *Analyzer) transformSimilarTo(e *parser.A_Expr) (qt.AnalyzedExpr, error) {
 	left, err := a.transformExpr(e.Lexpr)
 	if err != nil {
 		return nil, err
@@ -1438,18 +1439,18 @@ func (a *Analyzer) transformSimilarTo(e *parser.A_Expr) (AnalyzedExpr, error) {
 	if len(e.Name) > 0 {
 		opName = e.Name[len(e.Name)-1]
 	}
-	op := OpSimilarTo
+	op := qt.OpSimilarTo
 	if opName == "!~" || opName == "!~*" {
-		op = OpNotSimilarTo
+		op = qt.OpNotSimilarTo
 	}
 	// Check for NOT SIMILAR TO via the Name list.
 	for _, n := range e.Name {
 		if strings.EqualFold(n, "!") || strings.EqualFold(n, "not") {
-			op = OpNotSimilarTo
+			op = qt.OpNotSimilarTo
 			break
 		}
 	}
-	return &OpExpr{Op: op, Left: left, Right: right, ResultTyp: tuple.TypeBool}, nil
+	return &qt.OpExpr{Op: op, Left: left, Right: right, ResultTyp: tuple.TypeBool}, nil
 }
 
 // transformBetween desugars BETWEEN into AND/OR comparisons.
@@ -1458,12 +1459,12 @@ func (a *Analyzer) transformSimilarTo(e *parser.A_Expr) (AnalyzedExpr, error) {
 // transformRowCompare expands (a, b, ...) op (x, y, ...) into scalar comparisons.
 // For = and !=: element-wise AND/OR.
 // For <, >, <=, >=: lexicographic comparison.
-func (a *Analyzer) transformRowCompare(left, right *parser.RowExpr, opNames []string) (AnalyzedExpr, error) {
+func (a *Analyzer) transformRowCompare(left, right *parser.RowExpr, opNames []string) (qt.AnalyzedExpr, error) {
 	if len(left.Args) != len(right.Args) {
 		return nil, fmt.Errorf("unequal number of entries in row expressions")
 	}
 	if len(left.Args) == 0 {
-		return &Const{Value: tuple.DBool(true), ConstType: tuple.TypeBool}, nil
+		return &qt.Const{Value: tuple.DBool(true), ConstType: tuple.TypeBool}, nil
 	}
 
 	op := ""
@@ -1473,8 +1474,8 @@ func (a *Analyzer) transformRowCompare(left, right *parser.RowExpr, opNames []st
 
 	// Transform all element pairs.
 	n := len(left.Args)
-	leftExprs := make([]AnalyzedExpr, n)
-	rightExprs := make([]AnalyzedExpr, n)
+	leftExprs := make([]qt.AnalyzedExpr, n)
+	rightExprs := make([]qt.AnalyzedExpr, n)
 	for i := 0; i < n; i++ {
 		var err error
 		leftExprs[i], err = a.transformExpr(left.Args[i])
@@ -1490,42 +1491,42 @@ func (a *Analyzer) transformRowCompare(left, right *parser.RowExpr, opNames []st
 	switch op {
 	case "=":
 		// (a,b) = (x,y) → a=x AND b=y
-		var conds []AnalyzedExpr
+		var conds []qt.AnalyzedExpr
 		for i := 0; i < n; i++ {
-			conds = append(conds, &OpExpr{Op: OpEq, Left: leftExprs[i], Right: rightExprs[i]})
+			conds = append(conds, &qt.OpExpr{Op: qt.OpEq, Left: leftExprs[i], Right: rightExprs[i]})
 		}
 		return andAll(conds), nil
 
 	case "<>", "!=":
 		// (a,b) <> (x,y) → a<>x OR b<>y
-		var conds []AnalyzedExpr
+		var conds []qt.AnalyzedExpr
 		for i := 0; i < n; i++ {
-			conds = append(conds, &OpExpr{Op: OpNeq, Left: leftExprs[i], Right: rightExprs[i]})
+			conds = append(conds, &qt.OpExpr{Op: qt.OpNeq, Left: leftExprs[i], Right: rightExprs[i]})
 		}
 		return orAll(conds), nil
 
 	case "<", ">", "<=", ">=":
 		// Lexicographic: (a,b) < (x,y) → a<x OR (a=x AND b<y)
-		var ltOp, eqLeOp OpKind
+		var ltOp, eqLeOp qt.OpKind
 		switch op {
 		case "<":
-			ltOp, eqLeOp = OpLt, OpLt
+			ltOp, eqLeOp = qt.OpLt, qt.OpLt
 		case ">":
-			ltOp, eqLeOp = OpGt, OpGt
+			ltOp, eqLeOp = qt.OpGt, qt.OpGt
 		case "<=":
-			ltOp, eqLeOp = OpLt, OpLte
+			ltOp, eqLeOp = qt.OpLt, qt.OpLte
 		case ">=":
-			ltOp, eqLeOp = OpGt, OpGte
+			ltOp, eqLeOp = qt.OpGt, qt.OpGte
 		}
 		// Build from right to left.
 		// Last element: a[n-1] op b[n-1] (using eqLeOp for <= / >=)
-		result := AnalyzedExpr(&OpExpr{Op: eqLeOp, Left: leftExprs[n-1], Right: rightExprs[n-1]})
+		result := qt.AnalyzedExpr(&qt.OpExpr{Op: eqLeOp, Left: leftExprs[n-1], Right: rightExprs[n-1]})
 		for i := n - 2; i >= 0; i-- {
 			// a[i] < b[i] OR (a[i] = b[i] AND <rest>)
-			strict := &OpExpr{Op: ltOp, Left: leftExprs[i], Right: rightExprs[i]}
-			eq := &OpExpr{Op: OpEq, Left: leftExprs[i], Right: rightExprs[i]}
-			eqAndRest := &BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{eq, result}}
-			result = &BoolExprNode{Op: BoolOr, Args: []AnalyzedExpr{strict, eqAndRest}}
+			strict := &qt.OpExpr{Op: ltOp, Left: leftExprs[i], Right: rightExprs[i]}
+			eq := &qt.OpExpr{Op: qt.OpEq, Left: leftExprs[i], Right: rightExprs[i]}
+			eqAndRest := &qt.BoolExprNode{Op: qt.BoolAnd, Args: []qt.AnalyzedExpr{eq, result}}
+			result = &qt.BoolExprNode{Op: qt.BoolOr, Args: []qt.AnalyzedExpr{strict, eqAndRest}}
 		}
 		return result, nil
 
@@ -1535,22 +1536,22 @@ func (a *Analyzer) transformRowCompare(left, right *parser.RowExpr, opNames []st
 }
 
 // andAll combines multiple conditions with AND.
-func andAll(conds []AnalyzedExpr) AnalyzedExpr {
+func andAll(conds []qt.AnalyzedExpr) qt.AnalyzedExpr {
 	if len(conds) == 1 {
 		return conds[0]
 	}
-	return &BoolExprNode{Op: BoolAnd, Args: conds}
+	return &qt.BoolExprNode{Op: qt.BoolAnd, Args: conds}
 }
 
 // orAll combines multiple conditions with OR.
-func orAll(conds []AnalyzedExpr) AnalyzedExpr {
+func orAll(conds []qt.AnalyzedExpr) qt.AnalyzedExpr {
 	if len(conds) == 1 {
 		return conds[0]
 	}
-	return &BoolExprNode{Op: BoolOr, Args: conds}
+	return &qt.BoolExprNode{Op: qt.BoolOr, Args: conds}
 }
 
-func (a *Analyzer) transformBetween(e *parser.A_Expr) (AnalyzedExpr, error) {
+func (a *Analyzer) transformBetween(e *parser.A_Expr) (qt.AnalyzedExpr, error) {
 	left, err := a.transformExpr(e.Lexpr)
 	if err != nil {
 		return nil, err
@@ -1570,28 +1571,28 @@ func (a *Analyzer) transformBetween(e *parser.A_Expr) (AnalyzedExpr, error) {
 	switch e.Kind {
 	case parser.AEXPR_NOT_BETWEEN:
 		// x NOT BETWEEN a AND b → x < a OR x > b
-		return &BoolExprNode{
-			Op: BoolOr,
-			Args: []AnalyzedExpr{
-				&OpExpr{Op: OpLt, Left: left, Right: low, ResultTyp: tuple.TypeBool},
-				&OpExpr{Op: OpGt, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+		return &qt.BoolExprNode{
+			Op: qt.BoolOr,
+			Args: []qt.AnalyzedExpr{
+				&qt.OpExpr{Op: qt.OpLt, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+				&qt.OpExpr{Op: qt.OpGt, Left: left, Right: high, ResultTyp: tuple.TypeBool},
 			},
 		}, nil
 	case parser.AEXPR_NOT_BETWEEN_SYM:
 		// x NOT BETWEEN SYMMETRIC a AND b → NOT ((x >= a AND x <= b) OR (x >= b AND x <= a))
-		return &BoolExprNode{
-			Op: BoolNot,
-			Args: []AnalyzedExpr{
-				&BoolExprNode{
-					Op: BoolOr,
-					Args: []AnalyzedExpr{
-						&BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{
-							&OpExpr{Op: OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
-							&OpExpr{Op: OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+		return &qt.BoolExprNode{
+			Op: qt.BoolNot,
+			Args: []qt.AnalyzedExpr{
+				&qt.BoolExprNode{
+					Op: qt.BoolOr,
+					Args: []qt.AnalyzedExpr{
+						&qt.BoolExprNode{Op: qt.BoolAnd, Args: []qt.AnalyzedExpr{
+							&qt.OpExpr{Op: qt.OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+							&qt.OpExpr{Op: qt.OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
 						}},
-						&BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{
-							&OpExpr{Op: OpGte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
-							&OpExpr{Op: OpLte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+						&qt.BoolExprNode{Op: qt.BoolAnd, Args: []qt.AnalyzedExpr{
+							&qt.OpExpr{Op: qt.OpGte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+							&qt.OpExpr{Op: qt.OpLte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
 						}},
 					},
 				},
@@ -1599,33 +1600,33 @@ func (a *Analyzer) transformBetween(e *parser.A_Expr) (AnalyzedExpr, error) {
 		}, nil
 	case parser.AEXPR_BETWEEN_SYM:
 		// x BETWEEN SYMMETRIC a AND b → (x >= a AND x <= b) OR (x >= b AND x <= a)
-		return &BoolExprNode{
-			Op: BoolOr,
-			Args: []AnalyzedExpr{
-				&BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{
-					&OpExpr{Op: OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
-					&OpExpr{Op: OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+		return &qt.BoolExprNode{
+			Op: qt.BoolOr,
+			Args: []qt.AnalyzedExpr{
+				&qt.BoolExprNode{Op: qt.BoolAnd, Args: []qt.AnalyzedExpr{
+					&qt.OpExpr{Op: qt.OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+					&qt.OpExpr{Op: qt.OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
 				}},
-				&BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{
-					&OpExpr{Op: OpGte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
-					&OpExpr{Op: OpLte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+				&qt.BoolExprNode{Op: qt.BoolAnd, Args: []qt.AnalyzedExpr{
+					&qt.OpExpr{Op: qt.OpGte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+					&qt.OpExpr{Op: qt.OpLte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
 				}},
 			},
 		}, nil
 	default:
 		// x BETWEEN a AND b → x >= a AND x <= b
-		return &BoolExprNode{
-			Op: BoolAnd,
-			Args: []AnalyzedExpr{
-				&OpExpr{Op: OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
-				&OpExpr{Op: OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
+		return &qt.BoolExprNode{
+			Op: qt.BoolAnd,
+			Args: []qt.AnalyzedExpr{
+				&qt.OpExpr{Op: qt.OpGte, Left: left, Right: low, ResultTyp: tuple.TypeBool},
+				&qt.OpExpr{Op: qt.OpLte, Left: left, Right: high, ResultTyp: tuple.TypeBool},
 			},
 		}, nil
 	}
 }
 
 // transformIn desugars IN (val1, val2, ...) into x=a OR x=b OR ...
-func (a *Analyzer) transformIn(e *parser.A_Expr) (AnalyzedExpr, error) {
+func (a *Analyzer) transformIn(e *parser.A_Expr) (qt.AnalyzedExpr, error) {
 	left, err := a.transformExpr(e.Lexpr)
 	if err != nil {
 		return nil, err
@@ -1634,22 +1635,22 @@ func (a *Analyzer) transformIn(e *parser.A_Expr) (AnalyzedExpr, error) {
 	if !ok {
 		return nil, fmt.Errorf("analyzer: IN requires a value list")
 	}
-	var eqExprs []AnalyzedExpr
+	var eqExprs []qt.AnalyzedExpr
 	for _, item := range el.Items {
 		val, err := a.transformExpr(item)
 		if err != nil {
 			return nil, err
 		}
-		eqExprs = append(eqExprs, &OpExpr{Op: OpEq, Left: left, Right: val, ResultTyp: tuple.TypeBool})
+		eqExprs = append(eqExprs, &qt.OpExpr{Op: qt.OpEq, Left: left, Right: val, ResultTyp: tuple.TypeBool})
 	}
 	if len(eqExprs) == 1 {
 		return eqExprs[0], nil
 	}
-	return &BoolExprNode{Op: BoolOr, Args: eqExprs}, nil
+	return &qt.BoolExprNode{Op: qt.BoolOr, Args: eqExprs}, nil
 }
 
 // transformDistinctFrom handles IS [NOT] DISTINCT FROM.
-func (a *Analyzer) transformDistinctFrom(e *parser.A_Expr, notDistinct bool) (AnalyzedExpr, error) {
+func (a *Analyzer) transformDistinctFrom(e *parser.A_Expr, notDistinct bool) (qt.AnalyzedExpr, error) {
 	left, err := a.transformExpr(e.Lexpr)
 	if err != nil {
 		return nil, err
@@ -1665,13 +1666,13 @@ func (a *Analyzer) transformDistinctFrom(e *parser.A_Expr, notDistinct bool) (An
 	if notDistinct {
 		funcName = "is_not_distinct_from"
 	}
-	return &FuncCallExpr{FuncName: funcName, Args: []AnalyzedExpr{left, right}, ReturnType: tuple.TypeBool}, nil
+	return &qt.FuncCallExpr{FuncName: funcName, Args: []qt.AnalyzedExpr{left, right}, ReturnType: tuple.TypeBool}, nil
 }
 
 // inferArithType returns the result type for an arithmetic operation.
 // If either operand is float64, the result is float64. Otherwise int64
 // (promoting int32 to int64).
-func inferArithType(left, right AnalyzedExpr) tuple.DatumType {
+func inferArithType(left, right qt.AnalyzedExpr) tuple.DatumType {
 	lt := left.ResultType()
 	rt := right.ResultType()
 	if lt == tuple.TypeFloat64 || rt == tuple.TypeFloat64 {
@@ -1682,8 +1683,8 @@ func inferArithType(left, right AnalyzedExpr) tuple.DatumType {
 
 // transformBoolExpr resolves AND/OR/NOT expressions.
 // Mirrors PostgreSQL's transformBoolExpr() in parse_expr.c.
-func (a *Analyzer) transformBoolExpr(e *parser.BoolExpr) (AnalyzedExpr, error) {
-	var args []AnalyzedExpr
+func (a *Analyzer) transformBoolExpr(e *parser.BoolExpr) (qt.AnalyzedExpr, error) {
+	var args []qt.AnalyzedExpr
 	for _, arg := range e.Args {
 		resolved, err := a.transformExpr(arg)
 		if err != nil {
@@ -1694,11 +1695,11 @@ func (a *Analyzer) transformBoolExpr(e *parser.BoolExpr) (AnalyzedExpr, error) {
 
 	switch e.Op {
 	case parser.AND_EXPR:
-		return &BoolExprNode{Op: BoolAnd, Args: args}, nil
+		return &qt.BoolExprNode{Op: qt.BoolAnd, Args: args}, nil
 	case parser.OR_EXPR:
-		return &BoolExprNode{Op: BoolOr, Args: args}, nil
+		return &qt.BoolExprNode{Op: qt.BoolOr, Args: args}, nil
 	case parser.NOT_EXPR:
-		return &BoolExprNode{Op: BoolNot, Args: args}, nil
+		return &qt.BoolExprNode{Op: qt.BoolNot, Args: args}, nil
 	default:
 		return nil, fmt.Errorf("analyzer: unsupported bool expr type %d", e.Op)
 	}
@@ -1707,7 +1708,7 @@ func (a *Analyzer) transformBoolExpr(e *parser.BoolExpr) (AnalyzedExpr, error) {
 // transformNullTest resolves IS [NOT] NULL.
 // Mirrors PostgreSQL's transformNullTest() in parse_expr.c.
 // transformSubLink handles subquery expressions: EXISTS, IN, NOT IN, ANY, ALL, scalar.
-func (a *Analyzer) transformXmlExpr(xe *parser.XmlExpr) (AnalyzedExpr, error) {
+func (a *Analyzer) transformXmlExpr(xe *parser.XmlExpr) (qt.AnalyzedExpr, error) {
 	// Map XmlExpr AST nodes to our built-in function calls.
 	var funcName string
 	switch xe.Op {
@@ -1731,10 +1732,10 @@ func (a *Analyzer) transformXmlExpr(xe *parser.XmlExpr) (AnalyzedExpr, error) {
 		funcName = "xmlparse"
 	}
 
-	var args []AnalyzedExpr
+	var args []qt.AnalyzedExpr
 	// For XMLELEMENT, prepend the element name as a string literal.
 	if xe.Op == parser.IS_XMLELEMENT && xe.Name != "" {
-		args = append(args, &Const{Value: tuple.DText(xe.Name), ConstType: tuple.TypeText})
+		args = append(args, &qt.Const{Value: tuple.DText(xe.Name), ConstType: tuple.TypeText})
 	}
 	for _, arg := range xe.Args {
 		ae, err := a.transformExpr(arg)
@@ -1744,14 +1745,14 @@ func (a *Analyzer) transformXmlExpr(xe *parser.XmlExpr) (AnalyzedExpr, error) {
 		args = append(args, ae)
 	}
 
-	return &FuncCallExpr{
+	return &qt.FuncCallExpr{
 		FuncName:   funcName,
 		Args:       args,
 		ReturnType: tuple.TypeText,
 	}, nil
 }
 
-func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
+func (a *Analyzer) transformSubLink(sl *parser.SubLink) (qt.AnalyzedExpr, error) {
 	selectStmt, ok := sl.Subselect.(*parser.SelectStmt)
 	if !ok {
 		return nil, fmt.Errorf("analyzer: sublink subquery must be a SELECT")
@@ -1796,15 +1797,15 @@ func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
 
 	switch sl.SubLinkType {
 	case parser.EXISTS_SUBLINK:
-		return &SubLinkExpr{
-			LinkType:      SubLinkExists,
+		return &qt.SubLinkExpr{
+			LinkType:      qt.SubLinkExists,
 			Subquery:      subQuery,
 			SubReturnType: subRetType,
 		}, nil
 
 	case parser.ANY_SUBLINK:
 		// expr IN (SELECT ...) or expr = ANY (SELECT ...)
-		var testExpr AnalyzedExpr
+		var testExpr qt.AnalyzedExpr
 		if sl.Testexpr != nil {
 			testExpr, err = a.transformExpr(sl.Testexpr)
 			if err != nil {
@@ -1815,8 +1816,8 @@ func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
 		if len(sl.OperName) > 0 {
 			opName = sl.OperName[0]
 		}
-		return &SubLinkExpr{
-			LinkType:      SubLinkAny,
+		return &qt.SubLinkExpr{
+			LinkType:      qt.SubLinkAny,
 			TestExpr:      testExpr,
 			OpName:        opName,
 			Subquery:      subQuery,
@@ -1825,7 +1826,7 @@ func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
 
 	case parser.ALL_SUBLINK:
 		// expr NOT IN (SELECT ...) or expr <> ALL (SELECT ...)
-		var testExpr AnalyzedExpr
+		var testExpr qt.AnalyzedExpr
 		if sl.Testexpr != nil {
 			testExpr, err = a.transformExpr(sl.Testexpr)
 			if err != nil {
@@ -1836,8 +1837,8 @@ func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
 		if len(sl.OperName) > 0 {
 			opName = sl.OperName[0]
 		}
-		return &SubLinkExpr{
-			LinkType:      SubLinkAll,
+		return &qt.SubLinkExpr{
+			LinkType:      qt.SubLinkAll,
 			TestExpr:      testExpr,
 			OpName:        opName,
 			Subquery:      subQuery,
@@ -1846,8 +1847,8 @@ func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
 
 	case parser.EXPR_SUBLINK:
 		// Scalar subquery: (SELECT count(*) FROM ...)
-		return &SubLinkExpr{
-			LinkType:      SubLinkExprSubquery,
+		return &qt.SubLinkExpr{
+			LinkType:      qt.SubLinkExprSubquery,
 			Subquery:      subQuery,
 			SubReturnType: subRetType,
 		}, nil
@@ -1858,11 +1859,11 @@ func (a *Analyzer) transformSubLink(sl *parser.SubLink) (AnalyzedExpr, error) {
 }
 
 // markOuterColumnVars walks the subquery's expression trees and marks
-// ColumnVar nodes that reference outer RTEs (RTIndex <= outerRTLen)
+// qt.ColumnVar nodes that reference outer RTEs (RTIndex <= outerRTLen)
 // with AttIndex = -1 for name-based resolution. It also adjusts
 // RTIndex and AttIndex for inner references to account for the
 // stripped outer RTEs and their columns.
-func markOuterColumnVars(q *Query, outerRTLen int, outerColCount int) {
+func markOuterColumnVars(q *qt.Query, outerRTLen int, outerColCount int) {
 	if q == nil {
 		return
 	}
@@ -1885,13 +1886,13 @@ func markOuterColumnVars(q *Query, outerRTLen int, outerColCount int) {
 	}
 }
 
-func markOuterCVJoinTree(node JoinTreeNode, outerRTLen int, outerColCount int) {
+func markOuterCVJoinTree(node qt.JoinTreeNode, outerRTLen int, outerColCount int) {
 	switch n := node.(type) {
-	case *RangeTblRef:
+	case *qt.RangeTblRef:
 		if n.RTIndex > outerRTLen {
 			n.RTIndex -= outerRTLen
 		}
-	case *JoinNode:
+	case *qt.JoinNode:
 		markOuterCVJoinTree(n.Left, outerRTLen, outerColCount)
 		markOuterCVJoinTree(n.Right, outerRTLen, outerColCount)
 		if n.Quals != nil {
@@ -1906,12 +1907,12 @@ func markOuterCVJoinTree(node JoinTreeNode, outerRTLen int, outerColCount int) {
 	}
 }
 
-func markOuterCV(ae AnalyzedExpr, outerRTLen int, outerColCount int) {
+func markOuterCV(ae qt.AnalyzedExpr, outerRTLen int, outerColCount int) {
 	if ae == nil {
 		return
 	}
 	switch e := ae.(type) {
-	case *ColumnVar:
+	case *qt.ColumnVar:
 		if e.RTIndex > 0 && e.RTIndex <= outerRTLen {
 			// Outer reference: force name-based resolution.
 			e.AttIndex = -1
@@ -1922,26 +1923,26 @@ func markOuterCV(ae AnalyzedExpr, outerRTLen int, outerColCount int) {
 				e.AttIndex -= outerColCount
 			}
 		}
-	case *OpExpr:
+	case *qt.OpExpr:
 		markOuterCV(e.Left, outerRTLen, outerColCount)
 		markOuterCV(e.Right, outerRTLen, outerColCount)
-	case *BoolExprNode:
+	case *qt.BoolExprNode:
 		for _, arg := range e.Args {
 			markOuterCV(arg, outerRTLen, outerColCount)
 		}
-	case *NullTestExpr:
+	case *qt.NullTestExpr:
 		markOuterCV(e.Arg, outerRTLen, outerColCount)
-	case *FuncCallExpr:
+	case *qt.FuncCallExpr:
 		for _, arg := range e.Args {
 			markOuterCV(arg, outerRTLen, outerColCount)
 		}
-	case *TypeCastExpr:
+	case *qt.TypeCastExpr:
 		markOuterCV(e.Arg, outerRTLen, outerColCount)
-	case *AggRef:
+	case *qt.AggRef:
 		for _, arg := range e.Args {
 			markOuterCV(arg, outerRTLen, outerColCount)
 		}
-	case *CaseExprNode:
+	case *qt.CaseExprNode:
 		if e.Arg != nil {
 			markOuterCV(e.Arg, outerRTLen, outerColCount)
 		}
@@ -1952,19 +1953,19 @@ func markOuterCV(ae AnalyzedExpr, outerRTLen int, outerColCount int) {
 		if e.ElseExpr != nil {
 			markOuterCV(e.ElseExpr, outerRTLen, outerColCount)
 		}
-	case *SubLinkExpr:
+	case *qt.SubLinkExpr:
 		// Do NOT process TestExpr here — it belongs to the parent query,
 		// not the subquery. The subquery's own outer refs are handled
 		// when transformSubLink processes the inner subquery.
 	}
 }
 
-func (a *Analyzer) transformNullTest(e *parser.NullTest) (AnalyzedExpr, error) {
+func (a *Analyzer) transformNullTest(e *parser.NullTest) (qt.AnalyzedExpr, error) {
 	arg, err := a.transformExpr(e.Arg)
 	if err != nil {
 		return nil, err
 	}
-	return &NullTestExpr{
+	return &qt.NullTestExpr{
 		Arg:   arg,
 		IsNot: e.NullTestType == parser.IS_NOT_NULL,
 	}, nil
@@ -1975,11 +1976,11 @@ func (a *Analyzer) transformNullTest(e *parser.NullTest) (AnalyzedExpr, error) {
 // transformInsertStmt resolves an INSERT statement.
 // Mirrors PostgreSQL's transformInsertStmt() in analyze.c.
 // transformValuesClause handles bare VALUES (a, b), (c, d) as a standalone query.
-// Produces a CmdSelect query with synthetic column names (column1, column2, ...).
+// Produces a qt.CmdSelect query with synthetic column names (column1, column2, ...).
 // Multiple rows are handled by evaluating all value expressions and storing
 // them in the Values field, which the planner converts to a LogicalValues node.
-func (a *Analyzer) transformValuesClause(n *parser.SelectStmt) (*Query, error) {
-	q := &Query{CommandType: CmdSelect, IsValues: true}
+func (a *Analyzer) transformValuesClause(n *parser.SelectStmt) (*qt.Query, error) {
+	q := &qt.Query{CommandType: qt.CmdSelect, IsValues: true}
 
 	// Determine column count from the first row.
 	if len(n.ValuesLists) == 0 {
@@ -1990,9 +1991,9 @@ func (a *Analyzer) transformValuesClause(n *parser.SelectStmt) (*Query, error) {
 	// Build synthetic target list: column1, column2, ...
 	for i := 0; i < numCols; i++ {
 		colName := fmt.Sprintf("column%d", i+1)
-		q.TargetList = append(q.TargetList, &TargetEntry{
+		q.TargetList = append(q.TargetList, &qt.TargetEntry{
 			Name: colName,
-			Expr: &Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}, // placeholder
+			Expr: &qt.Const{Value: tuple.DNull(), ConstType: tuple.TypeNull}, // placeholder
 		})
 	}
 
@@ -2001,7 +2002,7 @@ func (a *Analyzer) transformValuesClause(n *parser.SelectStmt) (*Query, error) {
 		if len(row) != numCols {
 			return nil, fmt.Errorf("analyzer: VALUES row %d has %d columns, expected %d", rowIdx+1, len(row), numCols)
 		}
-		var resolvedRow []AnalyzedExpr
+		var resolvedRow []qt.AnalyzedExpr
 		for _, e := range row {
 			expr, err := a.transformExpr(e)
 			if err != nil {
@@ -2015,7 +2016,7 @@ func (a *Analyzer) transformValuesClause(n *parser.SelectStmt) (*Query, error) {
 	return q, nil
 }
 
-func (a *Analyzer) transformSetOp(n *parser.SelectStmt) (*Query, error) {
+func (a *Analyzer) transformSetOp(n *parser.SelectStmt) (*qt.Query, error) {
 	// Analyze left and right branches independently.
 	leftAnalyzer := &Analyzer{Cat: a.Cat}
 	leftQ, err := leftAnalyzer.transformSelectStmt(n.Larg)
@@ -2028,18 +2029,18 @@ func (a *Analyzer) transformSetOp(n *parser.SelectStmt) (*Query, error) {
 		return nil, fmt.Errorf("analyzer: right side of set operation: %w", err)
 	}
 
-	var opKind SetOpKind
+	var opKind qt.SetOpKind
 	switch n.Op {
 	case parser.SETOP_UNION:
-		opKind = SetOpUnion
+		opKind = qt.SetOpUnion
 	case parser.SETOP_INTERSECT:
-		opKind = SetOpIntersect
+		opKind = qt.SetOpIntersect
 	case parser.SETOP_EXCEPT:
-		opKind = SetOpExcept
+		opKind = qt.SetOpExcept
 	}
 
-	q := &Query{
-		CommandType: CmdSelect,
+	q := &qt.Query{
+		CommandType: qt.CmdSelect,
 		SetOp:       opKind,
 		SetAll:      n.All,
 		SetLeft:     leftQ,
@@ -2054,7 +2055,7 @@ func (a *Analyzer) transformSetOp(n *parser.SelectStmt) (*Query, error) {
 			if err != nil {
 				return nil, err
 			}
-			q.SortClause = append(q.SortClause, &SortClause{
+			q.SortClause = append(q.SortClause, &qt.SortClause{
 				Expr: expr,
 				Desc: sc.SortbyDir == parser.SORTBY_DESC,
 			})
@@ -2078,8 +2079,8 @@ func (a *Analyzer) transformSetOp(n *parser.SelectStmt) (*Query, error) {
 	return q, nil
 }
 
-func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
-	q := &Query{CommandType: CmdInsert}
+func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*qt.Query, error) {
+	q := &qt.Query{CommandType: qt.CmdInsert}
 
 	// Add the target relation to the range table.
 	rte, err := a.addRangeTableEntryQualified(n.Relation.Schemaname, n.Relation.Relname, "")
@@ -2104,7 +2105,7 @@ func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 	if len(sel.ValuesLists) > 0 {
 		// INSERT ... VALUES (...)
 		for _, row := range sel.ValuesLists {
-			var resolvedRow []AnalyzedExpr
+			var resolvedRow []qt.AnalyzedExpr
 			for _, e := range row {
 				expr, err := a.transformExpr(e)
 				if err != nil {
@@ -2147,14 +2148,14 @@ func (a *Analyzer) transformInsertStmt(n *parser.InsertStmt) (*Query, error) {
 }
 
 // transformOnConflict resolves an ON CONFLICT clause.
-func (a *Analyzer) transformOnConflict(oc *parser.OnConflictClause, targetRTE *RangeTblEntry) (*OnConflictClause, error) {
-	result := &OnConflictClause{}
+func (a *Analyzer) transformOnConflict(oc *parser.OnConflictClause, targetRTE *qt.RangeTblEntry) (*qt.OnConflictClause, error) {
+	result := &qt.OnConflictClause{}
 
 	switch oc.Action {
 	case parser.ONCONFLICT_NOTHING:
-		result.Action = OnConflictNothing
+		result.Action = qt.OnConflictNothing
 	case parser.ONCONFLICT_UPDATE:
-		result.Action = OnConflictUpdate
+		result.Action = qt.OnConflictUpdate
 	default:
 		return nil, fmt.Errorf("unsupported ON CONFLICT action")
 	}
@@ -2183,12 +2184,12 @@ func (a *Analyzer) transformOnConflict(oc *parser.OnConflictClause, targetRTE *R
 
 	// For DO UPDATE, resolve SET assignments.
 	// Add an "excluded" pseudo-RTE so EXCLUDED.col references resolve.
-	if result.Action == OnConflictUpdate {
-		excludedRTE := &RangeTblEntry{
+	if result.Action == qt.OnConflictUpdate {
+		excludedRTE := &qt.RangeTblEntry{
 			RTIndex: len(a.rangeTable) + 1,
 			RelName: "excluded",
 			Alias:   "excluded",
-			Columns: make([]RTEColumn, len(targetRTE.Columns)),
+			Columns: make([]qt.RTEColumn, len(targetRTE.Columns)),
 		}
 		copy(excludedRTE.Columns, targetRTE.Columns)
 		a.rangeTable = append(a.rangeTable, excludedRTE)
@@ -2215,7 +2216,7 @@ func (a *Analyzer) transformOnConflict(oc *parser.OnConflictClause, targetRTE *R
 				return nil, err
 			}
 
-			result.Assignments = append(result.Assignments, &UpdateAssignment{
+			result.Assignments = append(result.Assignments, &qt.UpdateAssignment{
 				ColName: colName,
 				ColNum:  colNum,
 				ColType: colType,
@@ -2238,8 +2239,8 @@ func (a *Analyzer) transformOnConflict(oc *parser.OnConflictClause, targetRTE *R
 
 // transformDeleteStmt resolves a DELETE statement.
 // Mirrors PostgreSQL's transformDeleteStmt() in analyze.c.
-func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*Query, error) {
-	q := &Query{CommandType: CmdDelete}
+func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*qt.Query, error) {
+	q := &qt.Query{CommandType: qt.CmdDelete}
 
 	rte, err := a.addRangeTableEntryQualified(n.Relation.Schemaname, n.Relation.Relname, "")
 	if err != nil {
@@ -2248,9 +2249,9 @@ func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*Query, error) {
 	q.ResultRelation = rte.RTIndex
 
 	// Build join tree with the target table.
-	fromList := []JoinTreeNode{&RangeTblRef{RTIndex: rte.RTIndex}}
+	fromList := []qt.JoinTreeNode{&qt.RangeTblRef{RTIndex: rte.RTIndex}}
 
-	var qual AnalyzedExpr
+	var qual qt.AnalyzedExpr
 	if n.WhereClause != nil {
 		qual, err = a.transformExpr(n.WhereClause)
 		if err != nil {
@@ -2258,7 +2259,7 @@ func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*Query, error) {
 		}
 	}
 
-	q.JoinTree = &FromExpr{FromList: fromList, Quals: qual}
+	q.JoinTree = &qt.FromExpr{FromList: fromList, Quals: qual}
 
 	// RETURNING clause.
 	if len(n.ReturningList) > 0 {
@@ -2275,8 +2276,8 @@ func (a *Analyzer) transformDeleteStmt(n *parser.DeleteStmt) (*Query, error) {
 
 // transformUpdateStmt resolves an UPDATE statement.
 // Mirrors PostgreSQL's transformUpdateStmt() in analyze.c.
-func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
-	q := &Query{CommandType: CmdUpdate}
+func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*qt.Query, error) {
+	q := &qt.Query{CommandType: qt.CmdUpdate}
 
 	alias := ""
 	if n.Relation.Alias != nil && n.Relation.Alias.Aliasname != "" {
@@ -2289,7 +2290,7 @@ func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 	q.ResultRelation = rte.RTIndex
 
 	// Build join tree: target table + optional FROM tables.
-	fromList := []JoinTreeNode{&RangeTblRef{RTIndex: rte.RTIndex}}
+	fromList := []qt.JoinTreeNode{&qt.RangeTblRef{RTIndex: rte.RTIndex}}
 
 	// Handle UPDATE ... FROM clause — add extra tables to the range table.
 	if len(n.FromClause) > 0 {
@@ -2300,7 +2301,7 @@ func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 		fromList = append(fromList, extraItems...)
 	}
 
-	var qual AnalyzedExpr
+	var qual qt.AnalyzedExpr
 	if n.WhereClause != nil {
 		qual, err = a.transformExpr(n.WhereClause)
 		if err != nil {
@@ -2308,7 +2309,7 @@ func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 		}
 	}
 
-	q.JoinTree = &FromExpr{FromList: fromList, Quals: qual}
+	q.JoinTree = &qt.FromExpr{FromList: fromList, Quals: qual}
 
 	// Resolve SET assignments.
 	// Mirrors transformUpdateTargetList() in analyze.c.
@@ -2335,7 +2336,7 @@ func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 			return nil, err
 		}
 
-		q.Assignments = append(q.Assignments, &UpdateAssignment{
+		q.Assignments = append(q.Assignments, &qt.UpdateAssignment{
 			ColName: colName,
 			ColNum:  colNum,
 			ColType: colType,
@@ -2357,19 +2358,19 @@ func (a *Analyzer) transformUpdateStmt(n *parser.UpdateStmt) (*Query, error) {
 }
 
 // transformReturningList resolves a RETURNING clause into target entries.
-func (a *Analyzer) transformReturningList(list []*parser.ResTarget) ([]*TargetEntry, error) {
+func (a *Analyzer) transformReturningList(list []*parser.ResTarget) ([]*qt.TargetEntry, error) {
 	if len(list) == 0 {
 		return nil, nil
 	}
-	var entries []*TargetEntry
+	var entries []*qt.TargetEntry
 	for _, rt := range list {
 		if isStarTarget(rt) {
 			// RETURNING * — expand all columns from the range table.
 			for _, rte := range a.rangeTable {
 				for _, col := range rte.Columns {
-					entries = append(entries, &TargetEntry{
+					entries = append(entries, &qt.TargetEntry{
 						Name: col.Name,
-						Expr: &ColumnVar{
+						Expr: &qt.ColumnVar{
 							RTIndex:  rte.RTIndex,
 							ColNum:   col.ColNum,
 							ColName:  col.Name,
@@ -2390,18 +2391,18 @@ func (a *Analyzer) transformReturningList(list []*parser.ResTarget) ([]*TargetEn
 		if name == "" {
 			name = exprString(rt.Val)
 		}
-		entries = append(entries, &TargetEntry{Name: name, Expr: expr})
+		entries = append(entries, &qt.TargetEntry{Name: name, Expr: expr})
 	}
 	return entries, nil
 }
 
 // --- Utility statement transformations ---
 
-func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
+func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*qt.Query, error) {
 	tableName := n.Relation.Relname
 	schemaName := n.Relation.Schemaname
-	var cols []ColDef
-	var foreignKeys []ForeignKeyDef
+	var cols []qt.ColDef
+	var foreignKeys []qt.ForeignKeyDef
 	var inheritParents []string
 
 	// INHERITS: copy columns from parent table(s).
@@ -2413,7 +2414,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 			if parentRel != nil {
 				parentCols, _ := a.Cat.GetColumns(parentRel.OID)
 				for _, pc := range parentCols {
-					cols = append(cols, ColDef{
+					cols = append(cols, qt.ColDef{
 						Name:          pc.Name,
 						Type:          tuple.DatumType(pc.Type),
 						Typmod:        pc.Typmod,
@@ -2435,7 +2436,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 				if srcRel != nil {
 					srcCols, _ := a.Cat.GetColumns(srcRel.OID)
 					for _, sc := range srcCols {
-						cols = append(cols, ColDef{
+						cols = append(cols, qt.ColDef{
 							Name:          sc.Name,
 							Type:          tuple.DatumType(sc.Type),
 							Typmod:        sc.Typmod,
@@ -2499,7 +2500,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 				if c.PkTable != nil {
 					refTable = c.PkTable.Relname
 				}
-				fk := ForeignKeyDef{
+				fk := qt.ForeignKeyDef{
 					Name:       c.Conname,
 					Columns:    []string{colDef.Colname},
 					RefTable:   refTable,
@@ -2518,7 +2519,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 			defaultExpr = "nextval('" + seqName + "')"
 			notNull = true
 		}
-		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, Typmod: typmod, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr, CheckExpr: checkExpr, CheckName: checkName, GeneratedExpr: generatedExpr})
+		cols = append(cols, qt.ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, Typmod: typmod, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr, CheckExpr: checkExpr, CheckName: checkName, GeneratedExpr: generatedExpr})
 	}
 
 	// Handle table-level constraints (e.g., PRIMARY KEY (col), UNIQUE (col), CHECK, FOREIGN KEY).
@@ -2561,7 +2562,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 			if con.PkTable != nil {
 				refTable = con.PkTable.Relname
 			}
-			fk := ForeignKeyDef{
+			fk := qt.ForeignKeyDef{
 				Name:       con.Conname,
 				Columns:    con.FkAttrs,
 				RefTable:   refTable,
@@ -2587,8 +2588,8 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 		}
 	}
 
-	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
-		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName,
+	return a.makeUtilityQuery(qt.UtilCreateTable, &qt.UtilityStmt{
+		Type: qt.UtilCreateTable, TableName: tableName, TableSchema: schemaName,
 		Columns: cols, ForeignKeys: foreignKeys,
 		IsTemp:            n.Persistence == parser.RELPERSISTENCE_TEMP,
 		PartitionStrategy: partStrategy,
@@ -2597,7 +2598,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 	}), nil
 }
 
-func (a *Analyzer) transformIndexStmt(n *parser.IndexStmt) (*Query, error) {
+func (a *Analyzer) transformIndexStmt(n *parser.IndexStmt) (*qt.Query, error) {
 	colName := ""
 	if len(n.IndexParams) > 0 {
 		colName = n.IndexParams[0].Name
@@ -2606,14 +2607,14 @@ func (a *Analyzer) transformIndexStmt(n *parser.IndexStmt) (*Query, error) {
 	if method == "" {
 		method = "btree" // default, same as PostgreSQL
 	}
-	return a.makeUtilityQuery(UtilCreateIndex, &UtilityStmt{
-		Type: UtilCreateIndex, IndexName: n.Idxname,
+	return a.makeUtilityQuery(qt.UtilCreateIndex, &qt.UtilityStmt{
+		Type: qt.UtilCreateIndex, IndexName: n.Idxname,
 		IndexTable: n.Relation.Relname, IndexColumn: colName,
 		IndexMethod: method,
 	}), nil
 }
 
-func (a *Analyzer) transformExplainStmt(n *parser.ExplainStmt) (*Query, error) {
+func (a *Analyzer) transformExplainStmt(n *parser.ExplainStmt) (*qt.Query, error) {
 	// EXPLAIN wraps another query. Analyze the inner statement.
 	inner, err := a.Analyze(n.Query)
 	if err != nil {
@@ -2623,19 +2624,19 @@ func (a *Analyzer) transformExplainStmt(n *parser.ExplainStmt) (*Query, error) {
 	return inner, nil
 }
 
-func (a *Analyzer) transformAlterTableStmt(n *parser.AlterTableStmt) (*Query, error) {
+func (a *Analyzer) transformAlterTableStmt(n *parser.AlterTableStmt) (*qt.Query, error) {
 	tableName := n.Relation.Relname
 
 	// Handle single-command ALTER TABLE statements that map to dedicated utility types.
 	for _, cmd := range n.Cmds {
 		switch cmd.Subtype {
 		case parser.AT_EnableRowSecurity:
-			return a.makeUtilityQuery(UtilEnableRLS, &UtilityStmt{
-				Type: UtilEnableRLS, TableName: tableName,
+			return a.makeUtilityQuery(qt.UtilEnableRLS, &qt.UtilityStmt{
+				Type: qt.UtilEnableRLS, TableName: tableName,
 			}), nil
 		case parser.AT_DisableRowSecurity:
-			return a.makeUtilityQuery(UtilDisableRLS, &UtilityStmt{
-				Type: UtilDisableRLS, TableName: tableName,
+			return a.makeUtilityQuery(qt.UtilDisableRLS, &qt.UtilityStmt{
+				Type: qt.UtilDisableRLS, TableName: tableName,
 			}), nil
 		case parser.AT_AddColumn:
 			colDef, ok := cmd.Def.(*parser.ColumnDef)
@@ -2656,18 +2657,18 @@ func (a *Analyzer) transformAlterTableStmt(n *parser.AlterTableStmt) (*Query, er
 					}
 				}
 			}
-			return a.makeUtilityQuery(UtilAddColumn, &UtilityStmt{
-				Type:      UtilAddColumn,
+			return a.makeUtilityQuery(qt.UtilAddColumn, &qt.UtilityStmt{
+				Type:      qt.UtilAddColumn,
 				TableName: tableName,
-				AlterColDef: &ColDef{
+				AlterColDef: &qt.ColDef{
 					Name: colDef.Colname, Type: dt, TypeName: sqlType,
 					NotNull: notNull, DefaultExpr: defaultExpr,
 				},
 				AlterIfNotExists: cmd.MissingOk,
 			}), nil
 		case parser.AT_DropColumn:
-			return a.makeUtilityQuery(UtilDropColumn, &UtilityStmt{
-				Type:         UtilDropColumn,
+			return a.makeUtilityQuery(qt.UtilDropColumn, &qt.UtilityStmt{
+				Type:         qt.UtilDropColumn,
 				TableName:    tableName,
 				AlterColName: cmd.Name,
 				AlterIfExists: cmd.MissingOk,
@@ -2684,12 +2685,12 @@ func (a *Analyzer) transformAlterTableStmt(n *parser.AlterTableStmt) (*Query, er
 			commands = append(commands, fmt.Sprintf("%v", cmd.Subtype))
 		}
 	}
-	return a.makeUtilityQuery(UtilAlterTable, &UtilityStmt{
-		Type: UtilAlterTable, TableName: tableName, AlterCmds: commands,
+	return a.makeUtilityQuery(qt.UtilAlterTable, &qt.UtilityStmt{
+		Type: qt.UtilAlterTable, TableName: tableName, AlterCmds: commands,
 	}), nil
 }
 
-func (a *Analyzer) transformViewStmt(n *parser.ViewStmt) (*Query, error) {
+func (a *Analyzer) transformViewStmt(n *parser.ViewStmt) (*qt.Query, error) {
 	viewName := n.View.Relname
 
 	// Analyze the view's defining query to resolve its output columns.
@@ -2701,23 +2702,23 @@ func (a *Analyzer) transformViewStmt(n *parser.ViewStmt) (*Query, error) {
 	}
 
 	// Extract column definitions from the view query's target list.
-	var viewCols []ColDef
+	var viewCols []qt.ColDef
 	for _, te := range viewQuery.TargetList {
-		viewCols = append(viewCols, ColDef{
+		viewCols = append(viewCols, qt.ColDef{
 			Name: te.Name,
 			Type: te.Expr.ResultType(),
 		})
 	}
 
-	return a.makeUtilityQuery(UtilCreateView, &UtilityStmt{
-		Type: UtilCreateView, ViewName: viewName,
+	return a.makeUtilityQuery(qt.UtilCreateView, &qt.UtilityStmt{
+		Type: qt.UtilCreateView, ViewName: viewName,
 		ViewColumns: viewCols,
 	}), nil
 }
 
-func (a *Analyzer) makeUtilityQuery(_ UtilityType, util *UtilityStmt) *Query {
-	return &Query{
-		CommandType: CmdUtility,
+func (a *Analyzer) makeUtilityQuery(_ qt.UtilityType, util *qt.UtilityStmt) *qt.Query {
+	return &qt.Query{
+		CommandType: qt.CmdUtility,
 		Utility:     util,
 		RangeTable:  a.rangeTable,
 	}
@@ -2937,7 +2938,7 @@ func NumericTypmodPrecisionScale(typmod int32) (precision, scale int, ok bool) {
 	return int(tm >> 16), int(tm & 0xFFFF), true
 }
 
-func (a *Analyzer) transformCreatePolicyStmt(n *parser.CreatePolicyStmt) (*Query, error) {
+func (a *Analyzer) transformCreatePolicyStmt(n *parser.CreatePolicyStmt) (*qt.Query, error) {
 	tableName := ""
 	if len(n.Table) > 0 {
 		tableName = n.Table[len(n.Table)-1]
@@ -2963,8 +2964,8 @@ func (a *Analyzer) transformCreatePolicyStmt(n *parser.CreatePolicyStmt) (*Query
 		checkExpr = exprToSQL(n.WithCheck)
 	}
 
-	return a.makeUtilityQuery(UtilCreatePolicy, &UtilityStmt{
-		Type:             UtilCreatePolicy,
+	return a.makeUtilityQuery(qt.UtilCreatePolicy, &qt.UtilityStmt{
+		Type:             qt.UtilCreatePolicy,
 		PolicyName:       n.PolicyName,
 		PolicyTable:      tableName,
 		PolicyCmd:        cmdName,
@@ -3077,7 +3078,7 @@ func defElemString(arg parser.Node) string {
 	return ""
 }
 
-func (a *Analyzer) transformCreateRoleStmt(n *parser.CreateRoleStmt) (*Query, error) {
+func (a *Analyzer) transformCreateRoleStmt(n *parser.CreateRoleStmt) (*qt.Query, error) {
 	opts := make(map[string]interface{})
 
 	// CREATE USER implies LOGIN by default; CREATE ROLE does not.
@@ -3120,15 +3121,15 @@ func (a *Analyzer) transformCreateRoleStmt(n *parser.CreateRoleStmt) (*Query, er
 		}
 	}
 
-	return a.makeUtilityQuery(UtilCreateRole, &UtilityStmt{
-		Type:         UtilCreateRole,
+	return a.makeUtilityQuery(qt.UtilCreateRole, &qt.UtilityStmt{
+		Type:         qt.UtilCreateRole,
 		RoleName:     n.RoleName,
 		RoleOptions:  opts,
 		RoleStmtType: n.StmtType,
 	}), nil
 }
 
-func (a *Analyzer) transformAlterRoleStmt(n *parser.AlterRoleStmt) (*Query, error) {
+func (a *Analyzer) transformAlterRoleStmt(n *parser.AlterRoleStmt) (*qt.Query, error) {
 	opts := make(map[string]interface{})
 
 	for _, opt := range n.Options {
@@ -3166,38 +3167,38 @@ func (a *Analyzer) transformAlterRoleStmt(n *parser.AlterRoleStmt) (*Query, erro
 		}
 	}
 
-	return a.makeUtilityQuery(UtilAlterRole, &UtilityStmt{
-		Type:        UtilAlterRole,
+	return a.makeUtilityQuery(qt.UtilAlterRole, &qt.UtilityStmt{
+		Type:        qt.UtilAlterRole,
 		RoleName:    n.RoleName,
 		RoleOptions: opts,
 	}), nil
 }
 
-func (a *Analyzer) transformDropRoleStmt(n *parser.DropRoleStmt) (*Query, error) {
-	return a.makeUtilityQuery(UtilDropRole, &UtilityStmt{
-		Type:          UtilDropRole,
+func (a *Analyzer) transformDropRoleStmt(n *parser.DropRoleStmt) (*qt.Query, error) {
+	return a.makeUtilityQuery(qt.UtilDropRole, &qt.UtilityStmt{
+		Type:          qt.UtilDropRole,
 		DropRoles:     n.Roles,
 		DropMissingOk: n.MissingOk,
 	}), nil
 }
 
-func (a *Analyzer) transformGrantRoleStmt(n *parser.GrantRoleStmt) (*Query, error) {
+func (a *Analyzer) transformGrantRoleStmt(n *parser.GrantRoleStmt) (*qt.Query, error) {
 	if n.IsGrant {
-		return a.makeUtilityQuery(UtilGrantRole, &UtilityStmt{
-			Type:         UtilGrantRole,
+		return a.makeUtilityQuery(qt.UtilGrantRole, &qt.UtilityStmt{
+			Type:         qt.UtilGrantRole,
 			GrantedRoles: n.GrantedRoles,
 			Grantees:     n.Grantees,
 			AdminOption:  n.AdminOption,
 		}), nil
 	}
-	return a.makeUtilityQuery(UtilRevokeRole, &UtilityStmt{
-		Type:         UtilRevokeRole,
+	return a.makeUtilityQuery(qt.UtilRevokeRole, &qt.UtilityStmt{
+		Type:         qt.UtilRevokeRole,
 		GrantedRoles: n.GrantedRoles,
 		Grantees:     n.Grantees,
 	}), nil
 }
 
-func (a *Analyzer) transformGrantStmt(n *parser.GrantStmt) (*Query, error) {
+func (a *Analyzer) transformGrantStmt(n *parser.GrantStmt) (*qt.Query, error) {
 	var objects []string
 	for _, obj := range n.Objects {
 		if len(obj) > 0 {
@@ -3218,8 +3219,8 @@ func (a *Analyzer) transformGrantStmt(n *parser.GrantStmt) (*Query, error) {
 	}
 
 	if n.IsGrant {
-		return a.makeUtilityQuery(UtilGrantPrivilege, &UtilityStmt{
-			Type:        UtilGrantPrivilege,
+		return a.makeUtilityQuery(qt.UtilGrantPrivilege, &qt.UtilityStmt{
+			Type:        qt.UtilGrantPrivilege,
 			Privileges:  n.Privileges,
 			PrivCols:    n.PrivCols,
 			TargetType:  targetType,
@@ -3228,8 +3229,8 @@ func (a *Analyzer) transformGrantStmt(n *parser.GrantStmt) (*Query, error) {
 			GrantOption: n.GrantOption,
 		}), nil
 	}
-	return a.makeUtilityQuery(UtilRevokePrivilege, &UtilityStmt{
-		Type:       UtilRevokePrivilege,
+	return a.makeUtilityQuery(qt.UtilRevokePrivilege, &qt.UtilityStmt{
+		Type:       qt.UtilRevokePrivilege,
 		Privileges: n.Privileges,
 		PrivCols:   n.PrivCols,
 		TargetType: targetType,
@@ -3239,7 +3240,7 @@ func (a *Analyzer) transformGrantStmt(n *parser.GrantStmt) (*Query, error) {
 }
 
 
-func (a *Analyzer) transformCreateFunctionStmt(n *parser.CreateFunctionStmt) (*Query, error) {
+func (a *Analyzer) transformCreateFunctionStmt(n *parser.CreateFunctionStmt) (*qt.Query, error) {
 	name := ""
 	if len(n.Funcname) > 0 {
 		name = n.Funcname[len(n.Funcname)-1] // use last part (unqualified name)
@@ -3275,8 +3276,8 @@ func (a *Analyzer) transformCreateFunctionStmt(n *parser.CreateFunctionStmt) (*Q
 		}
 	}
 
-	return a.makeUtilityQuery(UtilCreateFunction, &UtilityStmt{
-		Type:           UtilCreateFunction,
+	return a.makeUtilityQuery(qt.UtilCreateFunction, &qt.UtilityStmt{
+		Type:           qt.UtilCreateFunction,
 		FuncName:       name,
 		FuncLanguage:   language,
 		FuncBody:       body,
@@ -3287,7 +3288,7 @@ func (a *Analyzer) transformCreateFunctionStmt(n *parser.CreateFunctionStmt) (*Q
 	}), nil
 }
 
-func (a *Analyzer) transformCreateTrigStmt(n *parser.CreateTrigStmt) (*Query, error) {
+func (a *Analyzer) transformCreateTrigStmt(n *parser.CreateTrigStmt) (*qt.Query, error) {
 	tableName := ""
 	if n.Relation != nil {
 		tableName = n.Relation.Relname
@@ -3321,8 +3322,8 @@ func (a *Analyzer) transformCreateTrigStmt(n *parser.CreateTrigStmt) (*Query, er
 		}
 	}
 
-	return a.makeUtilityQuery(UtilCreateTrigger, &UtilityStmt{
-		Type:        UtilCreateTrigger,
+	return a.makeUtilityQuery(qt.UtilCreateTrigger, &qt.UtilityStmt{
+		Type:        qt.UtilCreateTrigger,
 		TrigName:    n.Trigname,
 		TrigTable:   tableName,
 		TrigFuncName: funcName,
@@ -3334,37 +3335,37 @@ func (a *Analyzer) transformCreateTrigStmt(n *parser.CreateTrigStmt) (*Query, er
 	}), nil
 }
 
-func (a *Analyzer) transformDropFunctionStmt(n *parser.RemoveFuncStmt) (*Query, error) {
+func (a *Analyzer) transformDropFunctionStmt(n *parser.RemoveFuncStmt) (*qt.Query, error) {
 	name := ""
 	if len(n.Funcname) > 0 {
 		name = n.Funcname[len(n.Funcname)-1]
 	}
-	return a.makeUtilityQuery(UtilDropFunction, &UtilityStmt{
-		Type:          UtilDropFunction,
+	return a.makeUtilityQuery(qt.UtilDropFunction, &qt.UtilityStmt{
+		Type:          qt.UtilDropFunction,
 		FuncName:      name,
 		DropMissingOk: n.MissingOk,
 	}), nil
 }
 
-func (a *Analyzer) transformTruncateStmt(n *parser.TruncateStmt) (*Query, error) {
+func (a *Analyzer) transformTruncateStmt(n *parser.TruncateStmt) (*qt.Query, error) {
 	if len(n.Relations) == 0 {
 		return nil, fmt.Errorf("analyzer: TRUNCATE requires at least one table")
 	}
 	tableName := n.Relations[0].Relname
-	return a.makeUtilityQuery(UtilTruncate, &UtilityStmt{
-		Type: UtilTruncate, TableName: tableName,
+	return a.makeUtilityQuery(qt.UtilTruncate, &qt.UtilityStmt{
+		Type: qt.UtilTruncate, TableName: tableName,
 	}), nil
 }
 
-func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
+func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*qt.Query, error) {
 	switch n.RemoveType {
 	case parser.OBJECT_TABLE, parser.OBJECT_MATVIEW:
 		tableName := ""
 		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
 			tableName = n.Objects[0][len(n.Objects[0])-1]
 		}
-		return a.makeUtilityQuery(UtilDropTable, &UtilityStmt{
-			Type:          UtilDropTable,
+		return a.makeUtilityQuery(qt.UtilDropTable, &qt.UtilityStmt{
+			Type:          qt.UtilDropTable,
 			TableName:     tableName,
 			DropMissingOk: n.MissingOk,
 			DropCascade:   n.Behavior == parser.DROP_CASCADE,
@@ -3378,8 +3379,8 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 		if len(n.Objects) > 1 && len(n.Objects[1]) > 0 {
 			tableName = n.Objects[1][len(n.Objects[1])-1]
 		}
-		return a.makeUtilityQuery(UtilDropTrigger, &UtilityStmt{
-			Type:          UtilDropTrigger,
+		return a.makeUtilityQuery(qt.UtilDropTrigger, &qt.UtilityStmt{
+			Type:          qt.UtilDropTrigger,
 			TrigName:      trigName,
 			TrigTable:     tableName,
 			DropMissingOk: n.MissingOk,
@@ -3389,8 +3390,8 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
 			typeName = n.Objects[0][len(n.Objects[0])-1]
 		}
-		return a.makeUtilityQuery(UtilDropType, &UtilityStmt{
-			Type:          UtilDropType,
+		return a.makeUtilityQuery(qt.UtilDropType, &qt.UtilityStmt{
+			Type:          qt.UtilDropType,
 			DropTypeName:  typeName,
 			DropMissingOk: n.MissingOk,
 		}), nil
@@ -3399,8 +3400,8 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
 			indexName = n.Objects[0][len(n.Objects[0])-1]
 		}
-		return a.makeUtilityQuery(UtilDropIndex, &UtilityStmt{
-			Type:          UtilDropIndex,
+		return a.makeUtilityQuery(qt.UtilDropIndex, &qt.UtilityStmt{
+			Type:          qt.UtilDropIndex,
 			IndexName:     indexName,
 			DropMissingOk: n.MissingOk,
 			DropCascade:   n.Behavior == parser.DROP_CASCADE,
@@ -3410,8 +3411,8 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
 			viewName = n.Objects[0][len(n.Objects[0])-1]
 		}
-		return a.makeUtilityQuery(UtilDropView, &UtilityStmt{
-			Type:          UtilDropView,
+		return a.makeUtilityQuery(qt.UtilDropView, &qt.UtilityStmt{
+			Type:          qt.UtilDropView,
 			ViewName:      viewName,
 			DropMissingOk: n.MissingOk,
 			DropCascade:   n.Behavior == parser.DROP_CASCADE,
@@ -3421,8 +3422,8 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
 			schemaName = n.Objects[0][len(n.Objects[0])-1]
 		}
-		return a.makeUtilityQuery(UtilDropSchema, &UtilityStmt{
-			Type:          UtilDropSchema,
+		return a.makeUtilityQuery(qt.UtilDropSchema, &qt.UtilityStmt{
+			Type:          qt.UtilDropSchema,
 			SchemaName:    schemaName,
 			DropMissingOk: n.MissingOk,
 			DropCascade:   n.Behavior == parser.DROP_CASCADE,
@@ -3432,13 +3433,13 @@ func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 	}
 }
 
-func (a *Analyzer) transformAlterFunctionStmt(n *parser.AlterFunctionStmt) (*Query, error) {
+func (a *Analyzer) transformAlterFunctionStmt(n *parser.AlterFunctionStmt) (*qt.Query, error) {
 	name := ""
 	if n.Func != nil && len(n.Func.Funcname) > 0 {
 		name = n.Func.Funcname[len(n.Func.Funcname)-1]
 	}
-	u := &UtilityStmt{
-		Type:     UtilAlterFunction,
+	u := &qt.UtilityStmt{
+		Type:     qt.UtilAlterFunction,
 		FuncName: name,
 	}
 	for _, act := range n.Actions {
@@ -3453,14 +3454,14 @@ func (a *Analyzer) transformAlterFunctionStmt(n *parser.AlterFunctionStmt) (*Que
 			}
 		}
 	}
-	return a.makeUtilityQuery(UtilAlterFunction, u), nil
+	return a.makeUtilityQuery(qt.UtilAlterFunction, u), nil
 }
 
-func (a *Analyzer) transformCreateDomainStmt(n *parser.CreateDomainStmt) (*Query, error) {
+func (a *Analyzer) transformCreateDomainStmt(n *parser.CreateDomainStmt) (*qt.Query, error) {
 	name := lastNamePart(n.Domainname)
 	baseType := typeNameToString(n.TypeName)
-	u := &UtilityStmt{
-		Type:           UtilCreateDomain,
+	u := &qt.UtilityStmt{
+		Type:           qt.UtilCreateDomain,
 		DomainName:     name,
 		DomainBaseType: baseType,
 	}
@@ -3474,28 +3475,28 @@ func (a *Analyzer) transformCreateDomainStmt(n *parser.CreateDomainStmt) (*Query
 			}
 		}
 	}
-	return a.makeUtilityQuery(UtilCreateDomain, u), nil
+	return a.makeUtilityQuery(qt.UtilCreateDomain, u), nil
 }
 
-func (a *Analyzer) transformCreateEnumStmt(n *parser.CreateEnumStmt) (*Query, error) {
+func (a *Analyzer) transformCreateEnumStmt(n *parser.CreateEnumStmt) (*qt.Query, error) {
 	name := lastNamePart(n.TypeName)
-	return a.makeUtilityQuery(UtilCreateEnum, &UtilityStmt{
-		Type:     UtilCreateEnum,
+	return a.makeUtilityQuery(qt.UtilCreateEnum, &qt.UtilityStmt{
+		Type:     qt.UtilCreateEnum,
 		EnumName: name,
 		EnumVals: n.Vals,
 	}), nil
 }
 
-func (a *Analyzer) transformAlterEnumStmt(n *parser.AlterEnumStmt) (*Query, error) {
+func (a *Analyzer) transformAlterEnumStmt(n *parser.AlterEnumStmt) (*qt.Query, error) {
 	name := lastNamePart(n.TypeName)
-	return a.makeUtilityQuery(UtilAlterEnum, &UtilityStmt{
-		Type:          UtilAlterEnum,
+	return a.makeUtilityQuery(qt.UtilAlterEnum, &qt.UtilityStmt{
+		Type:          qt.UtilAlterEnum,
 		AlterEnumName: name,
 		AlterEnumVal:  n.NewVal,
 	}), nil
 }
 
-func (a *Analyzer) transformCreateSchemaStmt(n *parser.CreateSchemaStmt) (*Query, error) {
+func (a *Analyzer) transformCreateSchemaStmt(n *parser.CreateSchemaStmt) (*qt.Query, error) {
 	name := n.Schemaname
 	if name == "" && n.AuthRole != "" {
 		name = n.AuthRole
@@ -3503,8 +3504,8 @@ func (a *Analyzer) transformCreateSchemaStmt(n *parser.CreateSchemaStmt) (*Query
 	if name == "" {
 		return nil, fmt.Errorf("analyzer: CREATE SCHEMA requires a name")
 	}
-	return a.makeUtilityQuery(UtilCreateSchema, &UtilityStmt{
-		Type:              UtilCreateSchema,
+	return a.makeUtilityQuery(qt.UtilCreateSchema, &qt.UtilityStmt{
+		Type:              qt.UtilCreateSchema,
 		SchemaName:        name,
 		SchemaIfNotExists: n.IfNotExists,
 		SchemaAuthRole:    n.AuthRole,
@@ -3512,49 +3513,49 @@ func (a *Analyzer) transformCreateSchemaStmt(n *parser.CreateSchemaStmt) (*Query
 }
 
 // collectAggRefs walks an analyzed expression tree and appends any
-// AggRef nodes found to the provided slice.
-func collectAggRefs(expr AnalyzedExpr, refs *[]*AggRef) {
+// qt.AggRef nodes found to the provided slice.
+func collectAggRefs(expr qt.AnalyzedExpr, refs *[]*qt.AggRef) {
 	if expr == nil {
 		return
 	}
 	switch e := expr.(type) {
-	case *AggRef:
+	case *qt.AggRef:
 		*refs = append(*refs, e)
-	case *OpExpr:
+	case *qt.OpExpr:
 		collectAggRefs(e.Left, refs)
 		collectAggRefs(e.Right, refs)
-	case *BoolExprNode:
+	case *qt.BoolExprNode:
 		for _, a := range e.Args {
 			collectAggRefs(a, refs)
 		}
-	case *NullTestExpr:
+	case *qt.NullTestExpr:
 		collectAggRefs(e.Arg, refs)
-	case *FuncCallExpr:
+	case *qt.FuncCallExpr:
 		for _, a := range e.Args {
 			collectAggRefs(a, refs)
 		}
-	case *TypeCastExpr:
+	case *qt.TypeCastExpr:
 		collectAggRefs(e.Arg, refs)
 	}
 }
 
 // isAggregateFunc returns true if the function name is a known aggregate.
-// collectWindowFuncs walks an expression tree and collects WindowFuncRef nodes.
-func collectWindowFuncs(ae AnalyzedExpr, out *[]*WindowFuncRef) {
+// collectWindowFuncs walks an expression tree and collects qt.WindowFuncRef nodes.
+func collectWindowFuncs(ae qt.AnalyzedExpr, out *[]*qt.WindowFuncRef) {
 	if ae == nil {
 		return
 	}
 	switch e := ae.(type) {
-	case *WindowFuncRef:
+	case *qt.WindowFuncRef:
 		*out = append(*out, e)
-	case *OpExpr:
+	case *qt.OpExpr:
 		collectWindowFuncs(e.Left, out)
 		collectWindowFuncs(e.Right, out)
-	case *FuncCallExpr:
+	case *qt.FuncCallExpr:
 		for _, arg := range e.Args {
 			collectWindowFuncs(arg, out)
 		}
-	case *TypeCastExpr:
+	case *qt.TypeCastExpr:
 		collectWindowFuncs(e.Arg, out)
 	}
 }
@@ -3571,7 +3572,7 @@ func isWindowOnlyFunc(name string) bool {
 }
 
 // windowFuncReturnType determines the return type for a window function.
-func windowFuncReturnType(name string, args []AnalyzedExpr) tuple.DatumType {
+func windowFuncReturnType(name string, args []qt.AnalyzedExpr) tuple.DatumType {
 	switch name {
 	case "row_number", "rank", "dense_rank", "ntile":
 		return tuple.TypeInt64
@@ -3602,8 +3603,8 @@ func windowFuncReturnType(name string, args []AnalyzedExpr) tuple.DatumType {
 	}
 }
 
-// transformWindowFunc creates a WindowFuncRef from a FuncCall with OVER.
-func (a *Analyzer) transformWindowFunc(name string, args []AnalyzedExpr, f *parser.FuncCall) (AnalyzedExpr, error) {
+// transformWindowFunc creates a qt.WindowFuncRef from a FuncCall with OVER.
+func (a *Analyzer) transformWindowFunc(name string, args []qt.AnalyzedExpr, f *parser.FuncCall) (qt.AnalyzedExpr, error) {
 	wd, err := a.analyzeWindowDef(f.Over)
 	if err != nil {
 		return nil, fmt.Errorf("analyzer: window function %s: %w", name, err)
@@ -3611,7 +3612,7 @@ func (a *Analyzer) transformWindowFunc(name string, args []AnalyzedExpr, f *pars
 
 	retType := windowFuncReturnType(name, args)
 
-	return &WindowFuncRef{
+	return &qt.WindowFuncRef{
 		FuncName:  name,
 		Args:      args,
 		Star:      f.AggStar,
@@ -3622,9 +3623,9 @@ func (a *Analyzer) transformWindowFunc(name string, args []AnalyzedExpr, f *pars
 	}, nil
 }
 
-// analyzeWindowDef converts a parser.WindowDef into an AnalyzedWindowDef.
-func (a *Analyzer) analyzeWindowDef(wd *parser.WindowDef) (*AnalyzedWindowDef, error) {
-	result := &AnalyzedWindowDef{}
+// analyzeWindowDef converts a parser.WindowDef into an qt.AnalyzedWindowDef.
+func (a *Analyzer) analyzeWindowDef(wd *parser.WindowDef) (*qt.AnalyzedWindowDef, error) {
+	result := &qt.AnalyzedWindowDef{}
 
 	// PARTITION BY
 	for _, expr := range wd.PartitionClause {
@@ -3642,8 +3643,8 @@ func (a *Analyzer) analyzeWindowDef(wd *parser.WindowDef) (*AnalyzedWindowDef, e
 			return nil, fmt.Errorf("ORDER BY: %w", err)
 		}
 		desc := sb.SortbyDir == parser.SORTBY_DESC
-		_ = sb.SortbyNulls // nulls ordering not yet tracked in SortClause
-		result.OrderBy = append(result.OrderBy, &SortClause{
+		_ = sb.SortbyNulls // nulls ordering not yet tracked in qt.SortClause
+		result.OrderBy = append(result.OrderBy, &qt.SortClause{
 			Expr: expr,
 			Desc: desc,
 		})
@@ -3652,26 +3653,26 @@ func (a *Analyzer) analyzeWindowDef(wd *parser.WindowDef) (*AnalyzedWindowDef, e
 	// Frame mode and bounds.
 	opts := wd.FrameOptions
 	if opts&parser.FRAMEOPTION_ROWS != 0 {
-		result.FrameMode = FrameModeRows
+		result.FrameMode = qt.FrameModeRows
 	} else if opts&parser.FRAMEOPTION_GROUPS != 0 {
-		result.FrameMode = FrameModeGroups
+		result.FrameMode = qt.FrameModeGroups
 	} else {
-		result.FrameMode = FrameModeRange
+		result.FrameMode = qt.FrameModeRange
 	}
 
 	// Start bound.
 	switch {
 	case opts&parser.FRAMEOPTION_START_UNBOUNDED_PRECEDING != 0:
-		result.FrameStart = WindowFrameBound{Type: BoundUnboundedPreceding}
+		result.FrameStart = qt.WindowFrameBound{Type: qt.BoundUnboundedPreceding}
 	case opts&parser.FRAMEOPTION_START_CURRENT_ROW != 0:
-		result.FrameStart = WindowFrameBound{Type: BoundCurrentRow}
+		result.FrameStart = qt.WindowFrameBound{Type: qt.BoundCurrentRow}
 	case opts&parser.FRAMEOPTION_START_OFFSET_PRECEDING != 0:
 		if wd.StartOffset != nil {
 			off, err := a.transformExpr(wd.StartOffset)
 			if err != nil {
 				return nil, err
 			}
-			result.FrameStart = WindowFrameBound{Type: BoundOffsetPreceding, Offset: off}
+			result.FrameStart = qt.WindowFrameBound{Type: qt.BoundOffsetPreceding, Offset: off}
 		}
 	case opts&parser.FRAMEOPTION_START_OFFSET_FOLLOWING != 0:
 		if wd.StartOffset != nil {
@@ -3679,25 +3680,25 @@ func (a *Analyzer) analyzeWindowDef(wd *parser.WindowDef) (*AnalyzedWindowDef, e
 			if err != nil {
 				return nil, err
 			}
-			result.FrameStart = WindowFrameBound{Type: BoundOffsetFollowing, Offset: off}
+			result.FrameStart = qt.WindowFrameBound{Type: qt.BoundOffsetFollowing, Offset: off}
 		}
 	default:
-		result.FrameStart = WindowFrameBound{Type: BoundUnboundedPreceding}
+		result.FrameStart = qt.WindowFrameBound{Type: qt.BoundUnboundedPreceding}
 	}
 
 	// End bound.
 	switch {
 	case opts&parser.FRAMEOPTION_END_UNBOUNDED_FOLLOWING != 0:
-		result.FrameEnd = WindowFrameBound{Type: BoundUnboundedFollowing}
+		result.FrameEnd = qt.WindowFrameBound{Type: qt.BoundUnboundedFollowing}
 	case opts&parser.FRAMEOPTION_END_CURRENT_ROW != 0:
-		result.FrameEnd = WindowFrameBound{Type: BoundCurrentRow}
+		result.FrameEnd = qt.WindowFrameBound{Type: qt.BoundCurrentRow}
 	case opts&parser.FRAMEOPTION_END_OFFSET_PRECEDING != 0:
 		if wd.EndOffset != nil {
 			off, err := a.transformExpr(wd.EndOffset)
 			if err != nil {
 				return nil, err
 			}
-			result.FrameEnd = WindowFrameBound{Type: BoundOffsetPreceding, Offset: off}
+			result.FrameEnd = qt.WindowFrameBound{Type: qt.BoundOffsetPreceding, Offset: off}
 		}
 	case opts&parser.FRAMEOPTION_END_OFFSET_FOLLOWING != 0:
 		if wd.EndOffset != nil {
@@ -3705,10 +3706,10 @@ func (a *Analyzer) analyzeWindowDef(wd *parser.WindowDef) (*AnalyzedWindowDef, e
 			if err != nil {
 				return nil, err
 			}
-			result.FrameEnd = WindowFrameBound{Type: BoundOffsetFollowing, Offset: off}
+			result.FrameEnd = qt.WindowFrameBound{Type: qt.BoundOffsetFollowing, Offset: off}
 		}
 	default:
-		result.FrameEnd = WindowFrameBound{Type: BoundCurrentRow}
+		result.FrameEnd = qt.WindowFrameBound{Type: qt.BoundCurrentRow}
 	}
 
 	return result, nil
@@ -3804,7 +3805,7 @@ func (a *Analyzer) isAggregateFunc(name string) bool {
 }
 
 // transformFuncCall resolves a function call expression.
-func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
+func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (qt.AnalyzedExpr, error) {
 	// Get the unqualified function name.
 	name := ""
 	if len(f.Funcname) > 0 {
@@ -3812,7 +3813,7 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 	}
 
 	// Resolve arguments.
-	var args []AnalyzedExpr
+	var args []qt.AnalyzedExpr
 	for _, arg := range f.Args {
 		resolved, err := a.transformExpr(arg)
 		if err != nil {
@@ -3826,7 +3827,7 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 		return a.transformWindowFunc(name, args, f)
 	}
 
-	// Aggregate functions produce AggRef nodes.
+	// Aggregate functions produce qt.AggRef nodes.
 	if a.isAggregateFunc(name) {
 		var retType tuple.DatumType
 		switch name {
@@ -3878,7 +3879,7 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 		}
 
 		// Handle WITHIN GROUP (ORDER BY ...) for ordered-set aggregates.
-		var withinGroupExpr AnalyzedExpr
+		var withinGroupExpr qt.AnalyzedExpr
 		if len(f.AggWithinGroup) > 0 {
 			resolved, err := a.transformExpr(f.AggWithinGroup[0].Node)
 			if err != nil {
@@ -3891,7 +3892,7 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 			}
 		}
 
-		return &AggRef{
+		return &qt.AggRef{
 			AggFunc:         name,
 			Args:            args,
 			Star:            f.AggStar,
@@ -3965,12 +3966,12 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 		retType = tuple.TypeText
 	}
 
-	return &FuncCallExpr{FuncName: name, Args: args, ReturnType: retType}, nil
+	return &qt.FuncCallExpr{FuncName: name, Args: args, ReturnType: retType}, nil
 }
 
 // TransformExpr is an exported wrapper around transformExpr for use by
 // the executor when evaluating DEFAULT expressions.
-func (a *Analyzer) TransformExpr(expr parser.Expr) (AnalyzedExpr, error) {
+func (a *Analyzer) TransformExpr(expr parser.Expr) (qt.AnalyzedExpr, error) {
 	return a.transformExpr(expr)
 }
 
@@ -3980,14 +3981,14 @@ func (a *Analyzer) AddRangeTableEntry(tableName, alias string) {
 }
 
 // GetRangeTable returns the current range table.
-func (a *Analyzer) GetRangeTable() []*RangeTblEntry {
+func (a *Analyzer) GetRangeTable() []*qt.RangeTblEntry {
 	return a.rangeTable
 }
 
 // virtualCatalogColumns returns synthetic column definitions for virtual
 // catalog tables (information_schema.*, pg_catalog.*). Returns nil if the
 // table name is not a recognized virtual table.
-func virtualCatalogColumns(qualName string) []RTEColumn {
+func virtualCatalogColumns(qualName string) []qt.RTEColumn {
 	type colDef struct {
 		name string
 		typ  tuple.DatumType
@@ -4081,9 +4082,9 @@ func virtualCatalogColumns(qualName string) []RTEColumn {
 		return nil
 	}
 
-	cols := make([]RTEColumn, len(defs))
+	cols := make([]qt.RTEColumn, len(defs))
 	for i, d := range defs {
-		cols[i] = RTEColumn{Name: d.name, Type: d.typ, ColNum: int32(i + 1)}
+		cols[i] = qt.RTEColumn{Name: d.name, Type: d.typ, ColNum: int32(i + 1)}
 	}
 	return cols
 }

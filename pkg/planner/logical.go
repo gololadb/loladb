@@ -5,35 +5,10 @@ import (
 	"strings"
 
 	"github.com/gololadb/loladb/pkg/tuple"
+	qt "github.com/gololadb/loladb/pkg/querytree"
 )
 
-// JoinType represents the type of join.
-type JoinType int
 
-const (
-	JoinInner JoinType = iota
-	JoinLeft
-	JoinRight
-	JoinCross
-	JoinFull
-)
-
-func (j JoinType) String() string {
-	switch j {
-	case JoinInner:
-		return "INNER"
-	case JoinLeft:
-		return "LEFT"
-	case JoinRight:
-		return "RIGHT"
-	case JoinCross:
-		return "CROSS"
-	case JoinFull:
-		return "FULL"
-	default:
-		return "?"
-	}
-}
 
 // LogicalNode is a node in a logical plan tree.
 type LogicalNode interface {
@@ -72,7 +47,7 @@ func (n *LogicalScan) OutputColumns() []string {
 
 // LogicalFilter applies a predicate to its child's output.
 type LogicalFilter struct {
-	Predicate Expr
+	Predicate qt.Expr
 	Child     LogicalNode
 }
 
@@ -83,7 +58,7 @@ func (n *LogicalFilter) OutputColumns() []string { return n.Child.OutputColumns(
 
 // LogicalProject selects/computes output columns.
 type LogicalProject struct {
-	Exprs  []Expr
+	Exprs  []qt.Expr
 	Names  []string // output column names
 	Child  LogicalNode
 }
@@ -96,8 +71,8 @@ func (n *LogicalProject) OutputColumns() []string { return n.Names }
 
 // LogicalJoin joins two relations.
 type LogicalJoin struct {
-	Type      JoinType
-	Condition Expr // nil for CROSS JOIN
+	Type      qt.JoinType
+	Condition qt.Expr // nil for CROSS JOIN
 	Left      LogicalNode
 	Right     LogicalNode
 }
@@ -132,7 +107,7 @@ type LogicalSort struct {
 }
 
 type SortKey struct {
-	Expr Expr
+	Expr qt.Expr
 	Desc bool
 }
 
@@ -141,7 +116,7 @@ func (n *LogicalSort) OutputColumns() []string { return n.Child.OutputColumns() 
 
 // LogicalSetOp represents UNION / INTERSECT / EXCEPT.
 type LogicalSetOp struct {
-	Op    SetOpKind
+	Op    qt.SetOpKind
 	All   bool
 	Left  LogicalNode
 	Right LogicalNode
@@ -150,9 +125,9 @@ type LogicalSetOp struct {
 func (n *LogicalSetOp) String() string {
 	op := "Union"
 	switch n.Op {
-	case SetOpIntersect:
+	case qt.SetOpIntersect:
 		op = "Intersect"
-	case SetOpExcept:
+	case qt.SetOpExcept:
 		op = "Except"
 	}
 	if n.All {
@@ -174,24 +149,24 @@ func (n *LogicalDistinct) OutputColumns() []string { return n.Child.OutputColumn
 
 type Assignment struct {
 	Column string
-	Value  Expr
+	Value  qt.Expr
 }
 
 type LogicalInsert struct {
 	Table          string
 	Columns        []string // explicit column list (nil = all columns in order)
-	Values         [][]Expr // each inner slice is a row
-	ReturningExprs []Expr
+	Values         [][]qt.Expr // each inner slice is a row
+	ReturningExprs []qt.Expr
 	ReturningNames []string
 	OnConflict     *OnConflictPlan // nil = no ON CONFLICT
 }
 
 // OnConflictPlan holds the plan-level ON CONFLICT information.
 type OnConflictPlan struct {
-	Action       OnConflictAction
+	Action       qt.OnConflictAction
 	ConflictCols []string     // columns that form the conflict target
 	Assignments  []Assignment // SET assignments for DO UPDATE
-	WhereExpr    Expr         // optional WHERE on DO UPDATE
+	WhereExpr    qt.Expr         // optional WHERE on DO UPDATE
 }
 
 func (n *LogicalInsert) String() string        { return fmt.Sprintf("Insert(%s)", n.Table) }
@@ -209,9 +184,9 @@ func (n *LogicalInsertSelect) OutputColumns() []string { return nil }
 
 type LogicalDelete struct {
 	Table          string
-	Predicate      Expr // nil = delete all
+	Predicate      qt.Expr // nil = delete all
 	Child          LogicalNode
-	ReturningExprs []Expr
+	ReturningExprs []qt.Expr
 	ReturningNames []string
 }
 
@@ -221,11 +196,11 @@ func (n *LogicalDelete) OutputColumns() []string { return n.ReturningNames }
 type LogicalUpdate struct {
 	Table          string
 	Assignments    []Assignment
-	Predicate      Expr // nil = update all
+	Predicate      qt.Expr // nil = update all
 	Child          LogicalNode
 	Columns        []string // schema column names
 	ColTypes       []tuple.DatumType
-	ReturningExprs []Expr
+	ReturningExprs []qt.Expr
 	ReturningNames []string
 }
 
@@ -235,37 +210,15 @@ func (n *LogicalUpdate) OutputColumns() []string { return n.ReturningNames }
 type LogicalCreateTable struct {
 	Table             string
 	Schema            string // target schema (empty = current)
-	Columns           []ColDef
-	ForeignKeys       []ForeignKeyDef
+	Columns           []qt.ColDef
+	ForeignKeys       []qt.ForeignKeyDef
 	IsTemp            bool   // CREATE TEMPORARY TABLE
 	PartitionStrategy string // "range", "list", "hash", or "" (not partitioned)
 	PartitionKeyCols  []string
 	InheritParents    []string
 }
 
-type ColDef struct {
-	Name          string
-	Type          tuple.DatumType
-	TypeName      string // original SQL type name (for domain/enum validation)
-	Typmod        int32  // type modifier (-1 = unspecified; for NUMERIC: ((p<<16)|s)+4)
-	NotNull       bool   // column-level NOT NULL constraint
-	PrimaryKey    bool   // column-level PRIMARY KEY constraint
-	Unique        bool   // column-level UNIQUE constraint
-	DefaultExpr   string // SQL text of DEFAULT expression (empty = no default)
-	CheckExpr     string // SQL text of CHECK expression (empty = no check)
-	CheckName     string // optional constraint name for CHECK
-	GeneratedExpr string // SQL text of GENERATED ALWAYS AS (expr) STORED (empty = not generated)
-}
 
-// ForeignKeyDef holds a foreign key definition from CREATE TABLE.
-type ForeignKeyDef struct {
-	Name       string   // constraint name (may be empty)
-	Columns    []string // local column(s)
-	RefTable   string   // referenced table
-	RefColumns []string // referenced column(s)
-	OnDelete   string   // action: "", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"
-	OnUpdate   string   // action: "", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT"
-}
 
 func (n *LogicalCreateTable) String() string        { return fmt.Sprintf("CreateTable(%s)", n.Table) }
 func (n *LogicalCreateTable) OutputColumns() []string { return nil }
@@ -310,7 +263,7 @@ func (n *LogicalCreateSequence) OutputColumns() []string { return nil }
 type LogicalCreateView struct {
 	Name       string
 	Definition string
-	Columns    []ColDef
+	Columns    []qt.ColDef
 }
 
 func (n *LogicalCreateView) String() string         { return fmt.Sprintf("CreateView(%s)", n.Name) }
@@ -585,7 +538,7 @@ func (n *LogicalDropTable) OutputColumns() []string { return nil }
 // LogicalAddColumn represents ALTER TABLE ... ADD COLUMN.
 type LogicalAddColumn struct {
 	Table        string
-	Col          ColDef
+	Col          qt.ColDef
 	IfNotExists  bool
 }
 
@@ -605,9 +558,9 @@ func (n *LogicalDropColumn) OutputColumns() []string { return nil }
 // LogicalResult produces a single row by evaluating expressions (SELECT without FROM).
 // LogicalAggregate groups input rows and computes aggregate functions.
 type LogicalAggregate struct {
-	GroupExprs   []Expr    // GROUP BY expressions (empty = single group)
+	GroupExprs   []qt.Expr    // GROUP BY expressions (empty = single group)
 	AggDescs     []AggDesc // aggregate function descriptors
-	HavingQual   Expr      // HAVING filter (nil = no HAVING)
+	HavingQual   qt.Expr      // HAVING filter (nil = no HAVING)
 	GroupingSets [][]int   // for GROUPING SETS/CUBE/ROLLUP: each set is indices into GroupExprs
 	Child        LogicalNode
 }
@@ -615,10 +568,10 @@ type LogicalAggregate struct {
 // AggDesc describes a single aggregate computation.
 type AggDesc struct {
 	Func            string // "count", "sum", "avg", "min", "max"
-	ArgExprs        []Expr // argument expressions (empty for count(*))
+	ArgExprs        []qt.Expr // argument expressions (empty for count(*))
 	Star            bool   // true for count(*)
 	Distinct        bool
-	WithinGroupExpr Expr   // ORDER BY expr for ordered-set aggregates
+	WithinGroupExpr qt.Expr   // ORDER BY expr for ordered-set aggregates
 }
 
 func (n *LogicalAggregate) String() string { return "Aggregate" }
@@ -639,7 +592,7 @@ func (n *LogicalAggregate) OutputColumns() []string {
 }
 
 type LogicalResult struct {
-	Exprs []Expr
+	Exprs []qt.Expr
 	Names []string
 }
 
@@ -649,7 +602,7 @@ func (n *LogicalResult) OutputColumns() []string { return n.Names }
 // LogicalValues produces multiple rows from literal expressions (bare VALUES clause).
 type LogicalValues struct {
 	Names  []string   // column names (column1, column2, ...)
-	Values [][]Expr   // rows of expressions
+	Values [][]qt.Expr   // rows of expressions
 }
 
 func (n *LogicalValues) String() string         { return "Values" }
@@ -664,19 +617,19 @@ type LogicalWindowAgg struct {
 // WindowFuncDesc describes a single window function computation.
 type WindowFuncDesc struct {
 	FuncName    string
-	ArgExprs    []Expr
+	ArgExprs    []qt.Expr
 	Star        bool
 	Distinct    bool
-	PartitionBy []Expr
+	PartitionBy []qt.Expr
 	OrderBy     []SortExpr
-	FrameMode   WindowFrameMode
-	FrameStart  WindowFrameBound
-	FrameEnd    WindowFrameBound
+	FrameMode   qt.WindowFrameMode
+	FrameStart  qt.WindowFrameBound
+	FrameEnd    qt.WindowFrameBound
 }
 
 // SortExpr is an expression with a sort direction, used in window ORDER BY.
 type SortExpr struct {
-	Expr Expr
+	Expr qt.Expr
 	Desc bool
 }
 

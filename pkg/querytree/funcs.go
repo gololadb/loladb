@@ -1,4 +1,4 @@
-package planner
+package querytree
 
 import (
 	cryptoRand "crypto/rand"

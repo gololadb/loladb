@@ -1,6 +1,10 @@
 package planner
 
-import "fmt"
+import (
+	"fmt"
+
+	qt "github.com/gololadb/loladb/pkg/querytree"
+)
 
 // PhysicalNode is a node in a physical (executable) plan tree.
 type PhysicalNode interface {
@@ -16,7 +20,7 @@ type PhysSeqScan struct {
 	Columns       []string
 	HeadPage      uint32
 	Estimate      PlanCost
-	Filter        Expr   // optional pushed-down filter
+	Filter        qt.Expr   // optional pushed-down filter
 	IsTerminal    bool   // true when no Project node narrows the output columns
 	SampleMethod  string // "bernoulli", "system", or "" (no sampling)
 	SamplePercent float64 // 0-100
@@ -43,8 +47,8 @@ type PhysIndexScan struct {
 	Columns   []string
 	HeadPage  uint32
 	IndexRoot uint32
-	Key       Expr   // exact key for equality
-	Lo, Hi    Expr   // range bounds (nil = unbounded)
+	Key       qt.Expr   // exact key for equality
+	Lo, Hi    qt.Expr   // range bounds (nil = unbounded)
 	Estimate  PlanCost
 }
 
@@ -69,7 +73,7 @@ type PhysBitmapHeapScan struct {
 	Alias    string
 	Columns  []string
 	HeadPage uint32
-	Recheck  Expr // recheck condition applied to each fetched tuple
+	Recheck  qt.Expr // recheck condition applied to each fetched tuple
 	Child    PhysicalNode // must be a PhysBitmapIndexScan
 	Estimate PlanCost
 }
@@ -94,7 +98,7 @@ type PhysBitmapIndexScan struct {
 	Table     string
 	Index     string
 	IndexRoot uint32
-	Key       Expr
+	Key       qt.Expr
 	Estimate  PlanCost
 }
 
@@ -109,7 +113,7 @@ func (n *PhysBitmapIndexScan) Children() []PhysicalNode { return nil }
 
 // PhysFilter evaluates a predicate per row.
 type PhysFilter struct {
-	Predicate Expr
+	Predicate qt.Expr
 	Child     PhysicalNode
 	Estimate  PlanCost
 }
@@ -122,7 +126,7 @@ func (n *PhysFilter) Children() []PhysicalNode { return []PhysicalNode{n.Child} 
 
 // PhysProject computes output columns.
 type PhysProject struct {
-	Exprs    []Expr
+	Exprs    []qt.Expr
 	Names    []string
 	Child    PhysicalNode
 	Estimate PlanCost
@@ -139,8 +143,8 @@ func (n *PhysProject) Children() []PhysicalNode { return []PhysicalNode{n.Child}
 // row with the parameterized column value substituted. This mirrors
 // PostgreSQL's parameterized path mechanism.
 type PhysNestedLoopJoin struct {
-	Type      JoinType
-	Condition Expr
+	Type      qt.JoinType
+	Condition qt.Expr
 	Outer     PhysicalNode
 	Inner     PhysicalNode
 	Estimate  PlanCost
@@ -171,8 +175,8 @@ func (n *PhysNestedLoopJoin) Children() []PhysicalNode { return []PhysicalNode{n
 
 // PhysHashJoin performs a hash join on an equi-join condition.
 type PhysHashJoin struct {
-	Type      JoinType
-	Condition Expr
+	Type      qt.JoinType
+	Condition qt.Expr
 	Outer     PhysicalNode // probe side
 	Inner     PhysicalNode // build side
 	Estimate  PlanCost
@@ -211,7 +215,7 @@ func (n *PhysSort) Children() []PhysicalNode  { return []PhysicalNode{n.Child} }
 
 // PhysSetOp represents UNION / INTERSECT / EXCEPT.
 type PhysSetOp struct {
-	Op       SetOpKind
+	Op       qt.SetOpKind
 	All      bool
 	Left     PhysicalNode
 	Right    PhysicalNode
@@ -221,9 +225,9 @@ type PhysSetOp struct {
 func (n *PhysSetOp) String() string {
 	op := "Union"
 	switch n.Op {
-	case SetOpIntersect:
+	case qt.SetOpIntersect:
 		op = "Intersect"
-	case SetOpExcept:
+	case qt.SetOpExcept:
 		op = "Except"
 	}
 	if n.All {
@@ -249,8 +253,8 @@ func (n *PhysDistinct) Children() []PhysicalNode  { return []PhysicalNode{n.Chil
 type PhysInsert struct {
 	Table          string
 	Columns        []string // explicit column list (nil = all columns in order)
-	Values         [][]Expr
-	ReturningExprs []Expr
+	Values         [][]qt.Expr
+	ReturningExprs []qt.Expr
 	ReturningNames []string
 	OnConflict     *OnConflictPlan // nil = no ON CONFLICT
 	Estimate       PlanCost
@@ -275,7 +279,7 @@ func (n *PhysInsertSelect) Children() []PhysicalNode  { return []PhysicalNode{n.
 type PhysDelete struct {
 	Table          string
 	Child          PhysicalNode
-	ReturningExprs []Expr
+	ReturningExprs []qt.Expr
 	ReturningNames []string
 	Estimate       PlanCost
 }
@@ -290,7 +294,7 @@ type PhysUpdate struct {
 	Columns        []string
 	ColTypes       []DatumType
 	Child          PhysicalNode
-	ReturningExprs []Expr
+	ReturningExprs []qt.Expr
 	ReturningNames []string
 	Estimate       PlanCost
 }
@@ -304,8 +308,8 @@ func (n *PhysUpdate) Children() []PhysicalNode  { return []PhysicalNode{n.Child}
 type PhysCreateTable struct {
 	Table             string
 	Schema            string // target schema (empty = current)
-	Columns           []ColDef
-	ForeignKeys       []ForeignKeyDef
+	Columns           []qt.ColDef
+	ForeignKeys       []qt.ForeignKeyDef
 	IsTemp            bool   // CREATE TEMPORARY TABLE
 	PartitionStrategy string // "range", "list", "hash", or "" (not partitioned)
 	PartitionKeyCols  []string
@@ -330,9 +334,9 @@ func (n *PhysCreateIndex) Children() []PhysicalNode  { return nil }
 // PhysNoOp is a physical node that produces a message but does no real work.
 // PhysAggregate performs hash-based aggregation.
 type PhysAggregate struct {
-	GroupExprs   []Expr       // GROUP BY expressions
+	GroupExprs   []qt.Expr       // GROUP BY expressions
 	AggDescs     []AggDesc   // aggregate descriptors
-	HavingQual   Expr         // HAVING filter (nil = no HAVING)
+	HavingQual   qt.Expr         // HAVING filter (nil = no HAVING)
 	GroupingSets [][]int      // for GROUPING SETS/CUBE/ROLLUP
 	Child        PhysicalNode
 }
@@ -362,7 +366,7 @@ func (n *PhysCreateSequence) Children() []PhysicalNode  { return nil }
 type PhysCreateView struct {
 	Name       string
 	Definition string
-	Columns    []ColDef // resolved column definitions for the view
+	Columns    []qt.ColDef // resolved column definitions for the view
 }
 
 func (n *PhysCreateView) String() string            { return fmt.Sprintf("CreateView %s", n.Name) }
@@ -663,7 +667,7 @@ func (n *PhysDropTable) Children() []PhysicalNode  { return nil }
 // PhysAddColumn represents ALTER TABLE ... ADD COLUMN.
 type PhysAddColumn struct {
 	Table       string
-	Col         ColDef
+	Col         qt.ColDef
 	IfNotExists bool
 }
 
@@ -684,7 +688,7 @@ func (n *PhysDropColumn) Children() []PhysicalNode  { return nil }
 
 // PhysResult produces a single row by evaluating expressions (SELECT without FROM).
 type PhysResult struct {
-	Exprs []Expr
+	Exprs []qt.Expr
 	Names []string
 }
 
@@ -695,7 +699,7 @@ func (n *PhysResult) Children() []PhysicalNode  { return nil }
 // PhysValues produces multiple rows from literal expressions (bare VALUES clause).
 type PhysValues struct {
 	Names  []string
-	Values [][]Expr
+	Values [][]qt.Expr
 }
 
 func (n *PhysValues) String() string            { return "Values" }

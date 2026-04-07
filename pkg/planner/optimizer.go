@@ -7,6 +7,7 @@ import (
 
 	"github.com/gololadb/loladb/pkg/catalog"
 	"github.com/gololadb/loladb/pkg/tuple"
+	qt "github.com/gololadb/loladb/pkg/querytree"
 )
 
 // Optimizer converts a logical plan into a physical plan using
@@ -166,7 +167,7 @@ func (o *Optimizer) optimize(node LogicalNode) (PhysicalNode, error) {
 	}
 }
 
-func (o *Optimizer) optimizeScan(n *LogicalScan, filter Expr) (PhysicalNode, error) {
+func (o *Optimizer) optimizeScan(n *LogicalScan, filter qt.Expr) (PhysicalNode, error) {
 	rel, err := o.Cat.FindRelation(n.Table)
 	if err != nil || rel == nil {
 		// Table not in catalog — may be a CTE self-reference in a recursive query.
@@ -235,9 +236,9 @@ func (o *Optimizer) optimizeScan(n *LogicalScan, filter Expr) (PhysicalNode, err
 	return node, nil
 }
 
-func (o *Optimizer) tryIndexScan(n *LogicalScan, filter Expr, rel *catalog.Relation, tupleCount, pages float64, colStats map[string]*catalog.ColumnStats) PhysicalNode {
-	binOp, ok := filter.(*ExprBinOp)
-	if !ok || binOp.Op != OpEq {
+func (o *Optimizer) tryIndexScan(n *LogicalScan, filter qt.Expr, rel *catalog.Relation, tupleCount, pages float64, colStats map[string]*catalog.ColumnStats) PhysicalNode {
+	binOp, ok := filter.(*qt.ExprBinOp)
+	if !ok || binOp.Op != qt.OpEq {
 		return nil
 	}
 
@@ -377,7 +378,7 @@ func (o *Optimizer) optimizeFilter(n *LogicalFilter) (PhysicalNode, error) {
 // "customer.id = 5" and the join condition says "rental.customer_id =
 // customer.id", we infer "rental.customer_id = 5" and push it to the
 // rental side. This mirrors PostgreSQL's generate_implied_equalities.
-func (o *Optimizer) pushFilterIntoJoin(pred Expr, join *LogicalJoin) (PhysicalNode, error) {
+func (o *Optimizer) pushFilterIntoJoin(pred qt.Expr, join *LogicalJoin) (PhysicalNode, error) {
 	leftCols := columnSet(join.Left.OutputColumns())
 	rightCols := columnSet(join.Right.OutputColumns())
 
@@ -391,7 +392,7 @@ func (o *Optimizer) pushFilterIntoJoin(pred Expr, join *LogicalJoin) (PhysicalNo
 		conjuncts = append(conjuncts, derived...)
 	}
 
-	var leftPreds, rightPreds, remaining []Expr
+	var leftPreds, rightPreds, remaining []qt.Expr
 
 	for _, c := range conjuncts {
 		refs := exprColumnRefs(c)
@@ -459,16 +460,16 @@ func (o *Optimizer) pushFilterIntoJoin(pred Expr, join *LogicalJoin) (PhysicalNo
 // Given filter predicates like "A.x = 5" and a join condition "A.x = B.y",
 // it derives "B.y = 5". This mirrors PostgreSQL's EquivalenceClass
 // mechanism (generate_implied_equalities in equivclass.c).
-func deriveTransitivePredicates(filterPreds []Expr, joinCond Expr) []Expr {
+func deriveTransitivePredicates(filterPreds []qt.Expr, joinCond qt.Expr) []qt.Expr {
 	// Collect "column = literal" facts from the filter.
 	type colLitFact struct {
-		col *ExprColumn
-		lit *ExprLiteral
+		col *qt.ExprColumn
+		lit *qt.ExprLiteral
 	}
 	var facts []colLitFact
 	for _, p := range filterPreds {
-		binOp, ok := p.(*ExprBinOp)
-		if !ok || binOp.Op != OpEq {
+		binOp, ok := p.(*qt.ExprBinOp)
+		if !ok || binOp.Op != qt.OpEq {
 			continue
 		}
 		col, lit := extractColLit(binOp)
@@ -482,39 +483,39 @@ func deriveTransitivePredicates(filterPreds []Expr, joinCond Expr) []Expr {
 
 	// Collect "column = column" equalities from the join condition.
 	type colColEq struct {
-		left, right *ExprColumn
+		left, right *qt.ExprColumn
 	}
 	var eqs []colColEq
 	for _, jc := range flattenAnd(joinCond) {
-		binOp, ok := jc.(*ExprBinOp)
-		if !ok || binOp.Op != OpEq {
+		binOp, ok := jc.(*qt.ExprBinOp)
+		if !ok || binOp.Op != qt.OpEq {
 			continue
 		}
-		lc, _ := binOp.Left.(*ExprColumn)
-		rc, _ := binOp.Right.(*ExprColumn)
+		lc, _ := binOp.Left.(*qt.ExprColumn)
+		rc, _ := binOp.Right.(*qt.ExprColumn)
 		if lc != nil && rc != nil {
 			eqs = append(eqs, colColEq{lc, rc})
 		}
 	}
 
 	// For each fact and each join equality, derive new predicates.
-	var derived []Expr
+	var derived []qt.Expr
 	for _, fact := range facts {
 		for _, eq := range eqs {
 			if columnsEqual(fact.col, eq.left) {
 				// fact: A.x = lit, join: A.x = B.y → derive B.y = lit
-				derived = append(derived, &ExprBinOp{Op: OpEq, Left: eq.right, Right: fact.lit})
+				derived = append(derived, &qt.ExprBinOp{Op: qt.OpEq, Left: eq.right, Right: fact.lit})
 			} else if columnsEqual(fact.col, eq.right) {
 				// fact: B.y = lit, join: A.x = B.y → derive A.x = lit
-				derived = append(derived, &ExprBinOp{Op: OpEq, Left: eq.left, Right: fact.lit})
+				derived = append(derived, &qt.ExprBinOp{Op: qt.OpEq, Left: eq.left, Right: fact.lit})
 			}
 		}
 	}
 	return derived
 }
 
-// columnsEqual checks if two ExprColumn references refer to the same column.
-func columnsEqual(a, b *ExprColumn) bool {
+// columnsEqual checks if two qt.ExprColumn references refer to the same column.
+func columnsEqual(a, b *qt.ExprColumn) bool {
 	if a.Table != "" && b.Table != "" {
 		return strings.EqualFold(a.Table, b.Table) && strings.EqualFold(a.Column, b.Column)
 	}
@@ -522,37 +523,37 @@ func columnsEqual(a, b *ExprColumn) bool {
 }
 
 // flattenAnd extracts conjuncts from nested AND expressions.
-func flattenAnd(e Expr) []Expr {
-	if binOp, ok := e.(*ExprBinOp); ok && binOp.Op == OpAnd {
+func flattenAnd(e qt.Expr) []qt.Expr {
+	if binOp, ok := e.(*qt.ExprBinOp); ok && binOp.Op == qt.OpAnd {
 		return append(flattenAnd(binOp.Left), flattenAnd(binOp.Right)...)
 	}
-	return []Expr{e}
+	return []qt.Expr{e}
 }
 
 // combineAnd combines multiple predicates with AND.
-func combineAnd(preds []Expr) Expr {
+func combineAnd(preds []qt.Expr) qt.Expr {
 	if len(preds) == 1 {
 		return preds[0]
 	}
 	result := preds[0]
 	for _, p := range preds[1:] {
-		result = &ExprBinOp{Op: OpAnd, Left: result, Right: p}
+		result = &qt.ExprBinOp{Op: qt.OpAnd, Left: result, Right: p}
 	}
 	return result
 }
 
-// exprColumnRefs collects all ExprColumn references in an expression.
-func exprColumnRefs(e Expr) []*ExprColumn {
-	var refs []*ExprColumn
+// exprColumnRefs collects all qt.ExprColumn references in an expression.
+func exprColumnRefs(e qt.Expr) []*qt.ExprColumn {
+	var refs []*qt.ExprColumn
 	switch v := e.(type) {
-	case *ExprColumn:
+	case *qt.ExprColumn:
 		refs = append(refs, v)
-	case *ExprBinOp:
+	case *qt.ExprBinOp:
 		refs = append(refs, exprColumnRefs(v.Left)...)
 		refs = append(refs, exprColumnRefs(v.Right)...)
-	case *ExprNot:
+	case *qt.ExprNot:
 		refs = append(refs, exprColumnRefs(v.Child)...)
-	case *ExprIsNull:
+	case *qt.ExprIsNull:
 		refs = append(refs, exprColumnRefs(v.Child)...)
 	}
 	return refs
@@ -568,7 +569,7 @@ func columnSet(cols []string) map[string]bool {
 }
 
 // matchesColumnSet checks if a column reference matches any column in the set.
-func matchesColumnSet(col *ExprColumn, set map[string]bool) bool {
+func matchesColumnSet(col *qt.ExprColumn, set map[string]bool) bool {
 	if col.Table != "" {
 		// Qualified reference: must match "table.column" exactly.
 		qualified := strings.ToLower(col.Table + "." + col.Column)
@@ -612,7 +613,7 @@ func (o *Optimizer) optimizeProject(n *LogicalProject) (PhysicalNode, error) {
 
 func (o *Optimizer) optimizeJoin(n *LogicalJoin) (PhysicalNode, error) {
 	// Try DP join reordering for chains of inner joins (≤12 relations).
-	if n.Type == JoinInner || n.Type == JoinCross {
+	if n.Type == qt.JoinInner || n.Type == qt.JoinCross {
 		if result := o.tryDPJoinOrder(n); result != nil {
 			return result, nil
 		}
@@ -676,7 +677,7 @@ func (o *Optimizer) optimizeJoin(n *LogicalJoin) (PhysicalNode, error) {
 			consider(paramNL, paramNL.Cost().Total)
 		}
 		// Also try with sides swapped (inner ↔ outer) for INNER joins.
-		if n.Type == JoinInner {
+		if n.Type == qt.JoinInner {
 			if paramNL := o.tryParamNestedLoop(n, right, left, rightCost, joinRows, width); paramNL != nil {
 				consider(paramNL, paramNL.Cost().Total)
 			}
@@ -690,19 +691,19 @@ func (o *Optimizer) optimizeJoin(n *LogicalJoin) (PhysicalNode, error) {
 // on the join column. If so, it builds a parameterized nested loop
 // where the inner index scan is re-executed per outer row.
 func (o *Optimizer) tryParamNestedLoop(n *LogicalJoin, outer, inner PhysicalNode, outerCost PlanCost, joinRows float64, width int) PhysicalNode {
-	binOp, ok := n.Condition.(*ExprBinOp)
-	if !ok || binOp.Op != OpEq {
+	binOp, ok := n.Condition.(*qt.ExprBinOp)
+	if !ok || binOp.Op != qt.OpEq {
 		return nil
 	}
-	lc, _ := binOp.Left.(*ExprColumn)
-	rc, _ := binOp.Right.(*ExprColumn)
+	lc, _ := binOp.Left.(*qt.ExprColumn)
+	rc, _ := binOp.Right.(*qt.ExprColumn)
 	if lc == nil || rc == nil {
 		return nil
 	}
 
 	// Determine which column belongs to the inner side.
 	innerCols := columnSet(innerOutputCols(inner))
-	var innerCol, outerCol *ExprColumn
+	var innerCol, outerCol *qt.ExprColumn
 	if matchesColumnSet(lc, innerCols) {
 		innerCol, outerCol = lc, rc
 	} else if matchesColumnSet(rc, innerCols) {
@@ -864,7 +865,7 @@ func extractTableName(node PhysicalNode) string {
 // contains outer joins or too many relations).
 func (o *Optimizer) tryDPJoinOrder(root *LogicalJoin) PhysicalNode {
 	var rels []LogicalNode
-	var preds []Expr
+	var preds []qt.Expr
 
 	if !flattenInnerJoins(root, &rels, &preds) {
 		return nil
@@ -919,7 +920,7 @@ func (o *Optimizer) tryDPJoinOrder(root *LogicalJoin) PhysicalNode {
 				}
 
 				// Find applicable join predicates.
-				var applicable []Expr
+				var applicable []qt.Expr
 				leftCols := physOutputCols(left.node)
 				rightCols := physOutputCols(right.node)
 				for _, pred := range preds {
@@ -938,12 +939,12 @@ func (o *Optimizer) tryDPJoinOrder(root *LogicalJoin) PhysicalNode {
 					}
 				}
 
-				var cond Expr
-				joinType := JoinInner
+				var cond qt.Expr
+				joinType := qt.JoinInner
 				if len(applicable) > 0 {
 					cond = combineAnd(applicable)
 				} else {
-					joinType = JoinCross
+					joinType = qt.JoinCross
 				}
 
 				// Cost the join both ways (left⋈right and right⋈left).
@@ -1020,13 +1021,13 @@ func (o *Optimizer) tryDPJoinOrder(root *LogicalJoin) PhysicalNode {
 
 // flattenInnerJoins recursively flattens a tree of inner/cross joins
 // into a list of base relations and join predicates.
-func flattenInnerJoins(node LogicalNode, rels *[]LogicalNode, preds *[]Expr) bool {
+func flattenInnerJoins(node LogicalNode, rels *[]LogicalNode, preds *[]qt.Expr) bool {
 	join, ok := node.(*LogicalJoin)
 	if !ok {
 		*rels = append(*rels, node)
 		return true
 	}
-	if join.Type != JoinInner && join.Type != JoinCross {
+	if join.Type != qt.JoinInner && join.Type != qt.JoinCross {
 		return false // can't reorder outer joins
 	}
 	if !flattenInnerJoins(join.Left, rels, preds) {
@@ -1213,7 +1214,7 @@ func (o *Optimizer) optimizeSubqueryScan(n *LogicalSubqueryScan) (PhysicalNode, 
 }
 
 func (o *Optimizer) optimizeInsert(n *LogicalInsert) (PhysicalNode, error) {
-	var values [][]Expr
+	var values [][]qt.Expr
 	values = append(values, n.Values...)
 	return &PhysInsert{
 		Table: n.Table, Columns: n.Columns, Values: values,
@@ -1254,15 +1255,15 @@ func (o *Optimizer) optimizeUpdate(n *LogicalUpdate) (PhysicalNode, error) {
 // estimateSelectivity estimates the fraction of rows matching a predicate.
 // colStats may be nil; when available, ndistinct values improve equality
 // estimates (mirroring PostgreSQL's clausesel.c / eqsel).
-func estimateSelectivity(pred Expr, rows float64) float64 {
+func estimateSelectivity(pred qt.Expr, rows float64) float64 {
 	return estimateSelectivityWithStats(pred, rows, nil)
 }
 
-func estimateSelectivityWithStats(pred Expr, rows float64, colStats map[string]*catalog.ColumnStats) float64 {
+func estimateSelectivityWithStats(pred qt.Expr, rows float64, colStats map[string]*catalog.ColumnStats) float64 {
 	switch e := pred.(type) {
-	case *ExprBinOp:
+	case *qt.ExprBinOp:
 		switch e.Op {
-		case OpEq:
+		case qt.OpEq:
 			// Try to use MCV or ndistinct from column stats.
 			if colStats != nil {
 				col, lit := extractColLit(e)
@@ -1305,20 +1306,20 @@ func estimateSelectivityWithStats(pred Expr, rows float64, colStats map[string]*
 				return 1.0 / distinct
 			}
 			return 0.01
-		case OpLt, OpLte, OpGt, OpGte:
+		case qt.OpLt, qt.OpLte, qt.OpGt, qt.OpGte:
 			return 0.33
-		case OpNeq:
+		case qt.OpNeq:
 			return 0.99
-		case OpAnd:
+		case qt.OpAnd:
 			return estimateSelectivityWithStats(e.Left, rows, colStats) * estimateSelectivityWithStats(e.Right, rows, colStats)
-		case OpOr:
+		case qt.OpOr:
 			sl := estimateSelectivityWithStats(e.Left, rows, colStats)
 			sr := estimateSelectivityWithStats(e.Right, rows, colStats)
 			return sl + sr - sl*sr
 		}
-	case *ExprNot:
+	case *qt.ExprNot:
 		return 1.0 - estimateSelectivityWithStats(e.Child, rows, colStats)
-	case *ExprIsNull:
+	case *qt.ExprIsNull:
 		if e.Not {
 			return 0.99
 		}
@@ -1327,21 +1328,21 @@ func estimateSelectivityWithStats(pred Expr, rows float64, colStats map[string]*
 	return 0.5
 }
 
-func isEquiJoin(cond Expr) bool {
-	if binOp, ok := cond.(*ExprBinOp); ok {
-		return binOp.Op == OpEq
+func isEquiJoin(cond qt.Expr) bool {
+	if binOp, ok := cond.(*qt.ExprBinOp); ok {
+		return binOp.Op == qt.OpEq
 	}
 	return false
 }
 
-func extractColLit(e *ExprBinOp) (*ExprColumn, *ExprLiteral) {
-	col, _ := e.Left.(*ExprColumn)
-	lit, _ := e.Right.(*ExprLiteral)
+func extractColLit(e *qt.ExprBinOp) (*qt.ExprColumn, *qt.ExprLiteral) {
+	col, _ := e.Left.(*qt.ExprColumn)
+	lit, _ := e.Right.(*qt.ExprLiteral)
 	if col != nil && lit != nil {
 		return col, lit
 	}
-	col, _ = e.Right.(*ExprColumn)
-	lit, _ = e.Left.(*ExprLiteral)
+	col, _ = e.Right.(*qt.ExprColumn)
+	lit, _ = e.Left.(*qt.ExprLiteral)
 	return col, lit
 }
 
