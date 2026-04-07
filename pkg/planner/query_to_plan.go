@@ -371,7 +371,7 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 	}
 	switch u.Type {
 	case UtilCreateTable:
-		return &LogicalCreateTable{Table: u.TableName, Schema: u.TableSchema, Columns: u.Columns, ForeignKeys: u.ForeignKeys}, nil
+		return &LogicalCreateTable{Table: u.TableName, Schema: u.TableSchema, Columns: u.Columns, ForeignKeys: u.ForeignKeys, IsTemp: u.IsTemp}, nil
 	case UtilCreateIndex:
 		return &LogicalCreateIndex{Index: u.IndexName, Table: u.IndexTable, Column: u.IndexColumn, Method: u.IndexMethod}, nil
 	case UtilCreateSequence:
@@ -432,6 +432,8 @@ func queryToUtilityPlan(q *Query) (LogicalNode, error) {
 		return &LogicalAlterEnum{Name: u.AlterEnumName, NewVal: u.AlterEnumVal}, nil
 	case UtilCreateSchema:
 		return &LogicalCreateSchema{Name: u.SchemaName, IfNotExists: u.SchemaIfNotExists, AuthRole: u.SchemaAuthRole}, nil
+	case UtilDropTable:
+		return &LogicalDropTable{Name: u.TableName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
 	case UtilDropSchema:
 		return &LogicalDropSchema{Name: u.SchemaName, MissingOk: u.DropMissingOk, Cascade: u.DropCascade}, nil
 	case UtilTruncate:

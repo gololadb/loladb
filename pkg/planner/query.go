@@ -264,6 +264,7 @@ type UtilityStmt struct {
 	// Fields used by various utility types.
 	TableName   string
 	TableSchema string // schema for CREATE TABLE / CREATE VIEW (empty = current)
+	IsTemp      bool   // CREATE TEMPORARY TABLE
 	Columns     []ColDef
 	ForeignKeys []ForeignKeyDef // FK constraints from CREATE TABLE
 	IndexName   string
@@ -392,6 +393,7 @@ const (
 	UtilAlterEnum
 	UtilCreateSchema
 	UtilTruncate
+	UtilDropTable
 	UtilDropIndex
 	UtilDropView
 	UtilDropSchema

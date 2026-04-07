@@ -1043,6 +1043,13 @@ func (a *Analyzer) transformAExpr(e *parser.A_Expr) (AnalyzedExpr, error) {
 		return a.transformDistinctFrom(e, true)
 	}
 
+	// Row value comparisons: (a, b) op (c, d).
+	if leftRow, ok := e.Lexpr.(*parser.RowExpr); ok {
+		if rightRow, ok := e.Rexpr.(*parser.RowExpr); ok {
+			return a.transformRowCompare(leftRow, rightRow, e.Name)
+		}
+	}
+
 	left, err := a.transformExpr(e.Lexpr)
 	if err != nil {
 		return nil, err
@@ -1212,6 +1219,101 @@ func (a *Analyzer) transformSimilarTo(e *parser.A_Expr) (AnalyzedExpr, error) {
 // transformBetween desugars BETWEEN into AND/OR comparisons.
 // x BETWEEN a AND b  →  x >= a AND x <= b
 // x NOT BETWEEN a AND b  →  x < a OR x > b
+// transformRowCompare expands (a, b, ...) op (x, y, ...) into scalar comparisons.
+// For = and !=: element-wise AND/OR.
+// For <, >, <=, >=: lexicographic comparison.
+func (a *Analyzer) transformRowCompare(left, right *parser.RowExpr, opNames []string) (AnalyzedExpr, error) {
+	if len(left.Args) != len(right.Args) {
+		return nil, fmt.Errorf("unequal number of entries in row expressions")
+	}
+	if len(left.Args) == 0 {
+		return &Const{Value: tuple.DBool(true), ConstType: tuple.TypeBool}, nil
+	}
+
+	op := ""
+	if len(opNames) > 0 {
+		op = opNames[len(opNames)-1]
+	}
+
+	// Transform all element pairs.
+	n := len(left.Args)
+	leftExprs := make([]AnalyzedExpr, n)
+	rightExprs := make([]AnalyzedExpr, n)
+	for i := 0; i < n; i++ {
+		var err error
+		leftExprs[i], err = a.transformExpr(left.Args[i])
+		if err != nil {
+			return nil, err
+		}
+		rightExprs[i], err = a.transformExpr(right.Args[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	switch op {
+	case "=":
+		// (a,b) = (x,y) → a=x AND b=y
+		var conds []AnalyzedExpr
+		for i := 0; i < n; i++ {
+			conds = append(conds, &OpExpr{Op: OpEq, Left: leftExprs[i], Right: rightExprs[i]})
+		}
+		return andAll(conds), nil
+
+	case "<>", "!=":
+		// (a,b) <> (x,y) → a<>x OR b<>y
+		var conds []AnalyzedExpr
+		for i := 0; i < n; i++ {
+			conds = append(conds, &OpExpr{Op: OpNeq, Left: leftExprs[i], Right: rightExprs[i]})
+		}
+		return orAll(conds), nil
+
+	case "<", ">", "<=", ">=":
+		// Lexicographic: (a,b) < (x,y) → a<x OR (a=x AND b<y)
+		var ltOp, eqLeOp OpKind
+		switch op {
+		case "<":
+			ltOp, eqLeOp = OpLt, OpLt
+		case ">":
+			ltOp, eqLeOp = OpGt, OpGt
+		case "<=":
+			ltOp, eqLeOp = OpLt, OpLte
+		case ">=":
+			ltOp, eqLeOp = OpGt, OpGte
+		}
+		// Build from right to left.
+		// Last element: a[n-1] op b[n-1] (using eqLeOp for <= / >=)
+		result := AnalyzedExpr(&OpExpr{Op: eqLeOp, Left: leftExprs[n-1], Right: rightExprs[n-1]})
+		for i := n - 2; i >= 0; i-- {
+			// a[i] < b[i] OR (a[i] = b[i] AND <rest>)
+			strict := &OpExpr{Op: ltOp, Left: leftExprs[i], Right: rightExprs[i]}
+			eq := &OpExpr{Op: OpEq, Left: leftExprs[i], Right: rightExprs[i]}
+			eqAndRest := &BoolExprNode{Op: BoolAnd, Args: []AnalyzedExpr{eq, result}}
+			result = &BoolExprNode{Op: BoolOr, Args: []AnalyzedExpr{strict, eqAndRest}}
+		}
+		return result, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported row comparison operator: %s", op)
+	}
+}
+
+// andAll combines multiple conditions with AND.
+func andAll(conds []AnalyzedExpr) AnalyzedExpr {
+	if len(conds) == 1 {
+		return conds[0]
+	}
+	return &BoolExprNode{Op: BoolAnd, Args: conds}
+}
+
+// orAll combines multiple conditions with OR.
+func orAll(conds []AnalyzedExpr) AnalyzedExpr {
+	if len(conds) == 1 {
+		return conds[0]
+	}
+	return &BoolExprNode{Op: BoolOr, Args: conds}
+}
+
 func (a *Analyzer) transformBetween(e *parser.A_Expr) (AnalyzedExpr, error) {
 	left, err := a.transformExpr(e.Lexpr)
 	if err != nil {
@@ -2021,6 +2123,27 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 	var cols []ColDef
 	var foreignKeys []ForeignKeyDef
 	for _, elt := range n.TableElts {
+		// Handle LIKE source_table: copy columns from the source table.
+		if like, ok := elt.(*parser.TableLikeClause); ok {
+			if like.Relation != nil && a.Cat != nil {
+				srcName := like.Relation.Relname
+				srcRel, _ := a.Cat.FindRelation(srcName)
+				if srcRel != nil {
+					srcCols, _ := a.Cat.GetColumns(srcRel.OID)
+					for _, sc := range srcCols {
+						cols = append(cols, ColDef{
+							Name:          sc.Name,
+							Type:          tuple.DatumType(sc.Type),
+							Typmod:        sc.Typmod,
+							NotNull:       sc.NotNull,
+							DefaultExpr:   sc.DefaultExpr,
+							GeneratedExpr: sc.GeneratedExpr,
+						})
+					}
+				}
+			}
+			continue
+		}
 		colDef, ok := elt.(*parser.ColumnDef)
 		if !ok {
 			continue
@@ -2060,6 +2183,12 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 				if c.RawExpr != nil {
 					generatedExpr = parser.DeparseExpr(c.RawExpr)
 				}
+			case parser.CONSTR_IDENTITY:
+				// GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY
+				// Auto-create a sequence and set the default to nextval().
+				seqName := tableName + "_" + colDef.Colname + "_seq"
+				defaultExpr = "nextval('" + seqName + "')"
+				notNull = true
 			case parser.CONSTR_FOREIGN:
 				// Column-level REFERENCES: single column FK.
 				refTable := ""
@@ -2078,6 +2207,13 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 			}
 		}
 		typmod := computeTypmodFromParser(colDef.TypeName, dt)
+		// SERIAL/BIGSERIAL: auto-create sequence default if not already set.
+		upperType := strings.ToUpper(sqlType)
+		if (upperType == "SERIAL" || upperType == "BIGSERIAL" || upperType == "SMALLSERIAL") && defaultExpr == "" {
+			seqName := tableName + "_" + colDef.Colname + "_seq"
+			defaultExpr = "nextval('" + seqName + "')"
+			notNull = true
+		}
 		cols = append(cols, ColDef{Name: colDef.Colname, Type: dt, TypeName: sqlType, Typmod: typmod, NotNull: notNull, PrimaryKey: primaryKey, Unique: unique, DefaultExpr: defaultExpr, CheckExpr: checkExpr, CheckName: checkName, GeneratedExpr: generatedExpr})
 	}
 
@@ -2136,6 +2272,7 @@ func (a *Analyzer) transformCreateStmt(n *parser.CreateStmt) (*Query, error) {
 	return a.makeUtilityQuery(UtilCreateTable, &UtilityStmt{
 		Type: UtilCreateTable, TableName: tableName, TableSchema: schemaName,
 		Columns: cols, ForeignKeys: foreignKeys,
+		IsTemp: n.Persistence == parser.RELPERSISTENCE_TEMP,
 	}), nil
 }
 
@@ -2867,6 +3004,17 @@ func (a *Analyzer) transformTruncateStmt(n *parser.TruncateStmt) (*Query, error)
 
 func (a *Analyzer) transformDropStmt(n *parser.DropStmt) (*Query, error) {
 	switch n.RemoveType {
+	case parser.OBJECT_TABLE:
+		tableName := ""
+		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {
+			tableName = n.Objects[0][len(n.Objects[0])-1]
+		}
+		return a.makeUtilityQuery(UtilDropTable, &UtilityStmt{
+			Type:          UtilDropTable,
+			TableName:     tableName,
+			DropMissingOk: n.MissingOk,
+			DropCascade:   n.Behavior == parser.DROP_CASCADE,
+		}), nil
 	case parser.OBJECT_TRIGGER:
 		trigName := ""
 		if len(n.Objects) > 0 && len(n.Objects[0]) > 0 {

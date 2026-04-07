@@ -129,6 +129,12 @@ type Catalog struct {
 	// Constraints
 	CheckConstraints []CheckConstraint // CHECK constraints
 	ForeignKeys      []ForeignKey      // FOREIGN KEY constraints
+
+	// Temporary tables (session-scoped, names tracked for cleanup).
+	TempTables map[string]bool
+
+	// Comments stores COMMENT ON metadata keyed by "objtype:name" or "objtype:name:col".
+	Comments map[string]string
 }
 
 // New wraps an engine with catalog operations. If the database is
@@ -154,6 +160,8 @@ func New(eng *engine.Engine) (*Catalog, error) {
 		Funcs: newFuncStore(), Triggers: newTriggerStore(), Types: newTypeStore(),
 		cache:      newSyscache(),
 		SearchPath: searchPath,
+		TempTables: make(map[string]bool),
+		Comments:   make(map[string]string),
 	}
 
 	if eng.Super.PgClassPage == 0 {
@@ -1086,6 +1094,102 @@ func (c *Catalog) DropView(name string, missingOk bool) error {
 	}
 	c.cache.invalidate()
 	return nil
+}
+
+// DropTable removes a table by name from pg_class and its pg_attribute rows.
+func (c *Catalog) DropTable(name string, missingOk bool) error {
+	rel, err := c.FindRelation(name)
+	if err != nil {
+		return err
+	}
+	if rel == nil {
+		if missingOk {
+			return nil
+		}
+		return fmt.Errorf("catalog: table %q does not exist", name)
+	}
+	if rel.Kind != RelKindTable {
+		return fmt.Errorf("catalog: %q is not a table", name)
+	}
+
+	// Delete pg_attribute rows for this relation.
+	if err := c.deleteAttributesByOID(rel.OID); err != nil {
+		return err
+	}
+
+	// Delete the pg_class row.
+	if err := c.deleteRelationByOID(rel.OID); err != nil {
+		return err
+	}
+
+	// Clean up constraints and temp table tracking.
+	delete(c.TempTables, name)
+	c.removeConstraintsForTable(name)
+	c.cache.invalidate()
+	return nil
+}
+
+// SetComment stores a comment for an object. key format: "table:name" or "column:table.col".
+func (c *Catalog) SetComment(key, comment string) {
+	if comment == "" {
+		delete(c.Comments, key)
+	} else {
+		c.Comments[key] = comment
+	}
+}
+
+// GetComment retrieves a comment for an object. Returns "" if none.
+func (c *Catalog) GetComment(key string) string {
+	return c.Comments[key]
+}
+
+// DropTempTables drops all temporary tables created in this session.
+func (c *Catalog) DropTempTables() {
+	for name := range c.TempTables {
+		c.DropTable(name, true)
+	}
+}
+
+// deleteAttributesByOID deletes all pg_attribute rows for a relation OID.
+func (c *Catalog) deleteAttributesByOID(oid int32) error {
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+
+	var targets []slottedpage.ItemID
+	c.Eng.SeqScan(c.Eng.Super.PgAttrPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) > 0 && tup.Columns[0].I32 == oid {
+			targets = append(targets, id)
+		}
+		return true
+	})
+
+	for _, id := range targets {
+		if err := c.Eng.Delete(xid, id); err != nil {
+			c.Eng.TxMgr.Abort(xid)
+			return err
+		}
+	}
+	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
+
+// removeConstraintsForTable removes CHECK and FK constraints for a table.
+func (c *Catalog) removeConstraintsForTable(name string) {
+	var checks []CheckConstraint
+	for _, cc := range c.CheckConstraints {
+		if cc.Table != name {
+			checks = append(checks, cc)
+		}
+	}
+	c.CheckConstraints = checks
+
+	var fks []ForeignKey
+	for _, fk := range c.ForeignKeys {
+		if fk.Table != name {
+			fks = append(fks, fk)
+		}
+	}
+	c.ForeignKeys = fks
 }
 
 // deleteRelationByOID soft-deletes the pg_class tuple with the given OID.

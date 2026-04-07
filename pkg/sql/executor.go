@@ -231,6 +231,11 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execDeallocate(ds)
 	}
 
+	// Handle COMMENT ON statements.
+	if cs, ok := stmt.(*parser.CommentStmt); ok {
+		return ex.execComment(cs)
+	}
+
 	// Handle SET statements.
 	if setVar, ok := stmt.(*parser.VariableSetStmt); ok {
 		if strings.EqualFold(setVar.Name, "role") && len(setVar.Args) > 0 {
@@ -599,4 +604,42 @@ func (ex *Executor) execShow(n *parser.VariableShowStmt) (*Result, error) {
 	}
 }
 
+func (ex *Executor) execComment(cs *parser.CommentStmt) (*Result, error) {
+	objName := ""
+	if len(cs.Object) > 0 {
+		objName = cs.Object[len(cs.Object)-1]
+	}
 
+	// Build a key based on object type and name.
+	var key string
+	switch cs.ObjType {
+	case parser.OBJECT_TABLE:
+		key = "table:" + objName
+	case parser.OBJECT_COLUMN:
+		// Object is [table, column] or [schema, table, column].
+		if len(cs.Object) >= 2 {
+			key = "column:" + cs.Object[len(cs.Object)-2] + "." + cs.Object[len(cs.Object)-1]
+		} else {
+			key = "column:" + objName
+		}
+	case parser.OBJECT_INDEX:
+		key = "index:" + objName
+	case parser.OBJECT_SCHEMA:
+		key = "schema:" + objName
+	case parser.OBJECT_VIEW:
+		key = "view:" + objName
+	case parser.OBJECT_FUNCTION:
+		key = "function:" + objName
+	case parser.OBJECT_SEQUENCE:
+		key = "sequence:" + objName
+	default:
+		key = fmt.Sprintf("object:%d:%s", cs.ObjType, objName)
+	}
+
+	comment := cs.Comment
+	if cs.IsNull {
+		comment = ""
+	}
+	ex.Cat.SetComment(key, comment)
+	return &Result{Message: "COMMENT"}, nil
+}

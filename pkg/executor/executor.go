@@ -364,6 +364,8 @@ func (ex *Executor) Execute(node planner.PhysicalNode) (*Result, error) {
 		return ex.execTruncate(n)
 	case *planner.PhysDropIndex:
 		return ex.execDropIndex(n)
+	case *planner.PhysDropTable:
+		return ex.execDropTable(n)
 	case *planner.PhysDropView:
 		return ex.execDropView(n)
 	case *planner.PhysAddColumn:
@@ -2023,6 +2025,11 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 		})
 	}
 
+	// Track temporary tables for session cleanup.
+	if n.IsTemp {
+		ex.Cat.TempTables[n.Table] = true
+	}
+
 	return &Result{Message: fmt.Sprintf("CREATE TABLE %s", n.Table)}, nil
 }
 
@@ -3298,6 +3305,13 @@ func (ex *Executor) execDropIndex(n *planner.PhysDropIndex) (*Result, error) {
 		return nil, err
 	}
 	return &Result{Message: "DROP INDEX"}, nil
+}
+
+func (ex *Executor) execDropTable(n *planner.PhysDropTable) (*Result, error) {
+	if err := ex.Cat.DropTable(n.Name, n.MissingOk); err != nil {
+		return nil, err
+	}
+	return &Result{Message: "DROP TABLE"}, nil
 }
 
 func (ex *Executor) execDropView(n *planner.PhysDropView) (*Result, error) {

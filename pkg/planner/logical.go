@@ -235,6 +235,7 @@ type LogicalCreateTable struct {
 	Schema      string // target schema (empty = current)
 	Columns     []ColDef
 	ForeignKeys []ForeignKeyDef
+	IsTemp      bool // CREATE TEMPORARY TABLE
 }
 
 type ColDef struct {
@@ -564,6 +565,16 @@ type LogicalDropView struct {
 
 func (n *LogicalDropView) String() string         { return fmt.Sprintf("DropView(%s)", n.Name) }
 func (n *LogicalDropView) OutputColumns() []string { return nil }
+
+// LogicalDropTable represents DROP TABLE.
+type LogicalDropTable struct {
+	Name      string
+	MissingOk bool
+	Cascade   bool
+}
+
+func (n *LogicalDropTable) String() string         { return fmt.Sprintf("DropTable(%s)", n.Name) }
+func (n *LogicalDropTable) OutputColumns() []string { return nil }
 
 // LogicalAddColumn represents ALTER TABLE ... ADD COLUMN.
 type LogicalAddColumn struct {

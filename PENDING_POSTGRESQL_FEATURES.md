@@ -59,13 +59,14 @@ SELECT * FROM t WHERE x BETWEEN SYMMETRIC 10 AND 5;
 Implemented: desugars to `(x >= a AND x <= b) OR (x >= b AND x <= a)`.
 NOT BETWEEN SYMMETRIC also supported.
 
-### 🟡 Row value comparisons
+### ✅ Row value comparisons
 
 ```sql
 SELECT * FROM t WHERE (a, b) > (1, 'x');
 ```
 
-Comparing composite row values. Not implemented.
+Row value comparisons expanded to element-wise scalar comparisons.
+Supports =, <>, <, >, <=, >= with lexicographic ordering.
 
 ### 🟢 Array operators (`@>`, `<@`, `&&`, `||`)
 
@@ -278,7 +279,7 @@ CREATE TABLE t (id INT PRIMARY KEY DEFERRABLE INITIALLY DEFERRED);
 
 ## 6. DDL
 
-### 🟡 ALTER TABLE ALTER COLUMN / RENAME COLUMN
+### ✅ ALTER TABLE ALTER COLUMN / RENAME COLUMN
 
 ```sql
 ALTER TABLE users ALTER COLUMN name SET NOT NULL;
@@ -286,8 +287,8 @@ ALTER TABLE users RENAME COLUMN name TO full_name;
 ALTER TABLE users ALTER COLUMN age TYPE BIGINT;
 ```
 
-ALTER TABLE supports ADD/DROP COLUMN but not ALTER COLUMN type, SET/DROP NOT NULL,
-SET/DROP DEFAULT, or RENAME COLUMN.
+Implemented: ALTER COLUMN TYPE, SET/DROP NOT NULL, SET/DROP DEFAULT, RENAME COLUMN,
+RENAME TO.
 
 ### ✅ CREATE TABLE ... AS / SELECT INTO
 
@@ -298,21 +299,33 @@ CREATE TABLE summary AS SELECT dept, count(*) FROM employees GROUP BY dept;
 Implemented: creates table from query result columns, inserts data. Supports
 IF NOT EXISTS and WITH NO DATA.
 
-### 🟡 CREATE TABLE ... LIKE
+### ✅ CREATE TABLE ... LIKE
 
 ```sql
 CREATE TABLE new_users (LIKE users INCLUDING ALL);
 ```
 
+Copies column definitions (name, type, NOT NULL, defaults, generated) from
+the source table. Additional columns can be added alongside LIKE.
+
 ### 🟡 ALTER INDEX / REINDEX
 
-### 🟡 CREATE TEMPORARY TABLE
+### ✅ CREATE TEMPORARY TABLE
 
 ```sql
 CREATE TEMP TABLE scratch (id INT, data TEXT);
 ```
 
-No temporary table support.
+Session-scoped temporary tables tracked for cleanup via `DropTempTables()`.
+
+### ✅ DROP TABLE
+
+```sql
+DROP TABLE users;
+DROP TABLE IF EXISTS users;
+```
+
+Removes the table, its pg_attribute rows, and associated constraints.
 
 ### 🟡 CREATE TABLE with INHERITS (table inheritance)
 
@@ -332,7 +345,10 @@ CREATE TABLE logs_2024 PARTITION OF logs FOR VALUES FROM ('2024-01-01') TO ('202
 
 ### 🟢 CREATE EXTENSION
 
-### 🟢 COMMENT ON
+### ✅ COMMENT ON
+
+Stores comments on tables, columns, indexes, schemas, views, functions,
+and sequences. Comments are stored in-memory and accessible via the catalog.
 
 ### 🟢 SECURITY LABEL
 
@@ -601,14 +617,14 @@ CREATE TABLE t (
 Stored generated columns are computed on INSERT and UPDATE. Explicit writes
 to generated columns are rejected.
 
-### 🟡 Identity columns (GENERATED ALWAYS AS IDENTITY)
+### ✅ Identity columns (GENERATED ALWAYS AS IDENTITY)
 
 ```sql
 CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY);
 ```
 
-SERIAL/BIGSERIAL work via sequences, but the SQL-standard identity column syntax
-is not supported.
+Identity columns auto-create a backing sequence and set the default to
+`nextval()`. SERIAL/BIGSERIAL also auto-create sequences now.
 
 ### 🟡 Materialized views
 
@@ -656,8 +672,6 @@ SELECT pg_advisory_lock(12345);
 | LATERAL joins | Queries |
 | GROUPING SETS / CUBE / ROLLUP | Queries |
 | FOR UPDATE / FOR SHARE | Transactions |
-
-| TEMPORARY tables | DDL |
 | Table partitioning | DDL |
 | JSON additional operators (`?|`, `?&`, `-`, `#-`) | Operators |
 | Array operators and indexing | Types |

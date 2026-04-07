@@ -304,6 +304,7 @@ type PhysCreateTable struct {
 	Schema      string // target schema (empty = current)
 	Columns     []ColDef
 	ForeignKeys []ForeignKeyDef
+	IsTemp      bool // CREATE TEMPORARY TABLE
 }
 
 func (n *PhysCreateTable) String() string            { return fmt.Sprintf("CreateTable %s", n.Table) }
@@ -640,6 +641,17 @@ type PhysDropView struct {
 func (n *PhysDropView) String() string            { return fmt.Sprintf("DropView %s", n.Name) }
 func (n *PhysDropView) Cost() PlanCost            { return PlanCost{} }
 func (n *PhysDropView) Children() []PhysicalNode  { return nil }
+
+// PhysDropTable represents DROP TABLE.
+type PhysDropTable struct {
+	Name      string
+	MissingOk bool
+	Cascade   bool
+}
+
+func (n *PhysDropTable) String() string            { return fmt.Sprintf("DropTable %s", n.Name) }
+func (n *PhysDropTable) Cost() PlanCost            { return PlanCost{} }
+func (n *PhysDropTable) Children() []PhysicalNode  { return nil }
 
 // PhysAddColumn represents ALTER TABLE ... ADD COLUMN.
 type PhysAddColumn struct {
