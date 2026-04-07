@@ -966,12 +966,31 @@ func (a *Analyzer) transformExpr(expr parser.Expr) (AnalyzedExpr, error) {
 			return nil, err
 		}
 		for _, ind := range e.Indirection {
-			if idx, ok := ind.(*parser.A_Indices); ok && idx.Uidx != nil {
-				idxExpr, err := a.transformExpr(idx.Uidx)
-				if err != nil {
-					return nil, err
+			if idx, ok := ind.(*parser.A_Indices); ok {
+				if idx.IsSlice {
+					// Array slice: arr[lo:hi]
+					var lower, upper AnalyzedExpr
+					if idx.Lidx != nil {
+						lower, err = a.transformExpr(idx.Lidx)
+						if err != nil {
+							return nil, err
+						}
+					}
+					if idx.Uidx != nil {
+						upper, err = a.transformExpr(idx.Uidx)
+						if err != nil {
+							return nil, err
+						}
+					}
+					arg = &ArraySliceExpr{Array: arg, Lower: lower, Upper: upper}
+				} else if idx.Uidx != nil {
+					// Array subscript: arr[idx]
+					idxExpr, err := a.transformExpr(idx.Uidx)
+					if err != nil {
+						return nil, err
+					}
+					arg = &ArraySubscriptExpr{Array: arg, Index: idxExpr}
 				}
-				arg = &ArraySubscriptExpr{Array: arg, Index: idxExpr}
 			}
 		}
 		return arg, nil
@@ -3534,7 +3553,9 @@ func isAggregateFunc(name string) bool {
 		"string_agg", "array_agg",
 		"stddev", "stddev_pop", "stddev_samp",
 		"variance", "var_pop", "var_samp",
-		"percentile_cont", "percentile_disc", "mode":
+		"percentile_cont", "percentile_disc", "mode",
+		"rank", "dense_rank", "percent_rank", "cume_dist",
+		"json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg":
 		return true
 	}
 	return false
@@ -3597,6 +3618,12 @@ func (a *Analyzer) transformFuncCall(f *parser.FuncCall) (AnalyzedExpr, error) {
 			retType = tuple.TypeFloat64
 		case "mode":
 			retType = tuple.TypeText
+		case "rank", "dense_rank":
+			retType = tuple.TypeInt64
+		case "percent_rank", "cume_dist":
+			retType = tuple.TypeFloat64
+		case "json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg":
+			retType = tuple.TypeJSON
 		default:
 			retType = tuple.TypeText
 		}

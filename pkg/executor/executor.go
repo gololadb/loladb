@@ -1171,6 +1171,17 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 				st.strBuf.WriteString(datumToStringVal(val))
 			case "array_agg":
 				st.arrBuf = append(st.arrBuf, val)
+			case "json_agg", "jsonb_agg":
+				st.arrBuf = append(st.arrBuf, val)
+			case "json_object_agg", "jsonb_object_agg":
+				// Collect key from first arg (val), value from second arg.
+				st.arrBuf = append(st.arrBuf, val)
+				if len(ad.ArgExprs) >= 2 {
+					val2, err := ad.ArgExprs[1].Eval(r)
+					if err == nil {
+						st.arrBuf = append(st.arrBuf, val2)
+					}
+				}
 			}
 			st.hasVal = true
 		}
@@ -1279,6 +1290,29 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 					}
 					sb.WriteByte('}')
 					row = append(row, tuple.DText(sb.String()))
+				}
+			case "json_agg", "jsonb_agg":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					var elems []interface{}
+					for _, v := range st.arrBuf {
+						elems = append(elems, datumToJSONValue(v))
+					}
+					out, _ := json.Marshal(elems)
+					row = append(row, tuple.DJSON(string(out)))
+				}
+			case "json_object_agg", "jsonb_object_agg":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DNull())
+				} else {
+					obj := map[string]interface{}{}
+					for i := 0; i+1 < len(st.arrBuf); i += 2 {
+						key := datumToStringVal(st.arrBuf[i])
+						obj[key] = datumToJSONValue(st.arrBuf[i+1])
+					}
+					out, _ := json.Marshal(obj)
+					row = append(row, tuple.DJSON(string(out)))
 				}
 			case "stddev", "stddev_samp":
 				// Sample standard deviation: sqrt((sumSq - sum²/n) / (n-1))
@@ -1389,6 +1423,96 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 					}
 					row = append(row, valMap[bestKey])
 				}
+			case "rank":
+				// Hypothetical rank: what rank would the arg have in the sorted set?
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DInt64(1))
+				} else {
+					hyp := tuple.DNull()
+					if len(ad.ArgExprs) > 0 {
+						hyp, _ = ad.ArgExprs[0].Eval(&planner.Row{})
+					}
+					sort.Slice(st.arrBuf, func(a, b int) bool {
+						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+					})
+					rank := int64(1)
+					for _, v := range st.arrBuf {
+						if planner.CompareDatums(v, hyp) < 0 {
+							rank++
+						} else {
+							break
+						}
+					}
+					row = append(row, tuple.DInt64(rank))
+				}
+			case "dense_rank":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DInt64(1))
+				} else {
+					hyp := tuple.DNull()
+					if len(ad.ArgExprs) > 0 {
+						hyp, _ = ad.ArgExprs[0].Eval(&planner.Row{})
+					}
+					sort.Slice(st.arrBuf, func(a, b int) bool {
+						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+					})
+					// Count distinct values less than hyp.
+					seen := map[string]bool{}
+					denseRank := int64(1)
+					for _, v := range st.arrBuf {
+						if planner.CompareDatums(v, hyp) < 0 {
+							key := datumToStringVal(v)
+							if !seen[key] {
+								seen[key] = true
+								denseRank++
+							}
+						}
+					}
+					row = append(row, tuple.DInt64(denseRank))
+				}
+			case "percent_rank":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DFloat64(0))
+				} else {
+					hyp := tuple.DNull()
+					if len(ad.ArgExprs) > 0 {
+						hyp, _ = ad.ArgExprs[0].Eval(&planner.Row{})
+					}
+					sort.Slice(st.arrBuf, func(a, b int) bool {
+						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+					})
+					rank := int64(0)
+					for _, v := range st.arrBuf {
+						if planner.CompareDatums(v, hyp) < 0 {
+							rank++
+						}
+					}
+					// percent_rank = (rank) / (N) where N includes the hypothetical row
+					n := float64(len(st.arrBuf))
+					row = append(row, tuple.DFloat64(float64(rank)/n))
+				}
+			case "cume_dist":
+				if len(st.arrBuf) == 0 {
+					row = append(row, tuple.DFloat64(1))
+				} else {
+					hyp := tuple.DNull()
+					if len(ad.ArgExprs) > 0 {
+						hyp, _ = ad.ArgExprs[0].Eval(&planner.Row{})
+					}
+					sort.Slice(st.arrBuf, func(a, b int) bool {
+						return planner.CompareDatums(st.arrBuf[a], st.arrBuf[b]) < 0
+					})
+					// Count values <= hyp.
+					count := int64(0)
+					for _, v := range st.arrBuf {
+						if planner.CompareDatums(v, hyp) <= 0 {
+							count++
+						}
+					}
+					// cume_dist = (count + 1) / (N + 1) — include the hypothetical row
+					n := float64(len(st.arrBuf)) + 1
+					row = append(row, tuple.DFloat64(float64(count+1)/n))
+				}
 			default:
 				row = append(row, tuple.DNull())
 			}
@@ -1422,6 +1546,31 @@ func datumToStringVal(d tuple.Datum) string {
 		return "false"
 	default:
 		return "NULL"
+	}
+}
+
+// datumToJSONValue converts a Datum to a Go value suitable for json.Marshal.
+func datumToJSONValue(d tuple.Datum) interface{} {
+	switch d.Type {
+	case tuple.TypeNull:
+		return nil
+	case tuple.TypeInt32:
+		return d.I32
+	case tuple.TypeInt64:
+		return d.I64
+	case tuple.TypeFloat64:
+		return d.F64
+	case tuple.TypeBool:
+		return d.Bool
+	case tuple.TypeJSON:
+		// Already JSON — unmarshal to preserve structure.
+		var v interface{}
+		if json.Unmarshal([]byte(d.Text), &v) == nil {
+			return v
+		}
+		return d.Text
+	default:
+		return d.Text
 	}
 }
 

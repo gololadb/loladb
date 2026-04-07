@@ -597,6 +597,8 @@ func analyzedToExpr(ae AnalyzedExpr, rtes []*RangeTblEntry) Expr {
 		return e
 	case *ArraySubscriptExpr:
 		return e
+	case *ArraySliceExpr:
+		return e
 	case *StarExpr:
 		return &ExprStar{}
 	case *CaseExprNode:

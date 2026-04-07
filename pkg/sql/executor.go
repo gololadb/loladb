@@ -241,6 +241,25 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execDeallocate(ds)
 	}
 
+	// Handle DO blocks (anonymous PL/pgSQL).
+	if ds, ok := stmt.(*parser.DoStmt); ok {
+		return ex.execDo(ds)
+	}
+
+	// Handle LISTEN / NOTIFY / UNLISTEN (accept syntax, no-op).
+	if ls, ok := stmt.(*parser.ListenStmt); ok {
+		_ = ls
+		return &Result{Message: "LISTEN"}, nil
+	}
+	if ns, ok := stmt.(*parser.NotifyStmt); ok {
+		_ = ns
+		return &Result{Message: "NOTIFY"}, nil
+	}
+	if us, ok := stmt.(*parser.UnlistenStmt); ok {
+		_ = us
+		return &Result{Message: "UNLISTEN"}, nil
+	}
+
 	// Handle REINDEX statements.
 	if rs, ok := stmt.(*parser.ReindexStmt); ok {
 		return ex.execReindex(rs)
@@ -765,6 +784,38 @@ func (ex *Executor) execComment(cs *parser.CommentStmt) (*Result, error) {
 	}
 	ex.Cat.SetComment(key, comment)
 	return &Result{Message: "COMMENT"}, nil
+}
+
+// execDo executes an anonymous PL/pgSQL block (DO $$ ... $$).
+func (ex *Executor) execDo(ds *parser.DoStmt) (*Result, error) {
+	body := ""
+	for _, arg := range ds.Args {
+		if arg.Defname == "as" {
+			if s, ok := arg.Arg.(*parser.String); ok {
+				body = s.Str
+			}
+		}
+	}
+	if body == "" {
+		return &Result{Message: "DO"}, nil
+	}
+
+	interp := plpgsql.New(func(sql string) (*plpgsql.SQLResult, error) {
+		r, err := ex.Exec(sql)
+		if err != nil {
+			return nil, err
+		}
+		return &plpgsql.SQLResult{
+			Columns: r.Columns,
+			Rows:    r.Rows,
+		}, nil
+	})
+
+	_, err := interp.ExecFunction(body, nil)
+	if err != nil {
+		return nil, fmt.Errorf("DO block: %w", err)
+	}
+	return &Result{Message: "DO"}, nil
 }
 
 // execReindex handles REINDEX TABLE/INDEX statements.

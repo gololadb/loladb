@@ -200,6 +200,80 @@ func (e *ArraySubscriptExpr) Eval(row *Row) (tuple.Datum, error) {
 	return tuple.DText(elements[idx-1]), nil
 }
 
+// ArraySliceExpr represents arr[lo:hi] (1-based, inclusive).
+type ArraySliceExpr struct {
+	Array Expr
+	Lower Expr // nil means from start (1)
+	Upper Expr // nil means to end
+}
+
+func (e *ArraySliceExpr) String() string              { return "arr[lo:hi]" }
+func (e *ArraySliceExpr) ResultType() tuple.DatumType  { return tuple.TypeText }
+func (e *ArraySliceExpr) Eval(row *Row) (tuple.Datum, error) {
+	arrVal, err := e.Array.Eval(row)
+	if err != nil {
+		return tuple.DNull(), err
+	}
+	if arrVal.Type != tuple.TypeText {
+		return tuple.DNull(), nil
+	}
+	s := arrVal.Text
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return tuple.DNull(), nil
+	}
+	inner := s[1 : len(s)-1]
+	if inner == "" {
+		return tuple.DText("{}"), nil
+	}
+	elements := strings.Split(inner, ",")
+
+	lo := 1
+	hi := len(elements)
+	if e.Lower != nil {
+		lv, err := e.Lower.Eval(row)
+		if err == nil {
+			if lv.Type == tuple.TypeInt32 {
+				lo = int(lv.I32)
+			} else if lv.Type == tuple.TypeInt64 {
+				lo = int(lv.I64)
+			}
+		}
+	}
+	if e.Upper != nil {
+		uv, err := e.Upper.Eval(row)
+		if err == nil {
+			if uv.Type == tuple.TypeInt32 {
+				hi = int(uv.I32)
+			} else if uv.Type == tuple.TypeInt64 {
+				hi = int(uv.I64)
+			}
+		}
+	}
+
+	// Convert to 0-based and clamp.
+	lo-- // 1-based to 0-based
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(elements) {
+		hi = len(elements)
+	}
+	if lo >= hi {
+		return tuple.DText("{}"), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteByte('{')
+	for i := lo; i < hi; i++ {
+		if i > lo {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(elements[i])
+	}
+	sb.WriteByte('}')
+	return tuple.DText(sb.String()), nil
+}
+
 // OpKind represents comparison and logical operators.
 type OpKind int
 

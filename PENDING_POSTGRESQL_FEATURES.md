@@ -68,9 +68,10 @@ SELECT * FROM t WHERE (a, b) > (1, 'x');
 Row value comparisons expanded to element-wise scalar comparisons.
 Supports =, <>, <, >, <=, >= with lexicographic ordering.
 
-### 🟢 Array operators (`@>`, `<@`, `&&`, `||`)
+### ✅ Array operators (`@>`, `<@`, `&&`)
 
-Not applicable until native array types are added.
+Implemented: containment (`@>`, `<@`) and overlap (`&&`). Still missing:
+concatenation (`||`) for arrays.
 
 ---
 
@@ -82,11 +83,11 @@ JSON/JSONB types support `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`
 (any key exists), `?&` (all keys exist), `-` (delete key/index), and `#-`
 (delete path).
 
-### 🟡 Array operators
+### ✅ Array operators
 
 Arrays have a native datum type, `TEXT[]` column syntax, `ARRAY[...]`
-constructor, `arr[1]` indexing, `unnest()`, and containment operators
-(`@>`, `<@`, `&&`). Still missing: slicing (`arr[2:4]`).
+constructor, `arr[1]` indexing, `arr[2:4]` slicing, `unnest()`, and
+containment operators (`@>`, `<@`, `&&`).
 
 ### 🟢 Geometric types (point, line, box, circle, polygon, path)
 
@@ -429,11 +430,27 @@ Implemented: `stddev`, `stddev_pop`, `stddev_samp`, `variance`, `var_pop`,
 `var_samp`. Still missing: `corr`, `covar_pop`, `covar_samp`, `regr_*`
 (two-variable statistics).
 
-### 🟡 Hypothetical-set aggregates
+### ✅ Hypothetical-set aggregates
 
-`rank(val) WITHIN GROUP (ORDER BY col)`, `dense_rank`, `percent_rank`, `cume_dist`.
+```sql
+SELECT rank(250) WITHIN GROUP (ORDER BY salary) FROM emp;
+SELECT dense_rank(15) WITHIN GROUP (ORDER BY score) FROM scores;
+```
 
-### 🟢 `xmlagg`, `json_agg`, `jsonb_agg`, `json_object_agg`
+Implemented: `rank`, `dense_rank`, `percent_rank`, `cume_dist` with WITHIN
+GROUP. Inserts the hypothetical value into the sorted set and computes position.
+
+### ✅ `json_agg`, `jsonb_agg`, `json_object_agg`, `jsonb_object_agg`
+
+```sql
+SELECT json_agg(name) FROM users;
+SELECT json_object_agg(key, value) FROM settings;
+```
+
+Implemented: `json_agg`/`jsonb_agg` collect values into a JSON array,
+`json_object_agg`/`jsonb_object_agg` collect key/value pairs into a JSON object.
+
+### 🟢 `xmlagg`
 
 ---
 
@@ -525,14 +542,16 @@ Physically reorder table rows to match an index.
 
 ### 🟢 pg_stat_statements / query statistics
 
-### 🟢 LISTEN / NOTIFY
+### ✅ LISTEN / NOTIFY
 
 ```sql
 LISTEN channel_name;
 NOTIFY channel_name, 'payload';
+UNLISTEN channel_name;
 ```
 
-Async notification system. Niche but useful for real-time applications.
+Syntax accepted (no-op). No real async notification channel — commands are
+parsed and acknowledged without side effects.
 
 ---
 
