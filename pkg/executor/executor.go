@@ -1063,9 +1063,11 @@ func (ex *Executor) execHashJoin(n *planner.PhysHashJoin) (*Result, error) {
 
 	colNames := append(outer.Columns, inner.Columns...)
 
-	// Extract the join columns from the condition.
-	binOp, ok := n.Condition.(*qt.ExprBinOp)
-	if !ok {
+	// Extract the equality condition for hashing. For compound conditions
+	// like "a.id = b.id AND b.col IS NULL", extract the equality part
+	// and use the full condition for post-hash filtering.
+	binOp := extractEquality(n.Condition)
+	if binOp == nil {
 		// Fall back to nested loop.
 		return ex.execNestedLoopJoin(&planner.PhysNestedLoopJoin{
 			Type: n.Type, Condition: n.Condition,
@@ -1081,6 +1083,7 @@ func (ex *Executor) execHashJoin(n *planner.PhysHashJoin) (*Result, error) {
 			Outer: n.Outer, Inner: n.Inner, Estimate: n.Estimate,
 		})
 	}
+	fullCondition := n.Condition // evaluate the full condition, not just equality
 
 	// Resolve column indices within inner and outer.
 	innerKeyIdx := resolveColIdx(rightCol, inner.Columns)
@@ -1113,6 +1116,11 @@ func (ex *Executor) execHashJoin(n *planner.PhysHashJoin) (*Result, error) {
 		matched := false
 		for _, idx := range hashTable[k] {
 			combined := append(append([]tuple.Datum{}, outerRow...), inner.Rows[idx]...)
+			// Evaluate the full join condition (not just equality).
+			row := &qt.Row{Columns: combined, Names: colNames}
+			if fullCondition != nil && !qt.EvalBool(fullCondition, row) {
+				continue
+			}
 			matched = true
 			innerMatched[idx] = true
 			result.Rows = append(result.Rows, combined)
@@ -3171,6 +3179,22 @@ func (ex *Executor) execCreateIndex(n *planner.PhysCreateIndex) (*Result, error)
 
 func datumToInt64(d tuple.Datum) (int64, bool) {
 	return index.DatumToInt64(d)
+}
+
+// extractEquality finds an equality ExprBinOp from a condition, looking
+// inside AND expressions. Returns nil if no equality is found.
+func extractEquality(cond qt.Expr) *qt.ExprBinOp {
+	if binOp, ok := cond.(*qt.ExprBinOp); ok && binOp.Op == qt.OpEq {
+		return binOp
+	}
+	if boolExpr, ok := cond.(*qt.BoolExprNode); ok && boolExpr.Op == qt.BoolAnd {
+		for _, arg := range boolExpr.Args {
+			if eq := extractEquality(arg); eq != nil {
+				return eq
+			}
+		}
+	}
+	return nil
 }
 
 func datumHashKey(d tuple.Datum) string {

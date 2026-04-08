@@ -2419,6 +2419,64 @@ func (c *Catalog) Stats(tableName string) (*TableStats, error) {
 		cur = next
 	}
 
+	// If the table is a partitioned parent with no direct tuples, scan children.
+	if stats.TupleCount == 0 {
+		if pinfo, ok := c.Partitions[tableName]; ok && len(pinfo.Children) > 0 {
+			for _, child := range pinfo.Children {
+				childRel, err := c.FindRelation(child.TableName)
+				if err != nil || childRel == nil {
+					continue
+				}
+				cur = uint32(childRel.HeadPage)
+				for cur != 0 {
+					pageBuf, err := c.Eng.Pool.FetchPage(cur)
+					if err != nil {
+						break
+					}
+					sp, err := slottedpage.FromBytes(pageBuf)
+					if err != nil {
+						c.Eng.Pool.ReleasePage(cur)
+						break
+					}
+					numSlots := sp.NumSlots()
+					for slot := uint16(0); slot < numSlots; slot++ {
+						if !sp.SlotIsAlive(slot) {
+							continue
+						}
+						raw, err := sp.GetTuple(slot)
+						if err != nil {
+							continue
+						}
+						tup, err := tuple.Decode(raw)
+						if err != nil {
+							continue
+						}
+						if snap.IsVisible(tup.Xmin, tup.Xmax) {
+							stats.TupleCount++
+							for i := 0; i < len(colNames) && i < len(tup.Columns); i++ {
+								d := tup.Columns[i]
+								if d.Type == tuple.TypeNull {
+									nullCounts[i]++
+									continue
+								}
+								key := datumKey(d)
+								if len(distinctSets[i]) < maxDistinctTrack {
+									distinctSets[i][key] = struct{}{}
+								}
+								freqMaps[i][key]++
+							}
+						} else if tup.Xmax != 0 {
+							stats.DeadCount++
+						}
+					}
+					next := sp.NextPage()
+					c.Eng.Pool.ReleasePage(cur)
+					cur = next
+				}
+			}
+		}
+	}
+
 	// Compute per-column stats including MCVs.
 	const maxMCV = 100 // PostgreSQL default: 100
 	for i, name := range colNames {

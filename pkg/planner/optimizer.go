@@ -1332,6 +1332,14 @@ func isEquiJoin(cond qt.Expr) bool {
 	if binOp, ok := cond.(*qt.ExprBinOp); ok {
 		return binOp.Op == qt.OpEq
 	}
+	// An AND expression is an equi-join if any conjunct is an equality.
+	if boolExpr, ok := cond.(*qt.BoolExprNode); ok && boolExpr.Op == qt.BoolAnd {
+		for _, arg := range boolExpr.Args {
+			if isEquiJoin(arg) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
