@@ -378,10 +378,11 @@ func (a *Analyzer) transformSelectStmt(n *parser.SelectStmt) (*qt.Query, error) 
 	}
 
 	// Step 6: Transform ORDER BY.
-	// Mirrors transformSortClause().
+	// Mirrors transformSortClause(). Output column names (aliases) are
+	// checked first, then we fall back to normal expression resolution.
 	if len(n.SortClause) > 0 {
 		for _, sb := range n.SortClause {
-			expr, err := a.transformExpr(sb.Node)
+			expr, err := a.resolveOrderByExpr(sb.Node, q.TargetList)
 			if err != nil {
 				return nil, err
 			}
@@ -1179,6 +1180,25 @@ func (a *Analyzer) transformColumnRef(ref *parser.ColumnRef) (qt.AnalyzedExpr, e
 
 // resolveColumnByName searches the range table for a matching column,
 // mirroring PostgreSQL's colNameToVar() / scanRTEForColumn().
+// resolveOrderByExpr resolves an ORDER BY expression. If the expression is a
+// simple unqualified column reference that matches a target list alias, the
+// corresponding target list expression is returned. Otherwise falls back to
+// normal expression resolution. This mirrors PostgreSQL's behavior where
+// output column names take precedence over input column names in ORDER BY.
+func (a *Analyzer) resolveOrderByExpr(node parser.Expr, targetList []*qt.TargetEntry) (qt.AnalyzedExpr, error) {
+	if ref, ok := node.(*parser.ColumnRef); ok && len(ref.Fields) == 1 {
+		if s, ok := ref.Fields[0].(*parser.String); ok {
+			name := strings.Trim(s.Str, "\"")
+			for _, te := range targetList {
+				if strings.EqualFold(te.Name, name) {
+					return te.Expr, nil
+				}
+			}
+		}
+	}
+	return a.transformExpr(node)
+}
+
 func (a *Analyzer) resolveColumnByName(colName, tableName string) (qt.AnalyzedExpr, error) {
 	colName = strings.Trim(colName, "\"")
 	tableName = strings.Trim(tableName, "\"")
@@ -2051,7 +2071,7 @@ func (a *Analyzer) transformSetOp(n *parser.SelectStmt) (*qt.Query, error) {
 	// Handle ORDER BY / LIMIT on the combined result.
 	if len(n.SortClause) > 0 {
 		for _, sc := range n.SortClause {
-			expr, err := a.transformExpr(sc.Node)
+			expr, err := a.resolveOrderByExpr(sc.Node, q.TargetList)
 			if err != nil {
 				return nil, err
 			}
