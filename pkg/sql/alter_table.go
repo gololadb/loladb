@@ -7,6 +7,7 @@ import (
 
 	"github.com/gololadb/gopgsql/parser"
 	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/tuple"
 )
 
 // tryExecAlterTable handles ALTER TABLE sub-commands that modify columns.
@@ -122,6 +123,15 @@ func (ex *Executor) execRenameStmt(rs *parser.RenameStmt) (*Result, error) {
 func (ex *Executor) tryPreParse(sql string) (*Result, bool) {
 	upper := strings.ToUpper(strings.TrimSpace(sql))
 
+	// CREATE TABLE child PARTITION OF parent FOR VALUES ...
+	if strings.HasPrefix(upper, "CREATE TABLE") && strings.Contains(upper, "PARTITION OF") {
+		r, err := ex.execCreatePartitionOf(sql)
+		if err != nil {
+			return &Result{Message: err.Error()}, true
+		}
+		return r, true
+	}
+
 	// ALTER TABLE parent ATTACH PARTITION child FOR VALUES ...
 	if strings.Contains(upper, "ATTACH PARTITION") {
 		r, err := ex.execAttachPartition(sql)
@@ -168,6 +178,91 @@ var (
 	reAttachDefault = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(\S+)\s+ATTACH\s+PARTITION\s+(\S+)\s+DEFAULT`)
 	reDetach        = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(\S+)\s+DETACH\s+PARTITION\s+(\S+)`)
 )
+
+// Regex patterns for CREATE TABLE ... PARTITION OF.
+var (
+	reCreatePartList    = regexp.MustCompile(`(?i)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s+PARTITION\s+OF\s+(\S+)\s+FOR\s+VALUES\s+IN\s*\(([^)]+)\)\s*;?\s*$`)
+	reCreatePartRange   = regexp.MustCompile(`(?i)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s+PARTITION\s+OF\s+(\S+)\s+FOR\s+VALUES\s+FROM\s*\(([^)]+)\)\s+TO\s*\(([^)]+)\)\s*;?\s*$`)
+	reCreatePartDefault = regexp.MustCompile(`(?i)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s+PARTITION\s+OF\s+(\S+)\s+DEFAULT\s*;?\s*$`)
+)
+
+// execCreatePartitionOf handles CREATE TABLE child PARTITION OF parent FOR VALUES ...
+// It creates the child table with the parent's column definitions and attaches it.
+func (ex *Executor) execCreatePartitionOf(sql string) (*Result, error) {
+	var child, parent string
+	var pc catalog.PartitionChild
+
+	if m := reCreatePartList.FindStringSubmatch(sql); m != nil {
+		child, parent = m[1], m[2]
+		pc = catalog.PartitionChild{
+			TableName:  child,
+			BoundType:  "list",
+			ListValues: splitTrimValues(m[3]),
+		}
+	} else if m := reCreatePartRange.FindStringSubmatch(sql); m != nil {
+		child, parent = m[1], m[2]
+		pc = catalog.PartitionChild{
+			TableName: child,
+			BoundType: "range",
+			RangeFrom: splitTrimValues(m[3]),
+			RangeTo:   splitTrimValues(m[4]),
+		}
+	} else if m := reCreatePartDefault.FindStringSubmatch(sql); m != nil {
+		child, parent = m[1], m[2]
+		pc = catalog.PartitionChild{
+			TableName: child,
+			BoundType: "default",
+		}
+	} else {
+		return nil, fmt.Errorf("unsupported CREATE TABLE ... PARTITION OF syntax")
+	}
+
+	// Strip schema prefix for lookup.
+	parentBase := parent
+	if idx := strings.LastIndex(parentBase, "."); idx >= 0 {
+		parentBase = parentBase[idx+1:]
+	}
+	childBase := child
+	if idx := strings.LastIndex(childBase, "."); idx >= 0 {
+		childBase = childBase[idx+1:]
+	}
+
+	// Verify parent is partitioned.
+	pinfo, ok := ex.Cat.Partitions[parentBase]
+	if !ok {
+		return nil, fmt.Errorf("table %q is not partitioned", parent)
+	}
+
+	// Get parent's columns to create the child with the same schema.
+	parentRel, _ := ex.Cat.FindRelation(parentBase)
+	if parentRel == nil {
+		return nil, fmt.Errorf("relation %q does not exist", parent)
+	}
+	parentCols, _ := ex.Cat.GetColumns(parentRel.OID)
+	if len(parentCols) == 0 {
+		return nil, fmt.Errorf("parent table %q has no columns", parent)
+	}
+
+	// Build a CREATE TABLE statement for the child with the parent's columns.
+	var colDefs []string
+	for _, col := range parentCols {
+		typeName := datumTypeToSQL(tuple.DatumType(col.Type))
+		colDefs = append(colDefs, fmt.Sprintf("%s %s", col.Name, typeName))
+	}
+	createSQL := fmt.Sprintf("CREATE TABLE %s (%s)", childBase, strings.Join(colDefs, ", "))
+
+	// Create the child table.
+	_, err := ex.Exec(createSQL)
+	if err != nil {
+		return nil, fmt.Errorf("creating partition %q: %w", child, err)
+	}
+
+	// Attach it to the parent.
+	pc.TableName = childBase
+	pinfo.Children = append(pinfo.Children, pc)
+
+	return &Result{Message: fmt.Sprintf("CREATE TABLE %s", child)}, nil
+}
 
 func (ex *Executor) execAttachPartition(sql string) (*Result, error) {
 	// Try LIST: FOR VALUES IN (...)
@@ -325,3 +420,39 @@ func resolveTypeOID(name string) int32 {
 		return 0
 	}
 }
+
+// datumTypeToSQL maps a DatumType back to a SQL type name for CREATE TABLE.
+func datumTypeToSQL(dt tuple.DatumType) string {
+	switch dt {
+	case tuple.TypeBool:
+		return "BOOLEAN"
+	case tuple.TypeInt32:
+		return "INT4"
+	case tuple.TypeInt64:
+		return "INT8"
+	case tuple.TypeFloat64:
+		return "FLOAT8"
+	case tuple.TypeText:
+		return "TEXT"
+	case tuple.TypeTimestamp:
+		return "TIMESTAMP"
+	case tuple.TypeNumeric:
+		return "NUMERIC"
+	case tuple.TypeJSON:
+		return "JSONB"
+	case tuple.TypeBytea:
+		return "BYTEA"
+	case tuple.TypeUUID:
+		return "UUID"
+	case tuple.TypeDate:
+		return "DATE"
+	case tuple.TypeInterval:
+		return "INTERVAL"
+	case tuple.TypeArray:
+		return "TEXT[]"
+	default:
+		return "TEXT"
+	}
+}
+
+
