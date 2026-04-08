@@ -245,6 +245,9 @@ func New(eng *storage.Engine) (*Catalog, error) {
 		return nil, fmt.Errorf("catalog: load triggers: %w", err)
 	}
 	c.loadCustomTypes()
+	if err := c.loadPartitions(); err != nil {
+		return nil, fmt.Errorf("catalog: load partitions: %w", err)
+	}
 
 	// Register built-in trigger functions so CREATE TRIGGER can reference them.
 	c.registerBuiltinTriggerFunctions()
@@ -550,6 +553,152 @@ func (c *Catalog) loadRules() error {
 			Enabled:    true,
 		}
 		c.Rules.AddRule(rule)
+		return true
+	})
+}
+
+// RegisterPartitionedTable persists a partitioned parent table and updates the
+// in-memory Partitions map.
+func (c *Catalog) RegisterPartitionedTable(name, strategy string, keyCols []string) error {
+	c.Partitions[name] = &PartitionInfo{
+		Strategy: strategy,
+		KeyCols:  keyCols,
+	}
+	return c.persistPartitionRow(name, "", strategy, strings.Join(keyCols, ","), "", "", "", "")
+}
+
+// AttachPartitionChild persists a child partition and adds it to the in-memory map.
+func (c *Catalog) AttachPartitionChild(parent string, child PartitionChild) error {
+	pinfo, ok := c.Partitions[parent]
+	if !ok {
+		return fmt.Errorf("table %q is not partitioned", parent)
+	}
+	pinfo.Children = append(pinfo.Children, child)
+	return c.persistPartitionRow(parent, child.TableName, pinfo.Strategy, strings.Join(pinfo.KeyCols, ","),
+		child.BoundType, strings.Join(child.ListValues, ","), strings.Join(child.RangeFrom, ","), strings.Join(child.RangeTo, ","))
+}
+
+// DetachPartitionChild removes a child partition from the in-memory map.
+// The persisted row is not deleted (it will be ignored on reload since it
+// won't appear in the children list), but we handle this by rewriting on load.
+func (c *Catalog) DetachPartitionChild(parent, child string) error {
+	pinfo, ok := c.Partitions[parent]
+	if !ok {
+		return fmt.Errorf("table %q is not partitioned", parent)
+	}
+	for i, ch := range pinfo.Children {
+		if strings.EqualFold(ch.TableName, child) {
+			pinfo.Children = append(pinfo.Children[:i], pinfo.Children[i+1:]...)
+			return c.deletePartitionRows(parent, child)
+		}
+	}
+	return fmt.Errorf("relation %q is not a partition of %q", child, parent)
+}
+
+func (c *Catalog) persistPartitionRow(parent, child, strategy, keycols, boundtype, listvals, rangefrom, rangeto string) error {
+	if c.Eng.Super.PgPartitionPage == 0 {
+		// Old database without pg_partition table — allocate a page.
+		page, err := c.Eng.AllocPage()
+		if err != nil {
+			return fmt.Errorf("catalog: alloc pg_partition page: %w", err)
+		}
+		c.Eng.Super.PgPartitionPage = page
+		if err := c.Eng.Super.Save(c.Eng.IO); err != nil {
+			return fmt.Errorf("catalog: save superblock: %w", err)
+		}
+	}
+	xid := c.Eng.TxMgr.Begin()
+	_, err := c.Eng.Insert(xid, c.Eng.Super.PgPartitionPage, []tuple.Datum{
+		tuple.DText(parent),
+		tuple.DText(child),
+		tuple.DText(strategy),
+		tuple.DText(keycols),
+		tuple.DText(boundtype),
+		tuple.DText(listvals),
+		tuple.DText(rangefrom),
+		tuple.DText(rangeto),
+	})
+	if err != nil {
+		c.Eng.TxMgr.Abort(xid)
+		return err
+	}
+	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
+
+func (c *Catalog) deletePartitionRows(parent, child string) error {
+	if c.Eng.Super.PgPartitionPage == 0 {
+		return nil
+	}
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	var toDelete []slottedpage.ItemID
+	c.Eng.SeqScan(c.Eng.Super.PgPartitionPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) >= 2 &&
+			strings.EqualFold(tup.Columns[0].Text, parent) &&
+			strings.EqualFold(tup.Columns[1].Text, child) {
+			toDelete = append(toDelete, id)
+		}
+		return true
+	})
+	for _, id := range toDelete {
+		c.Eng.Delete(xid, id)
+	}
+	c.Eng.TxMgr.Commit(xid)
+	return nil
+}
+
+// loadPartitions reads all partition metadata from pg_partition into the
+// in-memory Partitions map.
+func (c *Catalog) loadPartitions() error {
+	if c.Eng.Super.PgPartitionPage == 0 {
+		return nil // no partition table (old database)
+	}
+	xid := c.Eng.TxMgr.Begin()
+	snap := c.Eng.TxMgr.Snapshot(xid)
+	defer c.Eng.TxMgr.Commit(xid)
+
+	return c.Eng.SeqScan(c.Eng.Super.PgPartitionPage, snap, func(id slottedpage.ItemID, tup *tuple.Tuple) bool {
+		if len(tup.Columns) < 8 {
+			return true
+		}
+		parent := tup.Columns[0].Text
+		child := tup.Columns[1].Text
+		strategy := tup.Columns[2].Text
+		keycols := tup.Columns[3].Text
+		boundtype := tup.Columns[4].Text
+		listvals := tup.Columns[5].Text
+		rangefrom := tup.Columns[6].Text
+		rangeto := tup.Columns[7].Text
+
+		// Ensure parent entry exists.
+		pinfo, ok := c.Partitions[parent]
+		if !ok {
+			var kc []string
+			if keycols != "" {
+				kc = strings.Split(keycols, ",")
+			}
+			pinfo = &PartitionInfo{Strategy: strategy, KeyCols: kc}
+			c.Partitions[parent] = pinfo
+		}
+
+		// Add child if present.
+		if child != "" {
+			pc := PartitionChild{
+				TableName: child,
+				BoundType: boundtype,
+			}
+			if listvals != "" {
+				pc.ListValues = strings.Split(listvals, ",")
+			}
+			if rangefrom != "" {
+				pc.RangeFrom = strings.Split(rangefrom, ",")
+			}
+			if rangeto != "" {
+				pc.RangeTo = strings.Split(rangeto, ",")
+			}
+			pinfo.Children = append(pinfo.Children, pc)
+		}
 		return true
 	})
 }

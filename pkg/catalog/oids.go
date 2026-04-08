@@ -42,6 +42,7 @@ const (
 	OIDPgACL         = 6100 // LolaDB-specific, no PG equivalent
 	OIDPgProc        = 1255
 	OIDPgTrigger     = 2620
+	OIDPgPartition   = 6101 // LolaDB-specific: partition metadata
 
 	// Relation kinds stored in pg_class.relkind (TEXT, single char).
 	RelKindOrdinaryTable_S = "r"

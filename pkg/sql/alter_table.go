@@ -2,7 +2,6 @@ package sql
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/gololadb/gopgsql/parser"
@@ -85,6 +84,36 @@ func (ex *Executor) tryExecAlterTable(n *parser.AlterTableStmt) (*Result, bool) 
 		}
 		return &Result{Message: "ALTER TABLE"}, true
 
+	case parser.AT_AttachPartition:
+		pc, ok := cmd.Def.(*parser.PartitionCmd)
+		if !ok || pc == nil {
+			return &Result{Message: "ATTACH PARTITION: missing partition command"}, true
+		}
+		child := pc.Name.Relname
+		pchild := boundSpecToPartitionChild(child, pc.Bound)
+		if _, ok := ex.Cat.Partitions[tableName]; !ok {
+			return &Result{Message: fmt.Sprintf("table %q is not partitioned", tableName)}, true
+		}
+		rel, _ := ex.Cat.FindRelation(child)
+		if rel == nil {
+			return &Result{Message: fmt.Sprintf("relation %q does not exist", child)}, true
+		}
+		if err := ex.Cat.AttachPartitionChild(tableName, pchild); err != nil {
+			return &Result{Message: err.Error()}, true
+		}
+		return &Result{Message: "ALTER TABLE"}, true
+
+	case parser.AT_DetachPartition:
+		pc, ok := cmd.Def.(*parser.PartitionCmd)
+		if !ok || pc == nil {
+			return &Result{Message: "DETACH PARTITION: missing partition command"}, true
+		}
+		child := pc.Name.Relname
+		if err := ex.Cat.DetachPartitionChild(tableName, child); err != nil {
+			return &Result{Message: err.Error()}, true
+		}
+		return &Result{Message: "ALTER TABLE"}, true
+
 	default:
 		return nil, false
 	}
@@ -121,126 +150,27 @@ func (ex *Executor) execRenameStmt(rs *parser.RenameStmt) (*Result, error) {
 // tryPreParse handles SQL statements the parser doesn't support natively.
 // Returns (result, true) if handled, or (nil, false) to fall through.
 func (ex *Executor) tryPreParse(sql string) (*Result, bool) {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-
-	// CREATE TABLE child PARTITION OF parent FOR VALUES ...
-	if strings.HasPrefix(upper, "CREATE TABLE") && strings.Contains(upper, "PARTITION OF") {
-		r, err := ex.execCreatePartitionOf(sql)
-		if err != nil {
-			return &Result{Message: err.Error()}, true
-		}
-		return r, true
-	}
-
-	// ALTER TABLE parent ATTACH PARTITION child FOR VALUES ...
-	if strings.Contains(upper, "ATTACH PARTITION") {
-		r, err := ex.execAttachPartition(sql)
-		if err != nil {
-			return &Result{Message: err.Error()}, true
-		}
-		return r, true
-	}
-
-	// ALTER TABLE parent DETACH PARTITION child
-	if strings.Contains(upper, "DETACH PARTITION") {
-		r, err := ex.execDetachPartition(sql)
-		if err != nil {
-			return &Result{Message: err.Error()}, true
-		}
-		return r, true
-	}
-
-	// CLUSTER [table [USING index]] — accept as no-op.
-	if reCluster.MatchString(upper) {
-		return &Result{Message: "CLUSTER"}, true
-	}
-
-	// ALTER TABLE ONLY ... — strip ONLY and re-execute.
-	if reAlterTableOnly.MatchString(sql) {
-		stripped := reAlterTableOnly.ReplaceAllString(sql, "ALTER TABLE $1")
-		r, err := ex.Exec(stripped)
-		if err != nil {
-			return &Result{Message: err.Error()}, true
-		}
-		return r, true
-	}
-
 	return nil, false
 }
 
-var reAlterTableOnly = regexp.MustCompile(`(?i)^ALTER\s+TABLE\s+ONLY\s+(.+)$`)
-var reCluster = regexp.MustCompile(`(?i)^CLUSTER\b`)
-
-// Regex patterns for ATTACH PARTITION.
-var (
-	reAttachList    = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(\S+)\s+ATTACH\s+PARTITION\s+(\S+)\s+FOR\s+VALUES\s+IN\s*\(([^)]+)\)`)
-	reAttachRange   = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(\S+)\s+ATTACH\s+PARTITION\s+(\S+)\s+FOR\s+VALUES\s+FROM\s*\(([^)]+)\)\s+TO\s*\(([^)]+)\)`)
-	reAttachDefault = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(\S+)\s+ATTACH\s+PARTITION\s+(\S+)\s+DEFAULT`)
-	reDetach        = regexp.MustCompile(`(?i)ALTER\s+TABLE\s+(\S+)\s+DETACH\s+PARTITION\s+(\S+)`)
-)
-
-// Regex patterns for CREATE TABLE ... PARTITION OF.
-var (
-	reCreatePartList    = regexp.MustCompile(`(?i)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s+PARTITION\s+OF\s+(\S+)\s+FOR\s+VALUES\s+IN\s*\(([^)]+)\)\s*;?\s*$`)
-	reCreatePartRange   = regexp.MustCompile(`(?i)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s+PARTITION\s+OF\s+(\S+)\s+FOR\s+VALUES\s+FROM\s*\(([^)]+)\)\s+TO\s*\(([^)]+)\)\s*;?\s*$`)
-	reCreatePartDefault = regexp.MustCompile(`(?i)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s+PARTITION\s+OF\s+(\S+)\s+DEFAULT\s*;?\s*$`)
-)
-
-// execCreatePartitionOf handles CREATE TABLE child PARTITION OF parent FOR VALUES ...
-// It creates the child table with the parent's column definitions and attaches it.
-func (ex *Executor) execCreatePartitionOf(sql string) (*Result, error) {
-	var child, parent string
-	var pc catalog.PartitionChild
-
-	if m := reCreatePartList.FindStringSubmatch(sql); m != nil {
-		child, parent = m[1], m[2]
-		pc = catalog.PartitionChild{
-			TableName:  child,
-			BoundType:  "list",
-			ListValues: splitTrimValues(m[3]),
-		}
-	} else if m := reCreatePartRange.FindStringSubmatch(sql); m != nil {
-		child, parent = m[1], m[2]
-		pc = catalog.PartitionChild{
-			TableName: child,
-			BoundType: "range",
-			RangeFrom: splitTrimValues(m[3]),
-			RangeTo:   splitTrimValues(m[4]),
-		}
-	} else if m := reCreatePartDefault.FindStringSubmatch(sql); m != nil {
-		child, parent = m[1], m[2]
-		pc = catalog.PartitionChild{
-			TableName: child,
-			BoundType: "default",
-		}
-	} else {
-		return nil, fmt.Errorf("unsupported CREATE TABLE ... PARTITION OF syntax")
-	}
-
-	// Strip schema prefix for lookup.
-	parentBase := parent
-	if idx := strings.LastIndex(parentBase, "."); idx >= 0 {
-		parentBase = parentBase[idx+1:]
-	}
-	childBase := child
-	if idx := strings.LastIndex(childBase, "."); idx >= 0 {
-		childBase = childBase[idx+1:]
-	}
+// execCreatePartitionOfParsed handles a parsed CREATE TABLE ... PARTITION OF statement.
+func (ex *Executor) execCreatePartitionOfParsed(cs *parser.CreateStmt) (*Result, error) {
+	childName := cs.Relation.Relname
+	parentName := cs.PartitionOf.Relname
 
 	// Verify parent is partitioned.
-	pinfo, ok := ex.Cat.Partitions[parentBase]
-	if !ok {
-		return nil, fmt.Errorf("table %q is not partitioned", parent)
+	if _, ok := ex.Cat.Partitions[parentName]; !ok {
+		return nil, fmt.Errorf("table %q is not partitioned", parentName)
 	}
 
 	// Get parent's columns to create the child with the same schema.
-	parentRel, _ := ex.Cat.FindRelation(parentBase)
+	parentRel, _ := ex.Cat.FindRelation(parentName)
 	if parentRel == nil {
-		return nil, fmt.Errorf("relation %q does not exist", parent)
+		return nil, fmt.Errorf("relation %q does not exist", parentName)
 	}
 	parentCols, _ := ex.Cat.GetColumns(parentRel.OID)
 	if len(parentCols) == 0 {
-		return nil, fmt.Errorf("parent table %q has no columns", parent)
+		return nil, fmt.Errorf("parent table %q has no columns", parentName)
 	}
 
 	// Build a CREATE TABLE statement for the child with the parent's columns.
@@ -249,114 +179,58 @@ func (ex *Executor) execCreatePartitionOf(sql string) (*Result, error) {
 		typeName := datumTypeToSQL(tuple.DatumType(col.Type))
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", col.Name, typeName))
 	}
-	createSQL := fmt.Sprintf("CREATE TABLE %s (%s)", childBase, strings.Join(colDefs, ", "))
+	createSQL := fmt.Sprintf("CREATE TABLE %s (%s)", childName, strings.Join(colDefs, ", "))
 
 	// Create the child table.
 	_, err := ex.Exec(createSQL)
 	if err != nil {
-		return nil, fmt.Errorf("creating partition %q: %w", child, err)
+		return nil, fmt.Errorf("creating partition %q: %w", childName, err)
 	}
 
 	// Attach it to the parent.
-	pc.TableName = childBase
-	pinfo.Children = append(pinfo.Children, pc)
+	pc := boundSpecToPartitionChild(childName, cs.PartBound)
+	if err := ex.Cat.AttachPartitionChild(parentName, pc); err != nil {
+		return nil, err
+	}
 
-	return &Result{Message: fmt.Sprintf("CREATE TABLE %s", child)}, nil
+	return &Result{Message: fmt.Sprintf("CREATE TABLE %s", childName)}, nil
 }
 
-func (ex *Executor) execAttachPartition(sql string) (*Result, error) {
-	// Try LIST: FOR VALUES IN (...)
-	if m := reAttachList.FindStringSubmatch(sql); m != nil {
-		parent, child := m[1], m[2]
-		vals := splitTrimValues(m[3])
-		return ex.attachPartitionChild(parent, child, catalog.PartitionChild{
-			TableName:  child,
-			BoundType:  "list",
-			ListValues: vals,
-		})
+// boundSpecToPartitionChild converts a parser.PartitionBoundSpec to a catalog.PartitionChild.
+func boundSpecToPartitionChild(childName string, bound *parser.PartitionBoundSpec) catalog.PartitionChild {
+	pc := catalog.PartitionChild{TableName: childName}
+	if bound == nil {
+		return pc
 	}
-
-	// Try RANGE: FOR VALUES FROM (...) TO (...)
-	if m := reAttachRange.FindStringSubmatch(sql); m != nil {
-		parent, child := m[1], m[2]
-		fromVals := splitTrimValues(m[3])
-		toVals := splitTrimValues(m[4])
-		return ex.attachPartitionChild(parent, child, catalog.PartitionChild{
-			TableName: child,
-			BoundType: "range",
-			RangeFrom: fromVals,
-			RangeTo:   toVals,
-		})
+	if bound.IsDefault {
+		pc.BoundType = "default"
+		return pc
 	}
-
-	// Try DEFAULT
-	if m := reAttachDefault.FindStringSubmatch(sql); m != nil {
-		parent, child := m[1], m[2]
-		return ex.attachPartitionChild(parent, child, catalog.PartitionChild{
-			TableName: child,
-			BoundType: "default",
-		})
-	}
-
-	return nil, fmt.Errorf("unsupported ATTACH PARTITION syntax")
-}
-
-func (ex *Executor) attachPartitionChild(parent, child string, pc catalog.PartitionChild) (*Result, error) {
-	pinfo, ok := ex.Cat.Partitions[parent]
-	if !ok {
-		return nil, fmt.Errorf("table %q is not partitioned", parent)
-	}
-
-	// Verify child table exists.
-	rel, _ := ex.Cat.FindRelation(child)
-	if rel == nil {
-		return nil, fmt.Errorf("relation %q does not exist", child)
-	}
-
-	pinfo.Children = append(pinfo.Children, pc)
-	return &Result{Message: "ALTER TABLE"}, nil
-}
-
-func (ex *Executor) execDetachPartition(sql string) (*Result, error) {
-	m := reDetach.FindStringSubmatch(sql)
-	if m == nil {
-		return nil, fmt.Errorf("unsupported DETACH PARTITION syntax")
-	}
-	parent, child := m[1], m[2]
-
-	pinfo, ok := ex.Cat.Partitions[parent]
-	if !ok {
-		return nil, fmt.Errorf("table %q is not partitioned", parent)
-	}
-
-	found := false
-	for i, c := range pinfo.Children {
-		if strings.EqualFold(c.TableName, child) {
-			pinfo.Children = append(pinfo.Children[:i], pinfo.Children[i+1:]...)
-			found = true
-			break
+	if bound.Strategy == "list" {
+		pc.BoundType = "list"
+		for _, v := range bound.ListValues {
+			pc.ListValues = append(pc.ListValues, deparseAndTrimQuotes(v))
+		}
+	} else {
+		pc.BoundType = "range"
+		for _, v := range bound.LowerBound {
+			pc.RangeFrom = append(pc.RangeFrom, deparseAndTrimQuotes(v))
+		}
+		for _, v := range bound.UpperBound {
+			pc.RangeTo = append(pc.RangeTo, deparseAndTrimQuotes(v))
 		}
 	}
-	if !found {
-		return nil, fmt.Errorf("relation %q is not a partition of %q", child, parent)
-	}
-
-	return &Result{Message: "ALTER TABLE"}, nil
+	return pc
 }
 
-// splitTrimValues splits a comma-separated list and trims whitespace and quotes.
-func splitTrimValues(s string) []string {
-	parts := strings.Split(s, ",")
-	result := make([]string, len(parts))
-	for i, p := range parts {
-		p = strings.TrimSpace(p)
-		// Strip surrounding single quotes.
-		if len(p) >= 2 && p[0] == '\'' && p[len(p)-1] == '\'' {
-			p = p[1 : len(p)-1]
-		}
-		result[i] = p
+// deparseAndTrimQuotes deparses an expression and strips surrounding single quotes.
+func deparseAndTrimQuotes(e parser.Expr) string {
+	s := parser.DeparseExpr(e)
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		s = s[1 : len(s)-1]
 	}
-	return result
+	return s
 }
 
 // execAlterOwnerStmt handles ALTER object_type name OWNER TO newowner.

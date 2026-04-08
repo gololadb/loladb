@@ -53,6 +53,10 @@ func runImport(path string) {
 	var copyColTypes []int32
 	inCopy := false
 
+	// Partition routing state for COPY into partitioned tables.
+	var copyPartInfo *catalog.PartitionInfo
+	var copyPartKeyIdx int
+
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
@@ -73,8 +77,17 @@ func runImport(path string) {
 				stmtCount++
 				continue
 			}
+			// Determine target table (route to child partition if applicable).
+			targetTable := copyTable
+			if copyPartInfo != nil && copyPartKeyIdx >= 0 {
+				fields := strings.Split(line, "\t")
+				if copyPartKeyIdx < len(fields) && fields[copyPartKeyIdx] != "\\N" {
+					keyVal := strings.Trim(strings.TrimSpace(fields[copyPartKeyIdx]), "'\"")
+					targetTable = routeCopyToPartition(copyPartInfo, keyVal, copyTable)
+				}
+			}
 			// Parse tab-separated row and insert.
-			err := insertCopyRow(cat, copyTable, copyCols, copyColTypes, line)
+			err := insertCopyRow(cat, targetTable, copyCols, copyColTypes, line)
 			if err != nil {
 				// Only report first few errors per COPY.
 				if copyCount < 3 {
@@ -141,6 +154,19 @@ func runImport(path string) {
 			copyCols = cols
 			copyCount = 0
 			copyColTypes = lookupColTypes(cat, copyTable, copyCols)
+
+			// Check if this is a partitioned table and set up routing.
+			copyPartInfo = nil
+			copyPartKeyIdx = -1
+			if pinfo, ok := cat.Partitions[tbl]; ok && len(pinfo.Children) > 0 && len(pinfo.KeyCols) > 0 {
+				copyPartInfo = pinfo
+				for i, c := range cols {
+					if strings.EqualFold(c, pinfo.KeyCols[0]) {
+						copyPartKeyIdx = i
+						break
+					}
+				}
+			}
 			continue
 		}
 
@@ -661,4 +687,39 @@ func parseTimestampCopy(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("unrecognized timestamp: %q", s)
+}
+
+// routeCopyToPartition returns the child table name for a given partition
+// key value, or falls back to the parent table if no match is found.
+func routeCopyToPartition(pinfo *catalog.PartitionInfo, keyVal, parentTable string) string {
+	for _, child := range pinfo.Children {
+		if child.BoundType == "default" {
+			continue
+		}
+		switch pinfo.Strategy {
+		case "list":
+			for _, lv := range child.ListValues {
+				if strings.EqualFold(strings.TrimSpace(lv), keyVal) {
+					return child.TableName
+				}
+			}
+		case "range":
+			if len(child.RangeFrom) > 0 && len(child.RangeTo) > 0 {
+				from := strings.TrimSpace(child.RangeFrom[0])
+				to := strings.TrimSpace(child.RangeTo[0])
+				if keyVal >= from && keyVal < to {
+					return child.TableName
+				}
+			}
+		case "hash":
+			return child.TableName
+		}
+	}
+	// Fallback to default partition if one exists.
+	for _, child := range pinfo.Children {
+		if child.BoundType == "default" {
+			return child.TableName
+		}
+	}
+	return parentTable
 }

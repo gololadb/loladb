@@ -3002,9 +3002,8 @@ func (ex *Executor) execCreateTable(n *planner.PhysCreateTable) (*Result, error)
 
 	// Register partition metadata for partitioned tables.
 	if n.PartitionStrategy != "" {
-		ex.Cat.Partitions[n.Table] = &catalog.PartitionInfo{
-			Strategy: n.PartitionStrategy,
-			KeyCols:  n.PartitionKeyCols,
+		if err := ex.Cat.RegisterPartitionedTable(n.Table, n.PartitionStrategy, n.PartitionKeyCols); err != nil {
+			return nil, fmt.Errorf("register partition: %w", err)
 		}
 	}
 

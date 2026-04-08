@@ -3,6 +3,9 @@ package sql
 import (
 	"strings"
 	"testing"
+
+	"github.com/gololadb/loladb/pkg/catalog"
+	"github.com/gololadb/loladb/pkg/storage"
 )
 
 func mustExecR(t *testing.T, ex *Executor, sql string) *Result {
@@ -162,6 +165,106 @@ func TestAlterTableOnlyOwnerTo(t *testing.T) {
 	r := mustExecR(t, ex, "ALTER TABLE ONLY only_tbl2 OWNER TO bob")
 	if r.Message != "ALTER TABLE" {
 		t.Fatalf("expected ALTER TABLE, got %s", r.Message)
+	}
+}
+
+// --- Partition persistence across reopen ---
+
+func TestPartitionPersistenceAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/part_persist.lodb"
+
+	// Session 1: create partitioned table, insert data.
+	{
+		eng, err := storage.Open(path, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cat, err := catalog.New(eng)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ex := NewExecutor(cat)
+
+		mustExec(t, ex, "CREATE TABLE payments (id INT, region TEXT, amount INT) PARTITION BY LIST (region)")
+		mustExec(t, ex, "CREATE TABLE payments_east (id INT, region TEXT, amount INT)")
+		mustExec(t, ex, "CREATE TABLE payments_west (id INT, region TEXT, amount INT)")
+		mustExec(t, ex, "ALTER TABLE payments ATTACH PARTITION payments_east FOR VALUES IN ('east')")
+		mustExec(t, ex, "ALTER TABLE payments ATTACH PARTITION payments_west FOR VALUES IN ('west')")
+		mustExec(t, ex, "INSERT INTO payments VALUES (1, 'east', 100)")
+		mustExec(t, ex, "INSERT INTO payments VALUES (2, 'west', 200)")
+		mustExec(t, ex, "INSERT INTO payments VALUES (3, 'east', 300)")
+
+		eng.Close()
+	}
+
+	// Session 2: reopen and query.
+	{
+		eng, err := storage.Open(path, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer eng.Close()
+		cat, err := catalog.New(eng)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ex := NewExecutor(cat)
+
+		r := mustExecR(t, ex, "SELECT id, region, amount FROM payments ORDER BY id")
+		if len(r.Rows) != 3 {
+			t.Fatalf("expected 3 rows from parent after reopen, got %d", len(r.Rows))
+		}
+		if r.Rows[0][1].Text != "east" {
+			t.Fatalf("expected row 1 region=east, got %s", r.Rows[0][1].Text)
+		}
+	}
+}
+
+// --- CREATE TABLE ... PARTITION OF persistence ---
+
+func TestCreatePartitionOfPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/partof_persist.lodb"
+
+	// Session 1: create using PARTITION OF syntax.
+	{
+		eng, err := storage.Open(path, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cat, err := catalog.New(eng)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ex := NewExecutor(cat)
+
+		mustExec(t, ex, "CREATE TABLE metrics (id INT, ts TEXT, val INT) PARTITION BY RANGE (ts)")
+		mustExec(t, ex, "CREATE TABLE metrics_2024 PARTITION OF metrics FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')")
+		mustExec(t, ex, "CREATE TABLE metrics_2025 PARTITION OF metrics FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')")
+		mustExec(t, ex, "INSERT INTO metrics VALUES (1, '2024-06-15', 42)")
+		mustExec(t, ex, "INSERT INTO metrics VALUES (2, '2025-03-20', 99)")
+
+		eng.Close()
+	}
+
+	// Session 2: reopen and verify.
+	{
+		eng, err := storage.Open(path, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer eng.Close()
+		cat, err := catalog.New(eng)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ex := NewExecutor(cat)
+
+		r := mustExecR(t, ex, "SELECT id, val FROM metrics ORDER BY id")
+		if len(r.Rows) != 2 {
+			t.Fatalf("expected 2 rows after reopen, got %d", len(r.Rows))
+		}
 	}
 }
 

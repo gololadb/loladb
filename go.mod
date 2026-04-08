@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/chzyer/readline v1.5.1
-	github.com/gololadb/gopgsql v0.0.0-20260402162253-c786476b19d8
+	github.com/gololadb/gopgsql v0.0.0-20260408090300-9bf533518bfa
 	github.com/gololadb/goplpgsql v0.0.0-20260402143152-31cbef9eddbf
 )
 
@@ -39,3 +39,5 @@ require (
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.3.8 // indirect
 )
+
+replace github.com/gololadb/gopgsql => ../gopgsql/

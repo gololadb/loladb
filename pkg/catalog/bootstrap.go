@@ -24,6 +24,7 @@ func (c *Catalog) bootstrap() error {
 		OIDPgNamespace, OIDPgType, OIDPgClass, OIDPgAttribute,
 		OIDPgIndex, OIDPgAuthID, OIDPgAuthMembers, OIDPgACL,
 		OIDPgRewrite, OIDPgPolicy, OIDPgProc, OIDPgTrigger,
+		OIDPgPartition,
 	}
 	for _, oid := range catalogOIDs {
 		page, err := c.Eng.AllocPage()
@@ -45,6 +46,7 @@ func (c *Catalog) bootstrap() error {
 	c.Eng.Super.PgACLPage = pages[OIDPgACL]
 	c.Eng.Super.PgProcPage = pages[OIDPgProc]
 	c.Eng.Super.PgTriggerPage = pages[OIDPgTrigger]
+	c.Eng.Super.PgPartitionPage = pages[OIDPgPartition]
 	if err := c.Eng.Super.Save(c.Eng.IO); err != nil {
 		return fmt.Errorf("bootstrap: write superblock: %w", err)
 	}
@@ -81,6 +83,7 @@ func (c *Catalog) bootstrap() error {
 		{OIDPgPolicy, "pg_policy"},
 		{OIDPgProc, "pg_proc"},
 		{OIDPgTrigger, "pg_trigger"},
+		{OIDPgPartition, "pg_partition"},
 	}
 	for _, t := range catTables {
 		row := pgClassRow(t.oid, t.name, OIDPgCatalog, RelKindOrdinaryTable_S,
@@ -362,6 +365,16 @@ func catalogColumnDefs() [][]tuple.Datum {
 		{OIDPgTrigger, "tgtiming", OIDInt4, 4, 5},
 		{OIDPgTrigger, "tgevents", OIDInt4, 4, 6},
 		{OIDPgTrigger, "tgforeach", OIDText, -1, 7},
+
+		// pg_partition columns (matches persistPartition* in catalog.go)
+		{OIDPgPartition, "parent", OIDText, -1, 1},
+		{OIDPgPartition, "child", OIDText, -1, 2},
+		{OIDPgPartition, "strategy", OIDText, -1, 3},
+		{OIDPgPartition, "keycols", OIDText, -1, 4},
+		{OIDPgPartition, "boundtype", OIDText, -1, 5},
+		{OIDPgPartition, "listvals", OIDText, -1, 6},
+		{OIDPgPartition, "rangefrom", OIDText, -1, 7},
+		{OIDPgPartition, "rangeto", OIDText, -1, 8},
 	}
 
 	var rows [][]tuple.Datum

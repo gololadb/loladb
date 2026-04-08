@@ -369,6 +369,15 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 		return ex.execRenameStmt(rs)
 	}
 
+	// Handle CREATE TABLE ... PARTITION OF directly.
+	if cs, ok := stmt.(*parser.CreateStmt); ok && cs.PartitionOf != nil {
+		r, err := ex.execCreatePartitionOfParsed(cs)
+		if err != nil {
+			return nil, err
+		}
+		return r, nil
+	}
+
 	// Handle ALTER TABLE column-level operations directly.
 	if alt, ok := stmt.(*parser.AlterTableStmt); ok {
 		if r, handled := ex.tryExecAlterTable(alt); handled {
@@ -477,6 +486,11 @@ func (ex *Executor) Exec(sql string) (*Result, error) {
 	// Handle COPY statements (bypass analyzer — COPY is a utility).
 	if cs, ok := stmt.(*parser.CopyStmt); ok {
 		return ex.execCopy(cs)
+	}
+
+	// Handle CLUSTER (accept as no-op).
+	if _, ok := stmt.(*parser.ClusterStmt); ok {
+		return &Result{Message: "CLUSTER"}, nil
 	}
 
 	// Handle VACUUM / ANALYZE statements.
