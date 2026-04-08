@@ -90,17 +90,22 @@ func queryToSelectPlan(q *qt.Query) (LogicalNode, error) {
 	if q.HasAggs || len(q.GroupClause) > 0 {
 		var groupExprs []qt.Expr
 		for _, g := range q.GroupClause {
-			groupExprs = append(groupExprs, analyzedToExpr(g, q.RangeTable))
+			expr := analyzedToExpr(g, q.RangeTable)
+			resetExprColumnIndices(expr)
+			groupExprs = append(groupExprs, expr)
 		}
 		var aggDescs []AggDesc
 		for _, ref := range q.AggRefs {
 			var argExprs []qt.Expr
 			for _, a := range ref.Args {
-				argExprs = append(argExprs, analyzedToExpr(a, q.RangeTable))
+				expr := analyzedToExpr(a, q.RangeTable)
+				resetExprColumnIndices(expr)
+				argExprs = append(argExprs, expr)
 			}
 			var withinExpr qt.Expr
 			if ref.WithinGroupExpr != nil {
 				withinExpr = analyzedToExpr(ref.WithinGroupExpr, q.RangeTable)
+				resetExprColumnIndices(withinExpr)
 			}
 			aggDescs = append(aggDescs, AggDesc{
 				Func:            ref.AggFunc,
@@ -797,6 +802,41 @@ func equalFold(a, b string) bool {
 // - qt.ExprAggRef: sets NumGroupExprs so they read from the right offset
 // - qt.ExprColumn: resets Index to -1 to force name-based lookup (the
 //   aggregate output has a different column layout than the scan)
+// resetExprColumnIndices sets Index = -1 on all ExprColumn nodes in the
+// expression tree, forcing name-based lookup at execution time. This is
+// necessary because the optimizer may reorder joins, making the original
+// AttIndex values from the analyzer point to the wrong column positions.
+func resetExprColumnIndices(expr qt.Expr) {
+	switch e := expr.(type) {
+	case *qt.ExprColumn:
+		e.Index = -1
+	case *qt.ExprBinOp:
+		resetExprColumnIndices(e.Left)
+		resetExprColumnIndices(e.Right)
+	case *qt.ExprNot:
+		resetExprColumnIndices(e.Child)
+	case *qt.ExprIsNull:
+		resetExprColumnIndices(e.Child)
+	case *qt.ExprFunc:
+		for _, a := range e.Args {
+			resetExprColumnIndices(a)
+		}
+	case *qt.ExprCast:
+		resetExprColumnIndices(e.Inner)
+	case *qt.ExprCase:
+		if e.Arg != nil {
+			resetExprColumnIndices(e.Arg)
+		}
+		for _, w := range e.Whens {
+			resetExprColumnIndices(w.Cond)
+			resetExprColumnIndices(w.Result)
+		}
+		if e.ElseExpr != nil {
+			resetExprColumnIndices(e.ElseExpr)
+		}
+	}
+}
+
 func patchAggExprs(expr qt.Expr, numGroupExprs int) {
 	switch e := expr.(type) {
 	case *qt.ExprAggRef:

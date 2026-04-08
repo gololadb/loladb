@@ -1375,14 +1375,27 @@ func (ex *Executor) execAggregate(n *planner.PhysAggregate) (*Result, error) {
 		name := expr.String()
 		// Try to match against child column names for better resolution.
 		if ec, ok := expr.(*qt.ExprColumn); ok {
-			for _, cn := range child.Columns {
-				bare := cn
-				if idx := strings.LastIndex(cn, "."); idx >= 0 {
-					bare = cn[idx+1:]
+			// When the expression is table-qualified (e.g. a1.id),
+			// match the full qualified name first to avoid picking
+			// the wrong column when multiple tables share a column name.
+			if ec.Table != "" {
+				qualified := ec.Table + "." + ec.Column
+				for _, cn := range child.Columns {
+					if strings.EqualFold(cn, qualified) {
+						name = cn
+						break
+					}
 				}
-				if strings.EqualFold(bare, ec.Column) {
-					name = cn
-					break
+			} else {
+				for _, cn := range child.Columns {
+					bare := cn
+					if idx := strings.LastIndex(cn, "."); idx >= 0 {
+						bare = cn[idx+1:]
+					}
+					if strings.EqualFold(bare, ec.Column) {
+						name = cn
+						break
+					}
 				}
 			}
 		}
